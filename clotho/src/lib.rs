@@ -15,13 +15,20 @@
 pub mod ast;
 pub mod error;
 pub mod lexer;
+pub mod macros;
 pub mod parser;
+pub mod pipeline;
 pub mod token;
 
 /// Parse a complete program from a source string.
 pub fn parse_source(src: &str) -> Result<ast::Program, error::Diag> {
     let mut p = parser::Parser::from_source(src);
     p.parse_program()
+}
+
+/// Parse a complete program through the concurrent macro-expansion pipeline.
+pub fn compile_source(src: &str) -> Result<ast::Program, error::Diag> {
+    pipeline::compile(src)
 }
 
 /// Tokenize a source string into a vector of tokens.

@@ -467,6 +467,7 @@ fn keyword(name: &str) -> Option<TokenKind> {
         "struct" => Struct,
         "enum" => Enum,
         "match" => Match,
+        "macro" => Macro,
         "true" => True,
         "false" => False,
         "mut" => Mut,

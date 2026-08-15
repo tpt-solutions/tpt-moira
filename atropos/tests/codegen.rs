@@ -10,7 +10,7 @@ use std::process::Command;
 
 fn demo_path() -> PathBuf {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    dir.join("..").join("examples").join("codegen_demo.rs")
+    dir.join("..").join("demos").join("codegen_demo.rs")
 }
 
 fn lower_demo() -> atropos::MirProgram {
