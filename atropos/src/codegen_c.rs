@@ -49,7 +49,7 @@ fn emit_function(f: &mir::Function) -> String {
         .iter()
         .map(|p| {
             let t = param_types.get(p.as_str()).copied().unwrap_or("long long");
-            format!("{} {}", t, p)
+            format!("{} {}", c_type(t), p)
         })
         .collect();
     let param_str = if params.is_empty() {

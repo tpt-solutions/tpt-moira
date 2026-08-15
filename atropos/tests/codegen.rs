@@ -64,14 +64,33 @@ fn c_emission_contains_expected_shapes() {
     assert!(c.contains("goto b"), "expected basic-block gotos in C");
 }
 
-/// Attempt to locate a C compiler. Returns the command to invoke for
-/// `compiler -O2 input -o output`.
+/// Attempt to locate a *working* C compiler: one that not only reports a version
+/// but can actually compile a trivial program (so we don't fail when only a bare
+/// toolchain stub is present, e.g. a clang without system headers).
 fn find_cc() -> Option<String> {
+    let dir = std::env::temp_dir();
+    let probe = dir.join("moira_cc_probe.c");
+    std::fs::write(&probe, "int main(void){return 0;}\n").ok()?;
+    let out = dir.join("moira_cc_probe");
     for cc in ["gcc", "clang", "cc", "clang-cl"] {
-        if Command::new(cc).arg("--version").output().is_ok() {
+        if Command::new(cc).arg("--version").output().is_err() {
+            continue;
+        }
+        let status = if cc == "clang-cl" {
+            Command::new(cc)
+                .arg(&probe)
+                .arg(format!("/Fe:{}", out.display()))
+                .status()
+        } else {
+            Command::new(cc).arg("-O2").arg(&probe).arg("-o").arg(&out).status()
+        };
+        if status.map(|s| s.success()).unwrap_or(false) {
+            let _ = std::fs::remove_file(&out);
+            let _ = std::fs::remove_file(&probe);
             return Some(cc.to_string());
         }
     }
+    let _ = std::fs::remove_file(&probe);
     None
 }
 
