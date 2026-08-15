@@ -1,0 +1,11 @@
+[package]
+name = "clotho"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Clotho: Moira's streaming lexer, parser, and AST frontend"
+
+[dependencies]

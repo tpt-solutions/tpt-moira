@@ -1,0 +1,29 @@
+[package]
+name = "moira"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "TPT Moira: a from-scratch, high-performance Rust compiler"
+license = "MIT OR Apache-2.0"
+authors = ["TPT Solutions"]
+repository = "https://github.com/tpt-solutions/moira"
+readme = "README.md"
+
+[workspace]
+members = ["clotho", "lachesis", "atropos", "moira-alloc"]
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+authors = ["TPT Solutions"]
+repository = "https://github.com/tpt-solutions/moira"
+
+[dependencies]
+clotho = { path = "clotho" }
+lachesis = { path = "lachesis" }
+atropos = { path = "atropos" }
+
+[[bin]]
+name = "moira"
+path = "src/main.rs"

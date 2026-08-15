@@ -1,0 +1,36 @@
+# Design Document: TPT Moira
+**Project:** TPT Moira (High-Performance Rust Compiler)
+**Status:** Draft
+**Author:** TPT Core Team
+**Date:** 2026-08-15
+
+## 1. Executive Summary
+TPT Moira is a from-scratch, high-performance compiler for the Rust programming language. While `rustc` is the reference implementation, it is notoriously burdened by slow compilation times and heavy memory usage. Moira’s primary mandate is to achieve 100% semantic compatibility with the Rust language while delivering compilation speeds that are an order of magnitude faster. It achieves this through a radically reimagined, single-pass architecture, aggressive incremental caching, and a highly parallelized borrow checker.
+
+## 2. Core Architecture & Design Philosophy
+Moira’s architecture is directly inspired by its namesake: the Moirai, the three Greek Fates who controlled the thread of life. The compiler pipeline is divided into three distinct, highly optimized phases.
+* **Philosophy:** "Spin the syntax, measure the lifetimes, cut the bloat." Moira prioritizes developer iteration speed above all else. If a compilation step does not directly contribute to the safety or performance of the final binary, it is optimized or discarded.
+* **Memory Model:** The compiler itself is written in Rust and utilizes a custom, region-based memory allocator for its internal data structures, ensuring near-zero garbage collection overhead and predictable memory usage during massive builds.
+
+## 3. Key Subsystems
+1. **Clotho (The Frontend & Parser):** Named after the Fate who spun the thread. Clotho is a highly parallelized, streaming lexer and parser. It builds the Abstract Syntax Tree (AST) and resolves macro expansions concurrently with file I/O, ensuring the CPU is never waiting on disk reads.
+2. **Lachesis (The Type System & Borrow Checker):** Named after the Fate who measured the thread. This is the heart of Moira. It handles type inference, trait resolution, and the Non-Lexical Lifetime (NLL) borrow graph solver. Lachesis uses a novel, heavily optimized graph-traversal algorithm to prove memory safety without the exponential blowup seen in older solver implementations.
+3. **Atropos (The Optimizer & Codegen):** Named after the Fate who cut the thread. Atropos takes the verified Mid-level IR (MIR) and translates it into native machine code. Instead of relying on the heavy LLVM backend, Moira utilizes a custom, lightweight SSA backend (or a highly optimized integration with Cranelift) designed specifically for fast code generation rather than absolute peak runtime optimization.
+
+## 4. Technical Strategy & Implementation Details
+* **Language:** Written entirely in Rust. 
+* **Bootstrapping:** Moira will be bootstrapped using a "Stage 0" transpiler that converts a strict, macro-free subset of Moira's source code into C, which is then compiled to a native binary. This binary compiles the full Rust source of Moira (Stage 1), which then compiles itself (Stage 2) to verify correctness.
+* **Incremental Compilation:** Moira features a disk-backed, content-addressed cache (similar to Salsa, but optimized for raw speed). It tracks dependencies at the expression level, meaning changing a single line of code only recompiles the exact functions that depend on it.
+* **Trait Solver:** Implements the next-generation, Chalk-like Prolog-style trait solver to handle complex trait coherence and specialization, but utilizes aggressive memoization and early-exit heuristics to prevent the solver from hanging on pathological inputs.
+
+## 5. Major Technical Challenges & Mitigations
+* **Challenge:** The NLL borrow checker requires computing the strongly connected components of massive borrow graphs, which is computationally expensive.
+    * *Mitigation:* Implement a "fast-path" borrow checker for simple, local scopes that bypasses the full graph solver. Only fall back to the full NLL graph analysis for complex, cross-function lifetime annotations.
+* **Challenge:** Achieving 100% compatibility with `rustc`'s error messages and edge-case behaviors.
+    * *Mitigation:* Build a continuous integration pipeline that runs the entire `rustc` test suite (including UI tests for error messages) nightly. Use AI-assisted diffing to automatically flag and fix divergence in compiler output.
+
+## 6. Phased Roadmap
+* **Phase 1 (Months 1-8): The "No-Magic" Compiler.** Implement Clotho and a basic Atropos. Compile a strict subset of Rust: no complex trait resolution, no async/await, no advanced lifetime elision. Focus entirely on achieving a 10x speed improvement over `rustc` for this subset.
+* **Phase 2 (Months 9-16): The Lachesis Integration.** Implement the full type system and the core NLL borrow checker. Moira can now compile standard, idiomatic Rust code safely. 
+* **Phase 3 (Months 17-24): The Full Language.** Implement async/await state machine generation, complex macro expansion, and the next-generation trait solver. 
+* **Phase 4 (Months 25-30): The Ouroboros & Production.** Moira compiles itself. Achieve self-hosting parity. Final optimization pass to ensure Moira compiles the Linux kernel and massive crates.io dependencies at least 5x faster than the official `rustc`.

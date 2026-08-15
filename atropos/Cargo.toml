@@ -1,0 +1,13 @@
+[package]
+name = "atropos"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Atropos: Moira's MIR lowering, SSA backend, and codegen"
+
+[dependencies]
+clotho = { path = "../clotho" }
+moira-alloc = { path = "../moira-alloc" }
