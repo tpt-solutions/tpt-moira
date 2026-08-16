@@ -78,11 +78,19 @@ fn compute_slots(func: &SsaFunction) -> Slots {
                 }
             }
         }
-        for (n, blocks) in name_blocks {
-            if blocks.len() >= 2 && !named.contains_key(&n) {
-                named.insert(n, next);
-                next += 1;
-            }
+        // Assign a single shared slot to every cross-block merge name. Iterate
+        // in *sorted* order so the slot numbering is deterministic regardless of
+        // the `HashMap`'s per-process iteration order (which would otherwise
+        // break byte-identical output between stages).
+        let mut merge_names: Vec<String> = name_blocks
+            .into_iter()
+            .filter(|(n, blocks)| blocks.len() >= 2 && !named.contains_key(n))
+            .map(|(n, _)| n)
+            .collect();
+        merge_names.sort();
+        for n in merge_names {
+            named.insert(n, next);
+            next += 1;
         }
     }
     // Value slots.

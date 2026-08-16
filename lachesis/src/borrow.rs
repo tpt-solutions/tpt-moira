@@ -311,7 +311,7 @@ fn reachable_from(start: usize, succs: &[Vec<usize>]) -> HashSet<usize> {
 
 fn operands_of(rv: &Rvalue) -> Vec<String> {
     match rv {
-        Rvalue::Use(o) | Rvalue::Unary(_, o) | Rvalue::Ref(o, _) | Rvalue::Field(o, _) => names(o),
+        Rvalue::Use(o) | Rvalue::Unary(_, o) | Rvalue::Ref(o, _) | Rvalue::Field(o, _, _) => names(o),
         Rvalue::Binary(_, l, r) => {
             let mut v = names(l);
             v.extend(names(r));
@@ -319,6 +319,11 @@ fn operands_of(rv: &Rvalue) -> Vec<String> {
         }
         Rvalue::Call(_, args) => args.iter().flat_map(names).collect(),
         Rvalue::StructLit(_, fields) => fields.iter().flat_map(|(_, o)| names(o)).collect(),
+        // `StoreField` only appears in the `async fn` state-machine MIR, which is
+        // generated for the C backend; the borrow checker still runs over the
+        // whole MIR, so it must be exhaustive here (it never reads a stored
+        // future field as a borrow).
+        Rvalue::StoreField(_, _, v, _) => names(v),
     }
 }
 

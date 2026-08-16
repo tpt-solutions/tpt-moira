@@ -138,7 +138,20 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
         self-hostable, blocked by generics (`<`) and `mod` parsing gaps.
   - [ ] Verify behavior parity of the self-compiled binary
 - [ ] **Stage 2 self-host: Moira-compiled-Moira compiles itself again**
-  - [ ] Deterministic MIR/SSA output across stages
+  - [x] **Deterministic MIR/SSA output across stages**
+    - Status: the MIR/SSA/C/native-ASM emit paths no longer iterate hash
+      maps in emit order, so identical source yields byte-identical output
+      regardless of which binary (stage-0 rustc-built vs. stage-1
+      Moira-built) produced it. Concretely: `mir` now renders via a
+      deterministic `Display` (the old `{:#?}` walked the `temp_types`
+      `HashMap`, whose order is randomized per process); the C backend sorts
+      `temp_types` before emitting declarations; the native backend assigns
+      cross-block merge slots in sorted name order; and `lower` now publishes
+      the inferred temporary types into `mir::Function::temp_types` (previously
+      always empty). A new integration test (`tests/determinism.rs`) runs
+      `moira --emit {mir,ssa,c,asm}` twice as *separate processes* (caching
+      disabled via `MOIRA_NO_CACHE=1`) and asserts the two outputs are
+      identical — the exact cross-stage condition.
   - [ ] Verify output parity (stage-1 == stage-2 binary)
 - [ ] **Final cross-subsystem optimization pass**
   - [ ] Parallelize type-check + borrow-check passes

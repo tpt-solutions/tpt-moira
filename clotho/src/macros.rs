@@ -175,6 +175,8 @@ fn expand_item(item: &Item, table: &MacroTable) -> Item {
         ItemKind::Function(f) => ItemKind::Function(ast::Function {
             name: f.name.clone(),
             generics: f.generics.clone(),
+            is_async: f.is_async,
+            is_unsafe: f.is_unsafe,
             params: f.params.clone(),
             ret: f.ret.clone(),
             body: expand_block(&f.body, table),

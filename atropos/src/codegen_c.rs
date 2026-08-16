@@ -15,30 +15,35 @@ pub fn emit_c(prog: &mir::Program) -> String {
     // Built-in used by the Stage-0 subset for observable output during testing.
     out.push_str("void print_i32(long long x) { printf(\"%lld\\n\", x); }\n\n");
 
+    // Names of all struct types so that struct-typed fields/params can be
+    // emitted with the required `struct` keyword in C.
+    let struct_names: std::collections::HashSet<&str> =
+        prog.structs.iter().map(|s| s.name.as_str()).collect();
+
     for s in &prog.structs {
         out.push_str(&format!("struct {} {{\n", s.name));
         for (fname, fty) in &s.fields {
-            out.push_str(&format!("    {} {};\n", c_type(fty), fname));
+            out.push_str(&format!("    {} {};\n", c_type(fty, &struct_names), fname));
         }
         out.push_str("};\n\n");
     }
 
     for f in &prog.functions {
-        out.push_str(&emit_function(f));
+        out.push_str(&emit_function(f, &struct_names));
         out.push('\n');
     }
 
     out
 }
 
-fn emit_function(f: &mir::Function) -> String {
+fn emit_function(f: &mir::Function, struct_names: &std::collections::HashSet<&str>) -> String {
     let ret = if f.name == "main" {
         "int".to_string()
     } else {
         f.ret
             .clone()
             .as_deref()
-            .map(c_type)
+            .map(|t| c_type(t, struct_names))
             .unwrap_or_else(|| "void".to_string())
     };
 
@@ -53,7 +58,7 @@ fn emit_function(f: &mir::Function) -> String {
         .iter()
         .map(|p| {
             let t = param_types.get(p.as_str()).copied().unwrap_or("long long");
-            format!("{} {}", c_type(t), p)
+            format!("{} {}", c_type(t, struct_names), p)
         })
         .collect();
     let param_str = if params.is_empty() {
@@ -64,25 +69,47 @@ fn emit_function(f: &mir::Function) -> String {
 
     let mut out = format!("{} {}({}) {{\n", ret, f.name, param_str);
 
-    // Local variable declarations.
+    // Local variable declarations. Skip locals that are also parameters or that
+    // have already been declared (the async poll path may register a slot as
+    // both a pre-declared local and again when lowering its `let`), to avoid a C
+    // redeclaration error.
+    let mut declared: std::collections::HashSet<&str> =
+        f.params.iter().map(|p| p.as_str()).collect();
     for (name, ty) in &f.locals {
+        if declared.contains(name.as_str()) {
+            continue;
+        }
+        declared.insert(name.as_str());
         let t = ty
             .clone()
             .as_deref()
-            .map(c_type)
+            .map(|t| c_type(t, struct_names))
             .unwrap_or_else(|| "long long".to_string());
         out.push_str(&format!("    {} {};\n", t, name));
     }
-    // SSA temporary declarations.
-    for (name, ty) in &f.temp_types {
-        out.push_str(&format!("    {} {};\n", c_type(ty), name));
+    // SSA temporary declarations. Iterate in a deterministic (sorted) order so
+    // the emitted C is identical across runs/processes — `temp_types` is a
+    // `HashMap`, whose iteration order is otherwise randomized per process and
+    // would break stage-1 == stage-2 output parity.
+    let mut temps: Vec<(&String, &String)> = f.temp_types.iter().collect();
+    temps.sort_by(|a, b| a.0.cmp(b.0));
+    for (name, ty) in temps {
+        out.push_str(&format!("    {} {};\n", c_type(ty, struct_names), name));
     }
     out.push('\n');
 
     for (i, block) in f.blocks.iter().enumerate() {
         out.push_str(&format!("b{}:\n", i));
         for s in &block.stmts {
-            out.push_str(&format!("    {} = {};\n", s.place, emit_rvalue(&s.rvalue)));
+            match &s.rvalue {
+                // StoreField renders its own full assignment (no destination).
+                mir::Rvalue::StoreField(..) => {
+                    out.push_str(&format!("    {};\n", emit_rvalue(&s.rvalue)));
+                }
+                _ => {
+                    out.push_str(&format!("    {} = {};\n", s.place, emit_rvalue(&s.rvalue)));
+                }
+            }
         }
         out.push_str(&emit_terminator(&block.term));
         out.push('\n');
@@ -102,20 +129,19 @@ fn emit_operand(o: &mir::Operand) -> String {
 
 /// Map a Moira primitive type name to its C equivalent. Struct type names and
 /// unknown names pass through unchanged.
-fn c_type(ty: &str) -> String {
+fn c_type(ty: &str, struct_names: &std::collections::HashSet<&str>) -> String {
+    // A struct-typed field/param must be emitted with the `struct` keyword in
+    // C (it is not a typedef). Handle an optional trailing `*` (pointer) too.
+    if let Some(stripped) = ty.strip_suffix('*') {
+        if struct_names.contains(stripped.trim()) {
+            return format!("struct {}*", stripped.trim());
+        }
+    } else if struct_names.contains(ty) {
+        return format!("struct {}", ty);
+    }
     let mapped = match ty {
-        "i8" => "int8_t",
-        "i16" => "int16_t",
-        "i32" => "int32_t",
-        "i64" => "int64_t",
-        "i128" => "int64_t", // widened; demo avoids 128-bit arithmetic
-        "isize" => "intptr_t",
-        "u8" => "uint8_t",
-        "u16" => "uint16_t",
-        "u32" => "uint32_t",
-        "u64" => "uint64_t",
-        "u128" => "uint64_t",
-        "usize" => "size_t",
+        "i8" | "i16" | "i32" | "i64" | "i128" | "isize" => "long long",
+        "u8" | "u16" | "u32" | "u64" | "u128" | "usize" => "unsigned long long",
         "bool" => "int",
         "char" => "char",
         "f32" => "float",
@@ -146,10 +172,23 @@ fn emit_rvalue(rv: &mir::Rvalue) -> String {
                 .iter()
                 .map(|(f, v)| format!(".{} = {}", f, emit_operand(v)))
                 .collect();
-            format!("({}){{ {} }}", name, inits.join(", "))
+            format!("(struct {}){{ {} }}", name, inits.join(", "))
         }
-        mir::Rvalue::Field(o, f) => format!("{}.{}", emit_operand(o), f),
+        mir::Rvalue::Field(o, f, deref) => {
+            if *deref {
+                format!("{}->{}", emit_operand(o), f)
+            } else {
+                format!("{}.{}", emit_operand(o), f)
+            }
+        }
         mir::Rvalue::Ref(o, _) => format!("&{}", emit_operand(o)),
+        mir::Rvalue::StoreField(s, f, v, deref) => {
+            if *deref {
+                format!("{}->{} = {}", emit_operand(s), f, emit_operand(v))
+            } else {
+                format!("{}.{} = {}", emit_operand(s), f, emit_operand(v))
+            }
+        }
     }
 }
 
@@ -191,6 +230,15 @@ fn emit_terminator(t: &mir::Terminator) -> String {
         }
         mir::Terminator::Return(Some(v)) => format!("    return {};\n", emit_operand(v)),
         mir::Terminator::Return(None) => "    return;\n".to_string(),
+        mir::Terminator::Switch(disc, cases, default) => {
+            let mut s = format!("    switch ({}) {{\n", emit_operand(disc));
+            for (label, target) in cases {
+                s.push_str(&format!("        case {}: goto b{};\n", label, target));
+            }
+            s.push_str(&format!("        default: goto b{};\n", default));
+            s.push_str("    }\n");
+            s
+        }
         mir::Terminator::Unreachable => "    ;\n".to_string(),
     }
 }

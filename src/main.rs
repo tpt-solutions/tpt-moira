@@ -107,7 +107,7 @@ fn main() -> ExitCode {
             }
         }
         "mir" => match atropos::lower_program(&program) {
-            Ok(mir) => println!("{:#?}", mir),
+            Ok(mir) => println!("{mir}"),
             Err(e) => {
                 eprintln!("moira: lowering error: {}", e);
                 return ExitCode::FAILURE;
@@ -166,7 +166,7 @@ fn main() -> ExitCode {
 
 fn lower_and_ssa(program: &clotho::ast::Program) -> Result<atropos::SsaProgram, String> {
     let mir = atropos::lower_program(program).map_err(|e| e.to_string())?;
-    let mut ssa = atropos::build_ssa(&mir);
+    let mut ssa = atropos::build_ssa(&mir)?;
     ssa.optimize();
     Ok(ssa)
 }
@@ -177,15 +177,21 @@ fn lower_and_ssa(program: &clotho::ast::Program) -> Result<atropos::SsaProgram, 
 fn ssa_text(source: &str, program: &clotho::ast::Program) -> Result<String, String> {
     let key = lachesis::content_hash(source);
     let cache_dir = std::env::temp_dir().join("moira_cache");
-    if let Ok(cache) = Cache::open(&cache_dir) {
-        if let Some(bytes) = cache.get(key) {
-            if let Ok(s) = String::from_utf8(bytes) {
-                return Ok(s);
+    // `MOIRA_NO_CACHE=1` bypasses the incremental cache so the SSA is recomputed
+    // from scratch every invocation. This is what makes cross-process
+    // determinism checks (and reproducible self-host builds) meaningful: without
+    // it, a cached first run would mask any nondeterminism in the emit path.
+    if std::env::var("MOIRA_NO_CACHE").is_err() {
+        if let Ok(cache) = Cache::open(&cache_dir) {
+            if let Some(bytes) = cache.get(key) {
+                if let Ok(s) = String::from_utf8(bytes) {
+                    return Ok(s);
+                }
             }
+            let s = lower_and_ssa(program).map(|ssa| ssa.to_string())?;
+            let _ = cache.insert(key, s.as_bytes());
+            return Ok(s);
         }
-        let s = lower_and_ssa(program).map(|ssa| ssa.to_string())?;
-        let _ = cache.insert(key, s.as_bytes());
-        return Ok(s);
     }
     lower_and_ssa(program).map(|ssa| ssa.to_string())
 }

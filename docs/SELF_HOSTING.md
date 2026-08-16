@@ -44,7 +44,12 @@ Moira must *produce* the dependency's compiled artifact before consuming it.
 
 ## Stage-2 checklist
 
-- [ ] Deterministic MIR/SSA output across stages
+- [x] Deterministic MIR/SSA output across stages
+  - The MIR/SSA/C/native-ASM emit no longer depends on per-process hash-map
+    iteration order, so the same source compiled by the stage-0 driver and the
+    stage-1 driver yields byte-identical text. Verified by `tests/determinism.rs`,
+    which runs `moira --emit {mir,ssa,c,asm}` twice as separate processes
+    (with `MOIRA_NO_CACHE=1`) and diffs the output.
 - [ ] Verify output parity (stage-1 == stage-2 binary)
 
 ## Blocking subset gaps (to fill before true self-host)

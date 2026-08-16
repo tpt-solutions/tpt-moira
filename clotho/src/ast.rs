@@ -59,6 +59,8 @@ pub enum ItemKind {
 pub struct Function {
     pub name: Spanned<String>,
     pub generics: Generics,
+    pub is_async: bool,
+    pub is_unsafe: bool,
     pub params: Vec<Param>,
     pub ret: Option<Type>,
     pub body: Block,
@@ -137,6 +139,8 @@ pub struct ImplDef {
     /// Generic parameters declared on the `impl`, e.g. `<T>` in
     /// `impl<T> Trait for Wrap<T>`.
     pub generics: Generics,
+    /// Whether the impl is `unsafe`.
+    pub is_unsafe: bool,
     /// The associated items (methods, and `type Assoc = T;` projections).
     pub items: Vec<Item>,
 }
@@ -265,6 +269,40 @@ pub enum ExprKind {
     Break,
     Continue,
     Match(Box<Expr>, Vec<(Pat, Expr)>),
+    /// `expr.await` — suspends the enclosing `async` context until `expr`
+    /// (a value implementing `Future`) is ready, yielding its output.
+    Await(Box<Expr>),
+    /// An `unsafe { .. }` block.
+    Unsafe(Block),
+    /// A closure `|params| body` (or `|params| -> Ret body`).
+    Closure {
+        params: Vec<Param>,
+        ret: Option<Type>,
+        body: Box<Expr>,
+    },
+    /// A `expr as Type` cast.
+    Cast(Box<Expr>, Type),
+    /// A macro invocation `path!(tokens)` / `path![tokens]` / `path!{tokens}`.
+    Macro(MacroCall),
+    /// The `?` operator: `expr?`.
+    Try(Box<Expr>),
+}
+
+/// A macro invocation captured during parsing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MacroCall {
+    pub path: Path,
+    pub delimiter: MacroDelim,
+    /// The raw token stream inside the delimiter, including nested delimiters.
+    pub tokens: Vec<crate::token::Token>,
+}
+
+/// The delimiter kind used by a macro invocation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MacroDelim {
+    Paren,
+    Bracket,
+    Brace,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -348,6 +386,7 @@ impl Type {
             TypeKind::Slice(inner) => format!("[{}]", inner.node_name()),
             TypeKind::Tuple(_) => "<tuple>".to_string(),
             TypeKind::Infer => "_".to_string(),
+            TypeKind::Future(inner) => format!("impl Future<Output = {}>", inner.node_name()),
         }
     }
 }
@@ -361,4 +400,8 @@ pub enum TypeKind {
     Slice(Box<Type>),
     Tuple(Vec<Type>),
     Infer,
+    /// `impl Future<Output = T>` — the anonymous return type of an `async fn`
+    /// (and the type of an `.await`-able expression). The inner type is the
+    /// future's resolved output.
+    Future(Box<Type>),
 }

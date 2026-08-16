@@ -91,24 +91,24 @@ pub struct SsaProgram {
 
 impl SsaProgram {
     /// Lower a MIR program into SSA form.
-    pub fn from_mir(mir: &mir::Program) -> SsaProgram {
+    pub fn from_mir(mir: &mir::Program) -> Result<SsaProgram, String> {
         build_ssa(mir)
     }
 }
 
-/// Build the SSA graph from MIR.
-pub fn build_ssa(mir: &mir::Program) -> SsaProgram {
+/// Lower a MIR program into SSA form.
+pub fn build_ssa(mir: &mir::Program) -> Result<SsaProgram, String> {
     let mut out = SsaProgram {
         structs: mir.structs.clone(),
         functions: Vec::new(),
     };
     for f in &mir.functions {
-        out.functions.push(build_function(f));
+        out.functions.push(build_function(f)?);
     }
-    out
+    Ok(out)
 }
 
-fn build_function(f: &mir::Function) -> SsaFunction {
+fn build_function(f: &mir::Function) -> Result<SsaFunction, String> {
     let mut func = SsaFunction {
         name: f.name.clone(),
         params: f.params.clone(),
@@ -121,8 +121,6 @@ fn build_function(f: &mir::Function) -> SsaFunction {
 
     for block in &f.blocks {
         let mut ssa_block = SsaBlock::default();
-        // Names defined earlier in *this* block map to a value index; everything
-        // else (params, locals, cross-block temps) is a named slot reference.
         let mut last_def: HashMap<String, usize> = HashMap::new();
         let resolve = |op: &mir::Operand, ld: &HashMap<String, usize>| -> Val {
             match op {
@@ -155,8 +153,22 @@ fn build_function(f: &mir::Function) -> SsaFunction {
                         .map(|(fld, o)| (fld.clone(), resolve(o, &last_def)))
                         .collect(),
                 ),
-                mir::Rvalue::Field(o, fld) => Op::Field(resolve(o, &last_def), fld.clone()),
+                mir::Rvalue::Field(o, fld, _deref) => {
+                    Op::Field(resolve(o, &last_def), fld.clone())
+                }
                 mir::Rvalue::Ref(o, _) => Op::Ref(resolve(o, &last_def)),
+                // `StoreField` and the suspending `Switch` terminator belong to
+                // the `async fn` state machine, which is generated only for the
+                // Stage-0 C backend. The from-scratch native backend does not
+                // support it (it already rejects struct literals), so we reject
+                // here with a clear message rather than miscompile.
+                mir::Rvalue::StoreField(..) => {
+                    return Err(
+                        "the native backend does not support `async fn` state machines (use the \
+                         C backend, `--emit c`)"
+                            .to_string(),
+                    )
+                }
             };
             let ty = f
                 .temp_types
@@ -178,13 +190,20 @@ fn build_function(f: &mir::Function) -> SsaFunction {
             mir::Terminator::If(c, t, e) => SsaTerm::If(resolve(c, &last_def), *t, *e),
             mir::Terminator::Return(Some(o)) => SsaTerm::Return(Some(resolve(o, &last_def))),
             mir::Terminator::Return(None) => SsaTerm::Return(None),
+            mir::Terminator::Switch(..) => {
+                return Err(
+                    "the native backend does not support `async fn` state machines (use the C \
+                     backend, `--emit c`)"
+                        .to_string(),
+                )
+            }
             mir::Terminator::Unreachable => SsaTerm::Unreachable,
         };
 
         func.blocks.push(ssa_block);
     }
 
-    func
+    Ok(func)
 }
 
 fn mir_structs_of(f: &mir::Function) -> Vec<mir::StructDef> {

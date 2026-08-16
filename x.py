@@ -27,6 +27,7 @@ Subcommands
   test        cargo test of the workspace.
   self-host   run the Stage-1 self-host readiness probe (builds stage0 first).
   dist        build release binaries and stage a distributable tree.
+  determinism run the Stage-2 cross-process MIR/SSA/C/ASM parity check.
   all         build + check + test (default).
 
 The self-host probe never fails the build: it always produces a report under
@@ -108,9 +109,20 @@ def log(msg: str) -> None:
     print(f"[x.py] {msg}", flush=True)
 
 
-def run(cmd: list[str], cwd: Optional[Path] = None, check: bool = False) -> subprocess.CompletedProcess:
+def run(
+    cmd: list[str],
+    cwd: Optional[Path] = None,
+    check: bool = False,
+    env: Optional[dict] = None,
+) -> subprocess.CompletedProcess:
     log(" ".join(str(c) for c in cmd))
-    return subprocess.run(cmd, cwd=str(cwd) if cwd else None, capture_output=True, text=True)
+    return subprocess.run(
+        cmd,
+        cwd=str(cwd) if cwd else None,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
 
 
 def find_moira_binary(release: bool) -> Optional[Path]:
@@ -255,13 +267,120 @@ def dist(release: bool) -> int:
     return 0
 
 
+# Emit modes whose output must be byte-identical across stages, with the sample
+# source each one is exercised on. `asm` must avoid composite types because the
+# from-scratch native backend only handles the integer/control-flow subset.
+DETERMINISM_MODES = ["mir", "ssa", "c", "asm"]
+
+DETERMINISM_STRUCT_SAMPLE = """
+struct Point { x: i32, y: i32 }
+
+fn add(a: i32, b: i32) -> i32 { a + b }
+
+fn max(a: i32, b: i32) -> i32 { if a > b { a } else { b } }
+
+fn make() -> Point {
+    let p = Point { x: 1, y: 2 };
+    let z = p.x + p.y;
+    Point { x: z, y: z }
+}
+
+fn sum_to(n: i32) -> i32 {
+    let mut s = 0;
+    let mut i = 0;
+    while i < n { s = s + i; i = i + 1; }
+    s
+}
+
+fn main() {
+    print_i32(add(3, 4));
+    print_i32(max(7, 10));
+    print_i32(sum_to(5));
+    let p = make();
+    print_i32(p.x);
+}
+"""
+
+DETERMINISM_ASM_SAMPLE = """
+fn add(a: i32, b: i32) -> i32 { a + b }
+
+fn max(a: i32, b: i32) -> i32 { if a > b { a } else { b } }
+
+fn sum_to(n: i32) -> i32 {
+    let mut s = 0;
+    let mut i = 0;
+    while i < n { s = s + i; i = i + 1; }
+    s
+}
+
+fn main() {
+    print_i32(add(3, 4));
+    print_i32(max(7, 10));
+    print_i32(sum_to(5));
+}
+"""
+
+
+def determinism(release: bool) -> int:
+    """Stage-2 cross-process parity: the same source compiled by two separate
+    `moira` processes (each with its own randomized hash-seed) must yield
+    byte-identical MIR/SSA/C/ASM. This is the exact condition that guarantees
+    stage-1 == stage-2 output parity, so it is the gate for self-hosting.
+
+    The incremental cache is bypassed via `MOIRA_NO_CACHE=1` so both runs
+    recompute the emit from scratch (a cached first run would otherwise mask
+    any nondeterminism).
+    """
+    BUILD_DIR.mkdir(exist_ok=True)
+    moira = find_moira_binary(release) or build_host(release)
+    if moira is None:
+        log("cannot run determinism check: host compiler is unavailable")
+        return 1
+
+    samples = {
+        "mir": DETERMINISM_STRUCT_SAMPLE,
+        "ssa": DETERMINISM_STRUCT_SAMPLE,
+        "c": DETERMINISM_STRUCT_SAMPLE,
+        "asm": DETERMINISM_ASM_SAMPLE,
+    }
+
+    no_cache_env = {**os.environ, "MOIRA_NO_CACHE": "1"}
+    ok = True
+    for mode in DETERMINISM_MODES:
+        path = BUILD_DIR / f"determinism_{mode}.rs"
+        path.write_text(samples[mode])
+
+        def emit_once() -> tuple[Optional[str], Optional[str]]:
+            res = run(
+                [str(moira), "--emit", mode, str(path)],
+                env=no_cache_env,
+            )
+            if res.returncode != 0:
+                return None, (res.stderr or res.stdout).strip()
+            return res.stdout, None
+
+        first, err1 = emit_once()
+        second, err2 = emit_once()
+        if first is None or second is None:
+            log(f"determinism[{mode}]: EMIT FAILED -> {err1 or err2}")
+            ok = False
+            continue
+        if first == second:
+            log(f"determinism[{mode}]: OK (byte-identical across two processes)")
+        else:
+            log(f"determinism[{mode}]: FAIL — output differs across processes")
+            ok = False
+
+    return 0 if ok else 1
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description="Moira bootstrap orchestrator")
     parser.add_argument(
         "command",
         nargs="?",
         default="all",
-        choices=["build", "check", "test", "self-host", "dist", "all"],
+        choices=["build", "check", "test", "self-host", "dist", "determinism", "all"],
     )
     parser.add_argument("--release", action="store_true", help="use the release profile")
     parser.add_argument(
@@ -288,6 +407,8 @@ def main(argv: list[str]) -> int:
             return 1
     if args.command == "self-host":
         return self_host(args.release, args.strict or os.environ.get("MOIRA_SELFHOST_STRICT") == "1")
+    if args.command == "determinism":
+        return determinism(args.release)
     if args.command == "dist":
         return dist(args.release)
 

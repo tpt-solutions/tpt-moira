@@ -41,6 +41,11 @@ pub enum Ty {
     Struct(String),
     /// Function type `(params) -> ret`.
     Fn(Vec<Ty>, Box<Ty>),
+    /// A future that yields `Box<Ty>` when awaited (the async subset models
+    /// `Future<Output = T>` as `Future(Box<T>)`).
+    Future(Box<Ty>),
+    /// A pinned value `Pin<Box<T>>`.
+    Pin(Box<Ty>),
     /// A range `a..b`, produced by the `..` operator (used by `for`).
     Range,
     /// Error sentinel.
@@ -139,6 +144,8 @@ impl fmt::Display for Ty {
                 }
                 write!(f, ") -> {}", ret)
             }
+            Ty::Future(t) => write!(f, "Future<{}>", t),
+            Ty::Pin(t) => write!(f, "Pin<{}>", t),
             Ty::Range => write!(f, "Range"),
             Ty::Unknown => write!(f, "<unknown>"),
         }

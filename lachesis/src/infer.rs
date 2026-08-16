@@ -26,6 +26,9 @@ pub struct StructInfo {
 pub struct FnSig {
     pub params: Vec<Ty>,
     pub ret: Ty,
+    /// Whether the function is declared `async fn`, in which case callers that
+    /// do not `.await` the result receive a `Future` wrapper.
+    pub is_async: bool,
 }
 
 /// The Phase-2 type checker.
@@ -72,7 +75,14 @@ impl TypeChecker {
                 clotho::ast::ItemKind::Function(f) => {
                     let params = f.params.iter().map(|p| cx.type_to_ty(&p.ty)).collect();
                     let ret = f.ret.as_ref().map(|t| cx.type_to_ty(t)).unwrap_or(Ty::Unit);
-                    cx.fns.insert(f.name.node.clone(), FnSig { params, ret });
+                    cx.fns.insert(
+                        f.name.node.clone(),
+                        FnSig {
+                            params,
+                            ret,
+                            is_async: f.is_async,
+                        },
+                    );
                 }
                 // Enums/consts/statics/uses are not part of the type-checked subset.
                 _ => {}
@@ -85,6 +95,7 @@ impl TypeChecker {
             FnSig {
                 params: vec![Ty::I32],
                 ret: Ty::Unit,
+                is_async: false,
             },
         );
         cx.fns.insert(
@@ -92,6 +103,7 @@ impl TypeChecker {
             FnSig {
                 params: vec![Ty::Bool],
                 ret: Ty::Unit,
+                is_async: false,
             },
         );
 
@@ -285,6 +297,46 @@ impl TypeChecker {
                 );
                 Ty::Unknown
             }
+            ExprKind::Await(inner) => {
+                let t = self.infer_expr(inner);
+                match &t {
+                    Ty::Future(out) => (**out).clone(),
+                    Ty::Pin(inner) => match &**inner {
+                        Ty::Future(out) => (**out).clone(),
+                        _ => {
+                            self.err(span, "`await` requires a `Future`".to_string());
+                            Ty::Unknown
+                        }
+                    },
+                    _ => {
+                        self.err(span, "`await` requires a `Future`".to_string());
+                        Ty::Unknown
+                    }
+                }
+            }
+            ExprKind::Unsafe(b) => self.infer_block(b),
+            ExprKind::Closure { .. } => {
+                self.err(
+                    span,
+                    "closures are not in the type-checked subset".to_string(),
+                );
+                Ty::Unknown
+            }
+            ExprKind::Cast(e2, _) => self.infer_expr(e2),
+            ExprKind::Macro(..) => {
+                self.err(
+                    span,
+                    "macros are not in the type-checked subset".to_string(),
+                );
+                Ty::Unknown
+            }
+            ExprKind::Try(..) => {
+                self.err(
+                    span,
+                    "the `?` operator is not in the type-checked subset".to_string(),
+                );
+                Ty::Unknown
+            }
         };
         ty
     }
@@ -465,7 +517,11 @@ impl TypeChecker {
             let at = self.infer_expr(a);
             self.expect(&at, pt, a.span);
         }
-        sig.ret.clone()
+        if sig.is_async {
+            Ty::Future(Box::new(sig.ret.clone()))
+        } else {
+            sig.ret.clone()
+        }
     }
 
     fn check_field(&mut self, span: Span, base: &Expr, field: &clotho::ast::Spanned<String>) -> Ty {
@@ -574,6 +630,7 @@ impl TypeChecker {
             }
             TypeKind::Ref(inner) => Ty::Ref(Box::new(self.type_to_ty(inner))),
             TypeKind::RefMut(inner) => Ty::RefMut(Box::new(self.type_to_ty(inner))),
+            TypeKind::Future(inner) => Ty::Future(Box::new(self.type_to_ty(inner))),
             TypeKind::Infer => Ty::Int,
             _ => Ty::Unknown,
         }
@@ -597,6 +654,7 @@ impl TypeChecker {
             }
             TypeKind::Ref(inner) => Ty::Ref(Box::new(TypeChecker::ast_to_ty(inner))),
             TypeKind::RefMut(inner) => Ty::RefMut(Box::new(TypeChecker::ast_to_ty(inner))),
+            TypeKind::Future(inner) => Ty::Future(Box::new(TypeChecker::ast_to_ty(inner))),
             TypeKind::Infer => Ty::Int,
             _ => Ty::Unknown,
         }
