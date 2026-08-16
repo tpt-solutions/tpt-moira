@@ -49,8 +49,14 @@ fn simple_macro_expands_to_arithmetic() {
         .expect("y binding not found");
     match &init.kind {
         ExprKind::Binary(l, _, r) => {
-            assert!(matches!(l.kind, ExprKind::Lit(clotho::ast::Lit::Int(21, _))));
-            assert!(matches!(r.kind, ExprKind::Lit(clotho::ast::Lit::Int(21, _))));
+            assert!(matches!(
+                l.kind,
+                ExprKind::Lit(clotho::ast::Lit::Int(21, _))
+            ));
+            assert!(matches!(
+                r.kind,
+                ExprKind::Lit(clotho::ast::Lit::Int(21, _))
+            ));
         }
         other => panic!("expected binary expansion, got {:?}", other),
     }

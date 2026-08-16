@@ -16,6 +16,9 @@
 .DS_Store
 Thumbs.db
 
+# Bootstrap orchestrator output (x.py)
+/build
+
 # Build artifacts
 **/*.o
 **/*.a

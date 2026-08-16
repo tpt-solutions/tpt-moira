@@ -144,9 +144,10 @@ fn build_function(f: &mir::Function) -> SsaFunction {
                     Op::Binary(*b, resolve(l, &last_def), resolve(r, &last_def))
                 }
                 mir::Rvalue::Unary(u, o) => Op::Unary(*u, resolve(o, &last_def)),
-                mir::Rvalue::Call(name, args) => {
-                    Op::Call(name.clone(), args.iter().map(|a| resolve(a, &last_def)).collect())
-                }
+                mir::Rvalue::Call(name, args) => Op::Call(
+                    name.clone(),
+                    args.iter().map(|a| resolve(a, &last_def)).collect(),
+                ),
                 mir::Rvalue::StructLit(name, fields) => Op::StructLit(
                     name.clone(),
                     fields
@@ -155,7 +156,7 @@ fn build_function(f: &mir::Function) -> SsaFunction {
                         .collect(),
                 ),
                 mir::Rvalue::Field(o, fld) => Op::Field(resolve(o, &last_def), fld.clone()),
-                mir::Rvalue::Ref(o) => Op::Ref(resolve(o, &last_def)),
+                mir::Rvalue::Ref(o, _) => Op::Ref(resolve(o, &last_def)),
             };
             let ty = f
                 .temp_types
@@ -194,16 +195,8 @@ fn mir_structs_of(f: &mir::Function) -> Vec<mir::StructDef> {
 /// Collect names referenced by `Val::Name` in a terminator.
 fn collect_names_in_term(term: &SsaTerm, visit: &mut impl FnMut(&str)) {
     match term {
-        SsaTerm::If(c, _, _) => {
-            if let Val::Name(n) = c {
-                visit(n);
-            }
-        }
-        SsaTerm::Return(Some(v)) => {
-            if let Val::Name(n) = v {
-                visit(n);
-            }
-        }
+        SsaTerm::If(Val::Name(n), _, _) => visit(n),
+        SsaTerm::Return(Some(Val::Name(n))) => visit(n),
         _ => {}
     }
 }
@@ -250,8 +243,20 @@ fn eval_binary(b: mir::BinOp, l: i128, r: i128) -> Option<i128> {
         Add => l.wrapping_add(r),
         Sub => l.wrapping_sub(r),
         Mul => l.wrapping_mul(r),
-        Div => if r == 0 { return None } else { l.wrapping_div(r) },
-        Rem => if r == 0 { return None } else { l.wrapping_rem(r) },
+        Div => {
+            if r == 0 {
+                return None;
+            } else {
+                l.wrapping_div(r)
+            }
+        }
+        Rem => {
+            if r == 0 {
+                return None;
+            } else {
+                l.wrapping_rem(r)
+            }
+        }
         And => (logical(l) && logical(r)) as i128,
         Or => (logical(l) || logical(r)) as i128,
         BitAnd => l & r,
@@ -335,15 +340,11 @@ pub fn dce(func: &mut SsaFunction) -> bool {
     // Terminator operands that are value references are live.
     for b in &func.blocks {
         match &b.term {
-            SsaTerm::If(c, _, _) => {
-                if let Val::Value(i) = c {
-                    seed_live.insert(*i);
-                }
+            SsaTerm::If(Val::Value(i), _, _) => {
+                seed_live.insert(*i);
             }
-            SsaTerm::Return(Some(v)) => {
-                if let Val::Value(i) = v {
-                    seed_live.insert(*i);
-                }
+            SsaTerm::Return(Some(Val::Value(i))) => {
+                seed_live.insert(*i);
             }
             _ => {}
         }
@@ -482,7 +483,13 @@ impl std::fmt::Display for SsaProgram {
         }
         for func in &self.functions {
             let ret = func.ret.clone().unwrap_or_else(|| "()".to_string());
-            writeln!(f, "fn {}({}) -> {} {{", func.name, func.params.join(", "), ret)?;
+            writeln!(
+                f,
+                "fn {}({}) -> {} {{",
+                func.name,
+                func.params.join(", "),
+                ret
+            )?;
             for (bi, block) in func.blocks.iter().enumerate() {
                 writeln!(f, "  b{}:", bi)?;
                 for &idx in &block.stmts {
@@ -496,8 +503,7 @@ impl std::fmt::Display for SsaProgram {
                         }
                         Op::Unary(u, o) => writeln!(f, "{:?} {}", u, show_val(o))?,
                         Op::Call(name, args) => {
-                            let a: Vec<String> =
-                                args.iter().map(show_val).collect();
+                            let a: Vec<String> = args.iter().map(show_val).collect();
                             writeln!(f, "call {} ({})", name, a.join(", "))?
                         }
                         Op::StructLit(name, fields) => {
@@ -513,7 +519,9 @@ impl std::fmt::Display for SsaProgram {
                 }
                 match &block.term {
                     SsaTerm::Goto(t) => writeln!(f, "    goto b{}", t)?,
-                    SsaTerm::If(c, t, e) => writeln!(f, "    if {} -> b{} else b{}", show_val(c), t, e)?,
+                    SsaTerm::If(c, t, e) => {
+                        writeln!(f, "    if {} -> b{} else b{}", show_val(c), t, e)?
+                    }
                     SsaTerm::Return(Some(v)) => writeln!(f, "    return {}", show_val(v))?,
                     SsaTerm::Return(None) => writeln!(f, "    return")?,
                     SsaTerm::Unreachable => writeln!(f, "    unreachable")?,

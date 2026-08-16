@@ -17,6 +17,11 @@ version = "0.1.0"
 [[package]]
 name = "lachesis"
 version = "0.1.0"
+dependencies = [
+ "atropos",
+ "clotho",
+ "moira-alloc",
+]
 
 [[package]]
 name = "moira"
@@ -29,4 +34,8 @@ dependencies = [
 
 [[package]]
 name = "moira-alloc"
+version = "0.1.0"
+
+[[package]]
+name = "moira-bench"
 version = "0.1.0"

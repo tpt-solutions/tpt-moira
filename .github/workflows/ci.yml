@@ -49,6 +49,20 @@ jobs:
       - name: Test
         run: cargo test --workspace --verbose
 
+  # Phase-1 speedup tracking: compile the benchmark battery with both Moira and
+  # rustc and print the measured compile-time ratio.
+  benchmark:
+    name: Phase-1 speedup benchmark
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Build workspace
+        run: cargo build --workspace
+      - name: Run benchmark harness
+        run: cargo run -p moira-bench --quiet
+
   # Placeholder for the nightly `rustc` UI/error-suite differential run (Phase 3).
   compatibility:
     name: Compatibility suite (skeleton)

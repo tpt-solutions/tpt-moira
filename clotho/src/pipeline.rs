@@ -15,17 +15,22 @@ use crate::ast::Program;
 use crate::error::{Diag, ParseResult};
 use crate::lexer;
 use crate::macros::{expand_program_concurrent, extract_macros, MacroTable};
+use crate::macrorules::{expand_macro_rules_calls, extract_macro_rules};
 use crate::parser::Parser;
 use std::io::Read;
 
 /// Run the full frontend pipeline for a single source string.
 ///
 /// Returns the macro-expanded AST. With an empty macro table this is equivalent
-/// to [`crate::parse_source`] but routed through the streaming lexer.
+/// to [`crate::parse_source`] but routed through the streaming lexer. Both the
+/// restricted `macro` keyword and `macro_rules!` definitions are extracted; the
+/// latter are expanded from the token stream *before* parsing.
 pub fn compile(source: &str) -> ParseResult<Program> {
     let tokens = lexer::tokenize(source);
     let (table, rest) = extract_macros(&tokens)?;
-    let parsed = Parser::new(rest).parse_program()?;
+    let (mr_table, rest2) = extract_macro_rules(&rest)?;
+    let expanded_tokens = expand_macro_rules_calls(&rest2, &mr_table);
+    let parsed = Parser::new(expanded_tokens).parse_program()?;
     let expanded = expand_program_concurrent(&parsed, &table);
     Ok(expanded)
 }
@@ -53,10 +58,7 @@ pub fn compile_reader<R: Read + Send + 'static>(mut reader: R) -> ParseResult<Pr
 /// of one unit never stalls on another unit's I/O.
 pub fn compile_concurrent(sources: &[String]) -> Result<Vec<Program>, Vec<Diag>> {
     let results = std::thread::scope(|s| {
-        let handles: Vec<_> = sources
-            .iter()
-            .map(|src| s.spawn(|| compile(src)))
-            .collect();
+        let handles: Vec<_> = sources.iter().map(|src| s.spawn(|| compile(src))).collect();
         handles
             .into_iter()
             .map(|h| h.join().unwrap())

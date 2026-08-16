@@ -53,20 +53,16 @@ fn compute_slots(func: &SsaFunction) -> Slots {
     }
     // ... and in terminators (e.g. the result of an `if` referenced by a return).
     for b in &func.blocks {
-        if let crate::ssa::SsaTerm::If(c, _, _) = &b.term {
-            if let crate::ssa::Val::Name(n) = c {
-                if !named.contains_key(n) {
-                    named.insert(n.clone(), next);
-                    next += 1;
-                }
+        if let crate::ssa::SsaTerm::If(crate::ssa::Val::Name(n), _, _) = &b.term {
+            if !named.contains_key(n) {
+                named.insert(n.clone(), next);
+                next += 1;
             }
         }
-        if let crate::ssa::SsaTerm::Return(Some(v)) = &b.term {
-            if let crate::ssa::Val::Name(n) = v {
-                if !named.contains_key(n) {
-                    named.insert(n.clone(), next);
-                    next += 1;
-                }
+        if let crate::ssa::SsaTerm::Return(Some(crate::ssa::Val::Name(n))) = &b.term {
+            if !named.contains_key(n) {
+                named.insert(n.clone(), next);
+                next += 1;
             }
         }
     }
@@ -296,7 +292,11 @@ pub fn emit_asm(prog: &SsaProgram) -> Result<String, String> {
                 break;
             }
             let slot = slots.named[param];
-            out.push_str(&format!("    mov {off}, {reg}\n", off = em.off(slot), reg = REGS[i]));
+            out.push_str(&format!(
+                "    mov {off}, {reg}\n",
+                off = em.off(slot),
+                reg = REGS[i]
+            ));
         }
 
         for (bi, block) in func.blocks.iter().enumerate() {
@@ -355,8 +355,7 @@ fn find_cc() -> Option<String> {
 pub fn compile_to_native(prog: &SsaProgram, out_path: &Path) -> Result<(), String> {
     let asm = emit_asm(prog)?;
     let cc = find_cc().ok_or_else(|| {
-        "no C compiler/assembler (gcc/clang/cc) found; cannot produce a native binary"
-            .to_string()
+        "no C compiler/assembler (gcc/clang/cc) found; cannot produce a native binary".to_string()
     })?;
 
     let dir = out_path.parent().unwrap_or_else(|| Path::new("."));

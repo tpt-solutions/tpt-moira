@@ -73,7 +73,10 @@ pub fn extract_macros(tokens: &[Token]) -> ParseResult<(MacroTable, Vec<Token>)>
             // `( params )`
             let mut j = i + 2;
             if j >= tokens.len() || !matches!(tokens[j].kind, TokenKind::LParen) {
-                return Err(Diag::error("expected `(` in macro declaration", Some(tokens[j].span)));
+                return Err(Diag::error(
+                    "expected `(` in macro declaration",
+                    Some(tokens[j].span),
+                ));
             }
             j += 1;
             let mut params: Vec<String> = Vec::new();
@@ -91,11 +94,17 @@ pub fn extract_macros(tokens: &[Token]) -> ParseResult<(MacroTable, Vec<Token>)>
                 j += 1;
             }
             if j >= tokens.len() || !matches!(tokens[j].kind, TokenKind::RParen) {
-                return Err(Diag::error("expected `)` to close macro parameters", Some(tokens[j].span)));
+                return Err(Diag::error(
+                    "expected `)` to close macro parameters",
+                    Some(tokens[j].span),
+                ));
             }
             j += 1; // past `)`
             if j >= tokens.len() || !matches!(tokens[j].kind, TokenKind::Eq) {
-                return Err(Diag::error("expected `=` in macro declaration", Some(tokens[j].span)));
+                return Err(Diag::error(
+                    "expected `=` in macro declaration",
+                    Some(tokens[j].span),
+                ));
             }
             j += 1; // past `=`
 
@@ -120,13 +129,7 @@ pub fn extract_macros(tokens: &[Token]) -> ParseResult<(MacroTable, Vec<Token>)>
             let body_tokens: Vec<Token> = tokens[body_start..j].to_vec();
             let body = Parser::new(body_tokens).parse_expr()?;
 
-            table.defs.insert(
-                name,
-                MacroDef {
-                    params,
-                    body,
-                },
-            );
+            table.defs.insert(name, MacroDef { params, body });
             // Skip the terminating `;`.
             i = j + 1;
             continue;
@@ -171,6 +174,7 @@ fn expand_item(item: &Item, table: &MacroTable) -> Item {
     let kind = match &item.kind {
         ItemKind::Function(f) => ItemKind::Function(ast::Function {
             name: f.name.clone(),
+            generics: f.generics.clone(),
             params: f.params.clone(),
             ret: f.ret.clone(),
             body: expand_block(&f.body, table),
@@ -184,11 +188,7 @@ fn expand_item(item: &Item, table: &MacroTable) -> Item {
 }
 
 fn expand_block(b: &ast::Block, table: &MacroTable) -> ast::Block {
-    let stmts = b
-        .stmts
-        .iter()
-        .map(|s| expand_stmt(s, table))
-        .collect();
+    let stmts = b.stmts.iter().map(|s| expand_stmt(s, table)).collect();
     let tail = b.tail.as_ref().map(|e| Box::new(expand_expr(e, table)));
     ast::Block { stmts, tail }
 }
@@ -239,7 +239,7 @@ fn expand_expr(e: &Expr, table: &MacroTable) -> Expr {
             Box::new(expand_expr(r, table)),
         ),
         ExprKind::Unary(op, e2) => ExprKind::Unary(*op, Box::new(expand_expr(e2, table))),
-        ExprKind::Ref(e2) => ExprKind::Ref(Box::new(expand_expr(e2, table))),
+        ExprKind::Ref(e2, _) => ExprKind::Ref(Box::new(expand_expr(e2, table)), false),
         ExprKind::Deref(e2) => ExprKind::Deref(Box::new(expand_expr(e2, table))),
         ExprKind::Field(base, field) => {
             ExprKind::Field(Box::new(expand_expr(base, table)), field.clone())
@@ -272,9 +272,10 @@ fn expand_expr(e: &Expr, table: &MacroTable) -> Expr {
                 _ => Box::new(expand_expr(b, table)),
             }),
         ),
-        ExprKind::While(cond, body) => {
-            ExprKind::While(Box::new(expand_expr(cond, table)), expand_block(body, table))
-        }
+        ExprKind::While(cond, body) => ExprKind::While(
+            Box::new(expand_expr(cond, table)),
+            expand_block(body, table),
+        ),
         ExprKind::Loop(body) => ExprKind::Loop(expand_block(body, table)),
         ExprKind::For(pat, iter, body) => ExprKind::For(
             pat.clone(),
@@ -318,7 +319,7 @@ fn subst_expr(expr: &Expr, subst: &HashMap<String, Expr>) -> Expr {
             Box::new(subst_expr(r, subst)),
         ),
         ExprKind::Unary(op, e2) => ExprKind::Unary(*op, Box::new(subst_expr(e2, subst))),
-        ExprKind::Ref(e2) => ExprKind::Ref(Box::new(subst_expr(e2, subst))),
+        ExprKind::Ref(e2, _) => ExprKind::Ref(Box::new(subst_expr(e2, subst)), false),
         ExprKind::Deref(e2) => ExprKind::Deref(Box::new(subst_expr(e2, subst))),
         ExprKind::Field(base, field) => {
             ExprKind::Field(Box::new(subst_expr(base, subst)), field.clone())

@@ -57,8 +57,14 @@ fn c_emission_contains_expected_shapes() {
     let mir = lower_demo();
     let c = atropos::codegen_c::emit_c(&mir);
     assert!(c.contains("struct Point"), "struct def missing");
-    assert!(c.contains("int32_t add(int32_t a, int32_t b)"), "add signature");
-    assert!(c.contains("void print_i32(long long x)"), "builtin print_i32");
+    assert!(
+        c.contains("int32_t add(int32_t a, int32_t b)"),
+        "add signature"
+    );
+    assert!(
+        c.contains("void print_i32(long long x)"),
+        "builtin print_i32"
+    );
     // The `if a > b` in `max` becomes a conditional branch.
     assert!(c.contains("if ("), "expected an if-branch in C");
     assert!(c.contains("goto b"), "expected basic-block gotos in C");
@@ -82,7 +88,12 @@ fn find_cc() -> Option<String> {
                 .arg(format!("/Fe:{}", out.display()))
                 .status()
         } else {
-            Command::new(cc).arg("-O2").arg(&probe).arg("-o").arg(&out).status()
+            Command::new(cc)
+                .arg("-O2")
+                .arg(&probe)
+                .arg("-o")
+                .arg(&out)
+                .status()
         };
         if status.map(|s| s.success()).unwrap_or(false) {
             let _ = std::fs::remove_file(&out);

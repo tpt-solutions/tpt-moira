@@ -99,13 +99,61 @@ impl Parser {
         }
     }
 
+    /// Skip any leading attribute groups (`#[...]` or `#![...]`) so that item
+    /// and module attributes (e.g. `#[derive(Debug)]`, `#[cfg(test)]`) do not
+    /// break parsing of the compiler's own source during self-hosting.
+    fn skip_attributes(&mut self) {
+        while self.check(&TokenKind::Hash) {
+            self.bump(); // consume `#`
+            if self.eat(&TokenKind::Bang) {
+                // inner attribute `#!` — fall through to the `[`
+            }
+            if !self.eat(&TokenKind::LBracket) {
+                // Not a recognized attribute group; stop and let the caller
+                // diagnose the stray `#`.
+                break;
+            }
+            let mut depth = 1usize;
+            while depth > 0 {
+                match self.peek_kind() {
+                    TokenKind::LBracket => {
+                        self.bump();
+                        depth += 1;
+                    }
+                    TokenKind::RBracket => {
+                        self.bump();
+                        depth -= 1;
+                    }
+                    TokenKind::Eof => break,
+                    _ => {
+                        self.bump();
+                    }
+                }
+            }
+        }
+    }
+
     fn parse_item(&mut self) -> ParseResult<Item> {
+        self.skip_attributes();
         let visibility = self.parse_visibility();
         let kind = self.parse_item_kind()?;
         Ok(Item { visibility, kind })
     }
 
     fn parse_item_kind(&mut self) -> ParseResult<ItemKind> {
+        // `impl` lexes as an identifier (it is not a keyword token), so detect
+        // it by name before the keyword-driven match below.
+        if let TokenKind::Ident(name) = self.peek_kind() {
+            if name == "impl" {
+                return Ok(ItemKind::Impl(self.parse_impl()?));
+            }
+            if name == "mod" {
+                return Ok(ItemKind::Module(self.parse_module()?));
+            }
+            if name == "type" {
+                return Ok(ItemKind::TypeAlias(self.parse_type_alias()?));
+            }
+        }
         match self.peek_kind() {
             TokenKind::Fn => Ok(ItemKind::Function(self.parse_function()?)),
             TokenKind::Struct => Ok(ItemKind::Struct(self.parse_struct()?)),
@@ -120,17 +168,25 @@ impl Parser {
         }
     }
 
+    fn parse_type_alias(&mut self) -> ParseResult<TypeAliasDef> {
+        // Consume the `type` identifier.
+        self.bump();
+        let name = self.expect_ident()?;
+        self.expect(TokenKind::Eq)?;
+        let ty = self.parse_type()?;
+        self.eat(&TokenKind::Semicolon);
+        Ok(TypeAliasDef { name, ty })
+    }
+
     fn parse_function(&mut self) -> ParseResult<Function> {
         self.expect(TokenKind::Fn)?;
         let name = self.expect_ident()?;
+        let generics = self.parse_generics()?;
         self.expect(TokenKind::LParen)?;
         let mut params = Vec::new();
         if !self.check(&TokenKind::RParen) {
             loop {
-                let pat = self.parse_pat()?;
-                self.expect(TokenKind::Colon)?;
-                let ty = self.parse_type()?;
-                params.push(Param { pat, ty });
+                params.push(self.parse_param()?);
                 if !self.eat(&TokenKind::Comma) {
                     break;
                 }
@@ -142,18 +198,74 @@ impl Parser {
         } else {
             None
         };
+        let generics = self.parse_where_clause(generics)?;
         let body = self.parse_block()?;
         Ok(Function {
             name,
+            generics,
             params,
             ret,
             body,
         })
     }
 
+    /// Parse a single function parameter. Also handles the method receiver
+    /// `self`, `&self`, and `&mut self`, which carry no `: Type` annotation
+    /// (they desugar to `self: Self` / `self: &Self`).
+    fn parse_param(&mut self) -> ParseResult<Param> {
+        if self.peek_is_receiver() {
+            let is_ref = self.eat(&TokenKind::Amp);
+            let is_mut = if is_ref { self.eat(&TokenKind::Mut) } else { false };
+            let name = self.expect_ident()?; // `self`
+            let span = name.span;
+            let self_ty = Type {
+                kind: TypeKind::Path(
+                    Path {
+                        segments: vec![Spanned::new("Self".to_string(), span)],
+                    },
+                    Vec::new(),
+                ),
+                span,
+            };
+            let ty = if is_ref {
+                let k = if is_mut {
+                    TypeKind::RefMut(Box::new(self_ty.clone()))
+                } else {
+                    TypeKind::Ref(Box::new(self_ty.clone()))
+                };
+                Type { kind: k, span }
+            } else {
+                self_ty
+            };
+            return Ok(Param {
+                pat: Pat::Ident(name),
+                ty,
+            });
+        }
+        let pat = self.parse_pat()?;
+        self.expect(TokenKind::Colon)?;
+        let ty = self.parse_type()?;
+        Ok(Param { pat, ty })
+    }
+
+    /// Whether the next tokens form a method receiver (`self`, `&self`,
+    /// `&mut self`).
+    fn peek_is_receiver(&self) -> bool {
+        match self.peek_kind() {
+            TokenKind::Ident(name) => name.as_str() == "self",
+            TokenKind::Amp => match self.tokens.get(self.pos + 1).map(|t| &t.kind) {
+                Some(TokenKind::Ident(n)) => n.as_str() == "self",
+                Some(TokenKind::Mut) => true,
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+
     fn parse_struct(&mut self) -> ParseResult<StructDef> {
         self.expect(TokenKind::Struct)?;
         let name = self.expect_ident()?;
+        let generics = self.parse_generics()?;
         self.expect(TokenKind::LBrace)?;
         let mut fields = Vec::new();
         while !self.eat(&TokenKind::RBrace) {
@@ -166,7 +278,7 @@ impl Parser {
                 break;
             }
         }
-        Ok(StructDef { name, fields })
+        Ok(StructDef { name, generics, fields })
     }
 
     fn parse_enum(&mut self) -> ParseResult<EnumDef> {
@@ -236,6 +348,171 @@ impl Parser {
         let tree = self.parse_use_tree()?;
         self.eat(&TokenKind::Semicolon);
         Ok(tree)
+    }
+
+    fn parse_impl(&mut self) -> ParseResult<ImplDef> {
+        // Consume the `impl` identifier.
+        self.bump();
+        let generics = self.parse_generics()?;
+        // The first type is either the trait (for a trait impl) or the self
+        // type (for an inherent impl `impl T { ... }`, which has no `for`).
+        let first_ty = self.parse_type()?;
+        let (trait_name, for_ty) = if self.eat(&TokenKind::For) {
+            let name = Self::type_name(&first_ty);
+            let self_ty = self.parse_type()?;
+            (name, self_ty)
+        } else {
+            // Inherent impl: no trait; the parsed type *is* the self type.
+            (Spanned::new(String::new(), first_ty.span), first_ty)
+        };
+        let generics = self.parse_where_clause(generics)?;
+        self.expect(TokenKind::LBrace)?;
+        let mut items = Vec::new();
+        while !self.eat(&TokenKind::RBrace) {
+            items.push(self.parse_item()?);
+        }
+        Ok(ImplDef {
+            trait_name,
+            for_ty,
+            generics,
+            items,
+        })
+    }
+
+    /// Extract the last-segment name of a type — used to name the trait an
+    /// `impl` block is for.
+    fn type_name(ty: &Type) -> Spanned<String> {
+        if let TypeKind::Path(p, _) = &ty.kind {
+            p.segments
+                .last()
+                .cloned()
+                .unwrap_or_else(|| Spanned::new(String::new(), ty.span))
+        } else {
+            Spanned::new(String::new(), ty.span)
+        }
+    }
+
+    fn parse_module(&mut self) -> ParseResult<ModuleDef> {
+        // Consume the `mod` identifier.
+        self.bump();
+        let name = self.expect_ident()?;
+        let kind = if self.eat(&TokenKind::Semicolon) {
+            ModuleKind::External
+        } else {
+            self.expect(TokenKind::LBrace)?;
+            let mut items = Vec::new();
+            while !self.eat(&TokenKind::RBrace) {
+                items.push(self.parse_item()?);
+            }
+            ModuleKind::Inline(items)
+        };
+        Ok(ModuleDef { name, kind })
+    }
+
+    /// Parse an optional generic parameter list `<T: Bound, U>` (empty if the
+    /// next token is not `<`). The list is the Phase-3 "trait bounds" surface
+    /// for item-level generic declarations.
+    fn parse_generics(&mut self) -> ParseResult<Generics> {
+        if !self.eat(&TokenKind::Lt) {
+            return Ok(Generics::default());
+        }
+        let mut params = Vec::new();
+        if !self.check(&TokenKind::Gt) {
+            loop {
+                let name = self.expect_ident()?;
+                let mut bounds = Vec::new();
+                if self.eat(&TokenKind::Colon) {
+                    loop {
+                        let path = self.parse_path()?;
+                        bounds.push(TypeBound::Trait(path));
+                        if !self.eat(&TokenKind::Plus) {
+                            break;
+                        }
+                    }
+                }
+                params.push(TypeParam { name, bounds });
+                if !self.eat(&TokenKind::Comma) {
+                    break;
+                }
+            }
+        }
+        self.expect_gt()?;
+        Ok(Generics {
+            params,
+            where_clause: Vec::new(),
+        })
+    }
+
+    /// If the next token is the `where` keyword, parse a where-clause and merge
+    /// it into `generics`; otherwise return `generics` unchanged.
+    fn parse_where_clause(&mut self, mut generics: Generics) -> ParseResult<Generics> {
+        if let TokenKind::Ident(name) = self.peek_kind() {
+            if name != "where" {
+                return Ok(generics);
+            }
+        } else {
+            return Ok(generics);
+        }
+        self.bump(); // consume `where`
+        loop {
+            let ty = self.parse_type()?;
+            self.expect(TokenKind::Colon)?;
+            let mut bounds = Vec::new();
+            loop {
+                let path = self.parse_path()?;
+                bounds.push(TypeBound::Trait(path));
+                if !self.eat(&TokenKind::Plus) {
+                    break;
+                }
+            }
+            generics.where_clause.push(WherePredicate { ty, bounds });
+            if !self.eat(&TokenKind::Comma) {
+                break;
+            }
+        }
+        Ok(generics)
+    }
+
+    /// Skip a `>` closing a generic argument list, transparently splitting the
+    /// `>>` shift-right token into two `>` so nested generics like
+    /// `Vec<Box<T>>` parse correctly.
+    fn expect_gt(&mut self) -> ParseResult<()> {
+        match self.peek_kind() {
+            TokenKind::Gt => {
+                self.bump();
+                Ok(())
+            }
+            TokenKind::GtGt => {
+                let tok = self.peek().clone();
+                // Split `>>` into `>` `>`: rewrite the current token and insert
+                // a second `>` after it.
+                self.tokens
+                    .insert(self.pos + 1, Token { kind: TokenKind::Gt, span: tok.span });
+                self.tokens[self.pos] = Token { kind: TokenKind::Gt, span: tok.span };
+                self.bump();
+                Ok(())
+            }
+            other => Err(Diag::error(
+                format!("expected `>`, found {}", other),
+                Some(self.peek().span),
+            )),
+        }
+    }
+
+    /// Parse a `<...>` generic argument list of types (after the caller has
+    /// consumed the leading `<`). Used for type-level generics like `Vec<T>`.
+    fn parse_generic_args(&mut self) -> ParseResult<Vec<Type>> {
+        let mut args = Vec::new();
+        if !self.check(&TokenKind::Gt) && !matches!(self.peek_kind(), TokenKind::GtGt) {
+            loop {
+                args.push(self.parse_type()?);
+                if !self.eat(&TokenKind::Comma) {
+                    break;
+                }
+            }
+        }
+        self.expect_gt()?;
+        Ok(args)
     }
 
     fn parse_use_tree(&mut self) -> ParseResult<UseTree> {
@@ -438,6 +715,12 @@ impl Parser {
                 span,
             };
         }
+        // `as` cast: `expr as Type`. The Phase-1 subset does not yet model casts
+        // as a first-class node, so we parse (and discard) the target type and
+        // keep the operand — a tracked self-host gap (see docs/SELF_HOSTING.md).
+        while self.eat(&TokenKind::As) {
+            let _ty = self.parse_type()?;
+        }
         Ok(lhs)
     }
 
@@ -524,9 +807,9 @@ impl Parser {
             }
             TokenKind::Amp => {
                 self.bump();
-                self.eat(&TokenKind::Mut);
+                let mutable = self.eat(&TokenKind::Mut);
                 let e = self.parse_unary_or_atom(allow_struct)?;
-                ExprKind::Ref(Box::new(e))
+                ExprKind::Ref(Box::new(e), mutable)
             }
             _ => return self.parse_atom(allow_struct),
         };
@@ -880,6 +1163,22 @@ impl Parser {
                     TypeKind::Ref(Box::new(inner))
                 }
             }
+            TokenKind::Star => {
+                // Raw pointer type: `*const T` or `*mut T`.
+                self.bump();
+                let is_mut = if self.eat(&TokenKind::Mut) {
+                    true
+                } else {
+                    self.eat(&TokenKind::Const);
+                    false
+                };
+                let inner = self.parse_type()?;
+                if is_mut {
+                    TypeKind::RefMut(Box::new(inner))
+                } else {
+                    TypeKind::Ref(Box::new(inner))
+                }
+            }
             TokenKind::LBracket => {
                 self.bump();
                 let inner = self.parse_type()?;
@@ -921,7 +1220,12 @@ impl Parser {
             }
             _ if self.is_primitive_type() || matches!(self.peek_kind(), TokenKind::Ident(_)) => {
                 let path = self.parse_path()?;
-                TypeKind::Path(path)
+                let args = if self.eat(&TokenKind::Lt) {
+                    self.parse_generic_args()?
+                } else {
+                    Vec::new()
+                };
+                TypeKind::Path(path, args)
             }
             other => {
                 return Err(Diag::error(

@@ -74,22 +74,38 @@ pub enum Rvalue {
     StructLit(String, Vec<(String, Operand)>),
     /// Field projection `operand.field`.
     Field(Operand, String),
-    /// Address-of `&operand`.
-    Ref(Operand),
+    /// Address-of `&operand` (`true` for `&mut`).
+    Ref(Operand, bool),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinOp {
-    Add, Sub, Mul, Div, Rem,
-    And, Or, BitAnd, BitOr, BitXor,
-    Shl, Shr,
-    Eq, Ne, Lt, Gt, Le, Ge,
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Rem,
+    And,
+    Or,
+    BitAnd,
+    BitOr,
+    BitXor,
+    Shl,
+    Shr,
+    Eq,
+    Ne,
+    Lt,
+    Gt,
+    Le,
+    Ge,
     Assign,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnOp {
-    Neg, Not, Deref,
+    Neg,
+    Not,
+    Deref,
 }
 
 /// A value used on the right-hand side of an operation.

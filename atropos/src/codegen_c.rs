@@ -35,7 +35,11 @@ fn emit_function(f: &mir::Function) -> String {
     let ret = if f.name == "main" {
         "int".to_string()
     } else {
-        f.ret.clone().as_deref().map(c_type).unwrap_or_else(|| "void".to_string())
+        f.ret
+            .clone()
+            .as_deref()
+            .map(c_type)
+            .unwrap_or_else(|| "void".to_string())
     };
 
     let mut param_types: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
@@ -62,7 +66,11 @@ fn emit_function(f: &mir::Function) -> String {
 
     // Local variable declarations.
     for (name, ty) in &f.locals {
-        let t = ty.clone().as_deref().map(c_type).unwrap_or_else(|| "long long".to_string());
+        let t = ty
+            .clone()
+            .as_deref()
+            .map(c_type)
+            .unwrap_or_else(|| "long long".to_string());
         out.push_str(&format!("    {} {};\n", t, name));
     }
     // SSA temporary declarations.
@@ -74,11 +82,7 @@ fn emit_function(f: &mir::Function) -> String {
     for (i, block) in f.blocks.iter().enumerate() {
         out.push_str(&format!("b{}:\n", i));
         for s in &block.stmts {
-            out.push_str(&format!(
-                "    {} = {};\n",
-                s.place,
-                emit_rvalue(&s.rvalue)
-            ));
+            out.push_str(&format!("    {} = {};\n", s.place, emit_rvalue(&s.rvalue)));
         }
         out.push_str(&emit_terminator(&block.term));
         out.push('\n');
@@ -145,7 +149,7 @@ fn emit_rvalue(rv: &mir::Rvalue) -> String {
             format!("({}){{ {} }}", name, inits.join(", "))
         }
         mir::Rvalue::Field(o, f) => format!("{}.{}", emit_operand(o), f),
-        mir::Rvalue::Ref(o) => format!("&{}", emit_operand(o)),
+        mir::Rvalue::Ref(o, _) => format!("&{}", emit_operand(o)),
     }
 }
 

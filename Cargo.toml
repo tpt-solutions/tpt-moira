@@ -10,7 +10,7 @@ repository = "https://github.com/tpt-solutions/moira"
 readme = "README.md"
 
 [workspace]
-members = ["clotho", "lachesis", "atropos", "moira-alloc"]
+members = ["clotho", "lachesis", "atropos", "moira-alloc", "moira-bench"]
 
 [workspace.package]
 edition = "2021"

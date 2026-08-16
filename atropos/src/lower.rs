@@ -1,7 +1,9 @@
 //! Lower the Clotho AST into the Atropos MIR (SSA form) for the Phase-1 subset.
 
 use crate::mir;
-use clotho::ast::{self, BinOp as ABinOp, Expr, ExprKind, ItemKind, Pat, Program, Stmt, StmtKind, UnOp as AUnOp};
+use clotho::ast::{
+    self, BinOp as ABinOp, Expr, ExprKind, ItemKind, Pat, Program, Stmt, StmtKind, UnOp as AUnOp,
+};
 use std::collections::HashMap;
 use std::fmt;
 
@@ -35,6 +37,8 @@ pub fn lower_program(prog: &Program) -> Result<mir::Program> {
                 });
             }
             ItemKind::Use(_) => { /* ignored in Phase 1 */ }
+            ItemKind::Impl(_) => { /* trait impls are consumed by the type checker */ }
+            ItemKind::Module(_) => { /* resolved/inlined by the frontend */ }
             ItemKind::Function(f) => {
                 let l = Lower::new(&out.structs);
                 let func = l.lower_function(f)?;
@@ -43,7 +47,10 @@ pub fn lower_program(prog: &Program) -> Result<mir::Program> {
             other => {
                 return Err(LowerError(format!(
                     "unsupported top-level item in codegen subset: {:?}",
-                    matches!(other, ItemKind::Enum(_) | ItemKind::Const(_) | ItemKind::Static(_))
+                    matches!(
+                        other,
+                        ItemKind::Enum(_) | ItemKind::Const(_) | ItemKind::Static(_)
+                    )
                 )));
             }
         }
@@ -54,7 +61,7 @@ pub fn lower_program(prog: &Program) -> Result<mir::Program> {
 /// Convert a Clotho type to a C type string, or `"long long"` when unknown.
 fn type_to_c(ty: &ast::Type) -> String {
     match &ty.kind {
-        ast::TypeKind::Path(p) => p
+        ast::TypeKind::Path(p, _) => p
             .segments
             .last()
             .map(|s| s.node.clone())
@@ -128,7 +135,9 @@ impl Lower {
     }
 
     fn emit(&mut self, place: String, rvalue: mir::Rvalue) {
-        self.func.blocks[self.current].stmts.push(mir::Stmt { place, rvalue });
+        self.func.blocks[self.current]
+            .stmts
+            .push(mir::Stmt { place, rvalue });
     }
 
     fn fresh_temp(&mut self, ty: impl Into<String>) -> String {
@@ -139,7 +148,10 @@ impl Lower {
     }
 
     fn temp_type_of(&self, name: &str) -> String {
-        self.types.get(name).cloned().unwrap_or_else(|| "long long".to_string())
+        self.types
+            .get(name)
+            .cloned()
+            .unwrap_or_else(|| "long long".to_string())
     }
 
     /// Lower a block, returning the operand holding its value (tail expression
@@ -179,9 +191,7 @@ impl Lower {
     fn lower_expr(&mut self, e: &Expr) -> Result<mir::Operand> {
         match &e.kind {
             ExprKind::Lit(ast::Lit::Int(v, _)) => Ok(mir::Operand::Const(*v as i128)),
-            ExprKind::Lit(ast::Lit::Bool(b)) => {
-                Ok(mir::Operand::Const(if *b { 1 } else { 0 }))
-            }
+            ExprKind::Lit(ast::Lit::Bool(b)) => Ok(mir::Operand::Const(if *b { 1 } else { 0 })),
             ExprKind::Lit(ast::Lit::Float(text, _)) => {
                 // Store as integer bits lossily; demo avoids floats in codegen.
                 let f: f64 = text.parse().unwrap_or(0.0);
@@ -191,7 +201,11 @@ impl Lower {
                 "string/char literals are not supported in the codegen subset".into(),
             )),
             ExprKind::Path(p) => {
-                let name = p.segments.last().map(|s| s.node.clone()).unwrap_or_default();
+                let name = p
+                    .segments
+                    .last()
+                    .map(|s| s.node.clone())
+                    .unwrap_or_default();
                 Ok(mir::Operand::var(name))
             }
             ExprKind::Binary(l, abop, r) => {
@@ -242,7 +256,11 @@ impl Lower {
             }
             ExprKind::Call(callee, args) => {
                 let name = match &callee.kind {
-                    ExprKind::Path(p) => p.segments.last().map(|s| s.node.clone()).unwrap_or_default(),
+                    ExprKind::Path(p) => p
+                        .segments
+                        .last()
+                        .map(|s| s.node.clone())
+                        .unwrap_or_default(),
                     _ => return Err(LowerError("call target must be a path".into())),
                 };
                 let mut operands = Vec::new();
@@ -262,15 +280,19 @@ impl Lower {
                 self.emit(t.clone(), mir::Rvalue::Field(o, field.node.clone()));
                 Ok(mir::Operand::var(t))
             }
-            ExprKind::Ref(e) => {
+            ExprKind::Ref(e, mutable) => {
                 let o = self.lower_expr(e)?;
                 let inner = self.temp_type_of(&name_of(&o));
                 let t = self.fresh_temp(format!("{}*", inner));
-                self.emit(t.clone(), mir::Rvalue::Ref(o));
+                self.emit(t.clone(), mir::Rvalue::Ref(o, *mutable));
                 Ok(mir::Operand::var(t))
             }
             ExprKind::Struct(path, fields, _base) => {
-                let name = path.segments.last().map(|s| s.node.clone()).unwrap_or_default();
+                let name = path
+                    .segments
+                    .last()
+                    .map(|s| s.node.clone())
+                    .unwrap_or_default();
                 let mut fvals = Vec::new();
                 for (fname, fval) in fields {
                     fvals.push((fname.node.clone(), self.lower_expr(fval)?));
@@ -315,7 +337,9 @@ impl Lower {
                 };
                 let a_op = self.lower_expr(a)?;
                 let b_op = self.lower_expr(b)?;
-                self.func.locals.push((name.clone(), Some("long long".into())));
+                self.func
+                    .locals
+                    .push((name.clone(), Some("long long".into())));
                 self.emit(name.clone(), mir::Rvalue::Use(a_op));
 
                 let head = self.new_block();
@@ -326,10 +350,7 @@ impl Lower {
                 self.current = head;
                 let cond = mir::Operand::var(name.clone());
                 let cmp = self.fresh_temp("long long");
-                self.emit(
-                    cmp.clone(),
-                    mir::Rvalue::Binary(mir::BinOp::Lt, cond, b_op),
-                );
+                self.emit(cmp.clone(), mir::Rvalue::Binary(mir::BinOp::Lt, cond, b_op));
                 self.set_term(mir::Terminator::If(mir::Operand::var(cmp), body_blk, exit));
 
                 self.current = body_blk;
@@ -338,7 +359,10 @@ impl Lower {
                 self.loops.pop();
                 // i = i + 1
                 let i = mir::Operand::var(name.clone());
-                self.emit(name.clone(), mir::Rvalue::Binary(mir::BinOp::Add, i, mir::Operand::Const(1)));
+                self.emit(
+                    name.clone(),
+                    mir::Rvalue::Binary(mir::BinOp::Add, i, mir::Operand::Const(1)),
+                );
                 self.set_term(mir::Terminator::Goto(head));
 
                 self.current = exit;
@@ -375,9 +399,9 @@ impl Lower {
                 Ok(mir::Operand::Unit)
             }
             ExprKind::Match(..) => Err(LowerError("`match` is not in the codegen subset".into())),
-            ExprKind::MethodCall(..) => {
-                Err(LowerError("method calls are not in the codegen subset".into()))
-            }
+            ExprKind::MethodCall(..) => Err(LowerError(
+                "method calls are not in the codegen subset".into(),
+            )),
             ExprKind::Index(..) => Err(LowerError("indexing is not in the codegen subset".into())),
             ExprKind::Array(..) => Err(LowerError("arrays are not in the codegen subset".into())),
             ExprKind::Deref(e) => {
@@ -389,11 +413,7 @@ impl Lower {
         }
     }
 
-    fn lower_loop(
-        &mut self,
-        cond: Option<&Expr>,
-        body: &ast::Block,
-    ) -> Result<mir::Operand> {
+    fn lower_loop(&mut self, cond: Option<&Expr>, body: &ast::Block) -> Result<mir::Operand> {
         let head = self.new_block();
         let body_blk = self.new_block();
         let exit = self.new_block();
@@ -480,11 +500,7 @@ fn map_binop(op: ABinOp) -> Result<mir::BinOp> {
     })
 }
 
-fn lookup_field_type(
-    structs: &[mir::StructDef],
-    base_ty: &str,
-    field: &str,
-) -> Option<String> {
+fn lookup_field_type(structs: &[mir::StructDef], base_ty: &str, field: &str) -> Option<String> {
     structs
         .iter()
         .find(|s| s.name == base_ty)
