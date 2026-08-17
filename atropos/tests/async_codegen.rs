@@ -82,7 +82,10 @@ fn done_epilogue_stores_state_minus_one_and_returns_ready() {
             )
         }) && matches!(b.term, Terminator::Return(Some(Operand::Const(0))))
     });
-    assert!(has_done, "a block must write __state = -1 then return READY(0)");
+    assert!(
+        has_done,
+        "a block must write __state = -1 then return READY(0)"
+    );
 }
 
 /// Locate a working C compiler (mirrors `atropos::tests::codegen`).

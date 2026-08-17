@@ -301,10 +301,7 @@ impl Lower {
                 // non-parameter local: initialize to 0 so the slot-save at the
                 // first suspension point reads a defined value (the body assigns
                 // it before it is actually used across the await).
-                self.emit(
-                    sname.clone(),
-                    mir::Rvalue::Use(mir::Operand::Const(0)),
-                );
+                self.emit(sname.clone(), mir::Rvalue::Use(mir::Operand::Const(0)));
             }
         }
         let ret_op = self.lower_block_value(&f.body)?;
@@ -444,10 +441,9 @@ impl Lower {
                 let ty = match (&local.ty, &local.init) {
                     (Some(t), _) => Some(type_to_c(t)),
                     (None, Some(init)) => match &init.kind {
-                        ExprKind::Struct(path, _, _) => path
-                            .segments
-                            .last()
-                            .map(|s| s.node.clone()),
+                        ExprKind::Struct(path, _, _) => {
+                            path.segments.last().map(|s| s.node.clone())
+                        }
                         _ => None,
                     },
                     (None, None) => None,
@@ -728,13 +724,40 @@ impl Lower {
                 self.emit(t.clone(), mir::Rvalue::Call(method.node.clone(), operands));
                 Ok(mir::Operand::var(t))
             }
-            ExprKind::Index(..) => Err(LowerError("indexing is not in the codegen subset".into())),
-            ExprKind::Array(..) => Err(LowerError("arrays are not in the codegen subset".into())),
+            ExprKind::Index(base, idx) => {
+                let b = self.lower_expr(base)?;
+                let i = self.lower_expr(idx)?;
+                // Element read `base[idx]`; the destination temp carries the
+                // (structural) element type, and the C backend emits `t = base[idx]`.
+                let t = self.fresh_temp("long long");
+                self.emit(t.clone(), mir::Rvalue::Index(b, i));
+                Ok(mir::Operand::var(t))
+            }
+            ExprKind::Array(elems) => {
+                let mut operands = Vec::with_capacity(elems.len());
+                for e in elems {
+                    operands.push(self.lower_expr(e)?);
+                }
+                // Lowering is structural (it has no type info from the inference
+                // engine), so the array element C type defaults to `long long`.
+                // The array temp is intentionally *not* registered in `temp_types`;
+                // the C backend emits its `elem_ty name[len] = {..}` declaration inline.
+                let t = format!("t{}", self.temp_counter);
+                self.temp_counter += 1;
+                self.emit(t.clone(), mir::Rvalue::Array("long long".to_string(), operands));
+                Ok(mir::Operand::var(t))
+            }
             ExprKind::Unsafe(..) => Err(LowerError("`unsafe` is not in the codegen subset".into())),
             ExprKind::Closure { .. } => {
                 Err(LowerError("closures are not in the codegen subset".into()))
             }
-            ExprKind::Cast(..) => Err(LowerError("casts are not in the codegen subset".into())),
+            ExprKind::Cast(e, ty) => {
+                let operand = self.lower_expr(e)?;
+                let cty = type_to_c(ty);
+                let t = self.fresh_temp(cty);
+                self.emit(t.clone(), mir::Rvalue::Cast(operand, type_to_c(ty)));
+                Ok(mir::Operand::var(t))
+            }
             ExprKind::Macro(..) => Err(LowerError("macros are not in the codegen subset".into())),
             ExprKind::Try(..) => Err(LowerError(
                 "the `?` operator is not in the codegen subset".into(),

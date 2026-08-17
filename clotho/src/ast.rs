@@ -134,6 +134,8 @@ pub struct UseTree {
     /// Root path segment (e.g. `std` in `use std::collections::HashMap;`).
     pub prefix: Vec<Spanned<String>>,
     pub kind: UseKind,
+    /// Optional `use path as alias` rename (e.g. `use foo::Bar as Baz;`).
+    pub alias: Option<Spanned<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

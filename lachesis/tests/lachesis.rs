@@ -344,7 +344,8 @@ fn std_option_is_accepted() {
             let y = None;
             let _ = y;
         }"
-    )).is_ok());
+    ))
+    .is_ok());
 }
 
 #[test]
@@ -358,7 +359,8 @@ fn std_result_is_accepted() {
             let _ = e.is_err();
             let _ = r.unwrap();
         }"
-    )).is_ok());
+    ))
+    .is_ok());
 }
 
 #[test]
@@ -371,7 +373,8 @@ fn std_vec_methods_are_accepted() {
             let _ = v.len();
             let _ = v.is_empty();
         }"
-    )).is_ok());
+    ))
+    .is_ok());
 }
 
 #[test]
@@ -382,7 +385,8 @@ fn std_string_methods_are_accepted() {
             s.push_str(\"hi\");
             let _ = s.len();
         }"
-    )).is_ok());
+    ))
+    .is_ok());
 }
 
 #[test]
@@ -397,7 +401,8 @@ fn std_constructor_free_functions_are_accepted() {
             let _ = s;
             let _ = b;
         }"
-    )).is_ok());
+    ))
+    .is_ok());
 }
 
 #[test]
@@ -408,7 +413,8 @@ fn unknown_std_method_is_rejected() {
             let v = Vec::new();
             v.frobnicate();
         }"
-    )).is_err());
+    ))
+    .is_err());
 }
 
 #[test]
@@ -418,5 +424,6 @@ fn std_method_argument_count_is_checked() {
             let v = Vec::new();
             v.push();
         }"
-    )).is_err());
+    ))
+    .is_err());
 }

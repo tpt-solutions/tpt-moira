@@ -164,3 +164,34 @@ fn parse_error_reports_diagnostic() {
     let res = parse_source("fn f( {");
     assert!(res.is_err());
 }
+
+#[test]
+fn parse_use_with_as_rename() {
+    // `use foo::Bar as Baz;` — the trailing `as` rename must parse (the
+    // documented `use ... as` self-host gap for `atropos`). The rename is
+    // recorded; `use` is otherwise dropped by the Phase-1 subset.
+    let src = "use foo::Bar as Baz;";
+    let prog = parse_source(src).unwrap();
+    assert_eq!(prog.items.len(), 1);
+    match &prog.items[0].kind {
+        ItemKind::Use(tree) => {
+            assert_eq!(tree.prefix.len(), 2);
+            assert_eq!(tree.prefix[0].node, "foo");
+            assert_eq!(tree.prefix[1].node, "Bar");
+            assert!(matches!(tree.kind, clotho::ast::UseKind::Leaf));
+            let alias = tree.alias.as_ref().expect("expected an `as` alias");
+            assert_eq!(alias.node, "Baz");
+        }
+        other => panic!("expected a use item, got {other:?}"),
+    }
+}
+
+#[test]
+fn parse_use_without_as_has_no_alias() {
+    let src = "use foo::Bar;";
+    let prog = parse_source(src).unwrap();
+    match &prog.items[0].kind {
+        ItemKind::Use(tree) => assert!(tree.alias.is_none()),
+        other => panic!("expected a use item, got {other:?}"),
+    }
+}

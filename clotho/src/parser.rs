@@ -594,6 +594,7 @@ impl Parser {
                 return Ok(UseTree {
                     prefix,
                     kind: UseKind::Glob,
+                    alias: None,
                 });
             }
             // nested braces
@@ -611,13 +612,26 @@ impl Parser {
                 return Ok(UseTree {
                     prefix,
                     kind: UseKind::Nested(nested),
+                    alias: None,
                 });
             }
             prefix.push(self.expect_ident()?);
         }
+        // `use path as alias` — an optional trailing rename, e.g.
+        // `use foo::Bar as Baz;`. Aliases are recorded but otherwise ignored by
+        // the Phase-1 subset (which drops `use` declarations).
+        if self.eat(&TokenKind::As) {
+            let alias = self.expect_ident()?;
+            return Ok(UseTree {
+                prefix,
+                kind: UseKind::Leaf,
+                alias: Some(alias),
+            });
+        }
         Ok(UseTree {
             prefix,
             kind: UseKind::Leaf,
+            alias: None,
         })
     }
 
@@ -1586,15 +1600,21 @@ impl Parser {
                 self.bump();
                 let inner = self.parse_type()?;
                 if self.eat(&TokenKind::Semicolon) {
-                    let n = match self.expect(TokenKind::Int {
-                        value: 0,
-                        suffix: None,
-                    }) {
-                        Ok(t) => match t.kind {
-                            TokenKind::Int { value, .. } => value,
-                            _ => 0,
-                        },
-                        Err(_) => 0,
+                    // Array length: any integer literal, e.g. `[u8; 6]`. The old
+                    // code matched only the literal `0`, so `[T; N]` for N != 0
+                    // failed to parse.
+                    let n = match self.peek_kind() {
+                        TokenKind::Int { value, .. } => {
+                            let v = *value;
+                            self.bump();
+                            v
+                        }
+                        _ => {
+                            return Err(Diag::error(
+                                "expected array length",
+                                Some(self.peek().span),
+                            ))
+                        }
                     };
                     self.expect(TokenKind::RBracket)?;
                     TypeKind::Array(Box::new(inner), n)

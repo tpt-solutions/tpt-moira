@@ -50,6 +50,28 @@ impl BuiltinTrait {
         })
     }
 
+    /// Map a trait's surface name (as written in a bound) to the built-in
+    /// trait, if it is one. Accepts both the lang-item name (`PartialEq`) and
+    /// the user-facing alias (`Eq`).
+    pub fn from_name(name: &str) -> Option<BuiltinTrait> {
+        use BuiltinTrait::*;
+        Some(match name {
+            "Add" => Add,
+            "Sub" => Sub,
+            "Mul" => Mul,
+            "Div" => Div,
+            "Rem" => Rem,
+            "BitAnd" => BitAnd,
+            "BitOr" => BitOr,
+            "BitXor" => BitXor,
+            "Shl" => Shl,
+            "Shr" => Shr,
+            "PartialEq" | "Eq" => Eq,
+            "PartialOrd" | "Ord" => Ord,
+            _ => return None,
+        })
+    }
+
     /// The trait's surface name (used in diagnostics).
     pub fn name(self) -> &'static str {
         match self {

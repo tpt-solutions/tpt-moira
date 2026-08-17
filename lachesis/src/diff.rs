@@ -248,7 +248,11 @@ mod tests {
         let tmp = std::env::temp_dir().join("moira_allowlist_test.toml");
         let _ = std::fs::remove_file(&tmp);
         let mut a = Allowlist::default();
-        a.insert(Some(std::path::Path::new("foo.rs")), 42, Divergence::BothReject);
+        a.insert(
+            Some(std::path::Path::new("foo.rs")),
+            42,
+            Divergence::BothReject,
+        );
         a.save(&tmp).unwrap();
         let loaded = Allowlist::load(&tmp).unwrap();
         assert_eq!(loaded, a);
@@ -276,7 +280,140 @@ mod tests {
 
     #[test]
     fn allowlist_missing_file_is_empty() {
-        let a = Allowlist::load(std::path::Path::new("/no/such/.moira-divergence-allowlist")).unwrap();
+        let a =
+            Allowlist::load(std::path::Path::new("/no/such/.moira-divergence-allowlist")).unwrap();
         assert!(a.is_empty());
+    }
+}
+
+/// Error-message parity audit against `rustc` (Phase-4 "error message parity
+/// audit").
+///
+/// Two compilers "agree" on a diagnostic when, for a `rustc` error, Moira emits
+/// an error in the *same coarse category* (e.g. both are borrow errors) and the
+/// wording overlaps. The [`ParityReport`] quantifies this so a CI job can track
+/// Moira's diagnostic fidelity over time.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ParityReport {
+    /// Number of `rustc` error lines considered.
+    pub rustc_count: usize,
+    /// Number of Moira error lines considered.
+    pub moira_count: usize,
+    /// How many `rustc` errors had a Moira error in the same category.
+    pub category_matches: usize,
+    /// Average best token-overlap (Jaccard) between each `rustc` error and the
+    /// most similar Moira error, in `[0, 1]`.
+    pub wording_similarity: f64,
+}
+
+impl ParityReport {
+    /// A single 0..1 score blending category coverage and wording similarity.
+    pub fn score(&self) -> f64 {
+        let coverage = if self.rustc_count == 0 {
+            1.0
+        } else {
+            self.category_matches as f64 / self.rustc_count as f64
+        };
+        0.6 * coverage + 0.4 * self.wording_similarity
+    }
+
+    /// Human-readable summary line (also consumed by the triage/parity report).
+    pub fn describe(&self) -> String {
+        format!(
+            "parity: rustc_errors={} moira_errors={} category_matches={} wording_similarity={:.2} score={:.2}",
+            self.rustc_count,
+            self.moira_count,
+            self.category_matches,
+            self.wording_similarity,
+            self.score(),
+        )
+    }
+}
+
+fn word_set(msg: &str) -> std::collections::HashSet<String> {
+    msg.split(|c: char| !c.is_alphanumeric())
+        .map(|w| w.to_ascii_lowercase())
+        .filter(|w| w.len() >= 3)
+        .collect()
+}
+
+fn jaccard(a: &std::collections::HashSet<String>, b: &std::collections::HashSet<String>) -> f64 {
+    if a.is_empty() && b.is_empty() {
+        return 1.0;
+    }
+    let inter = a.intersection(b).count() as f64;
+    let union = a.union(b).count() as f64;
+    if union == 0.0 {
+        1.0
+    } else {
+        inter / union
+    }
+}
+
+/// Score diagnostic parity between Moira's and `rustc`'s errors.
+pub fn parity(moira: &[String], rustc: &[String]) -> ParityReport {
+    let moira_cats: Vec<_> = moira
+        .iter()
+        .map(|m| crate::propose::classify_error(m))
+        .collect();
+    let moira_sets: Vec<_> = moira.iter().map(|m| word_set(m)).collect();
+
+    let mut category_matches = 0usize;
+    let mut sim_sum = 0.0f64;
+    for r in rustc {
+        let rcat = crate::propose::classify_error(r);
+        if moira_cats.contains(&rcat) {
+            category_matches += 1;
+        }
+        let rset = word_set(r);
+        let best = moira_sets
+            .iter()
+            .map(|mset| jaccard(&rset, mset))
+            .fold(0.0f64, f64::max);
+        sim_sum += best;
+    }
+    let wording_similarity = if rustc.is_empty() {
+        1.0
+    } else {
+        sim_sum / rustc.len() as f64
+    };
+
+    ParityReport {
+        rustc_count: rustc.len(),
+        moira_count: moira.len(),
+        category_matches,
+        wording_similarity,
+    }
+}
+
+#[cfg(test)]
+mod parity_tests {
+    use super::*;
+
+    #[test]
+    fn full_parity_when_no_errors() {
+        let r = parity(&[], &[]);
+        assert_eq!(r.score(), 1.0);
+    }
+
+    #[test]
+    fn category_match_boosts_score() {
+        let r = parity(
+            &["moira: cannot borrow as mutable".into()],
+            &["error[E0502]: cannot borrow `x` as mutable".into()],
+        );
+        assert_eq!(r.category_matches, 1);
+        assert!(r.wording_similarity > 0.0);
+        assert!(r.score() > 0.5);
+    }
+
+    #[test]
+    fn mismatch_scores_low() {
+        let r = parity(
+            &["moira: overflow".into()],
+            &["error: mismatched types".into()],
+        );
+        assert_eq!(r.category_matches, 0);
+        assert!(r.score() < 0.6);
     }
 }

@@ -8,8 +8,9 @@
 use std::io::Read;
 use std::process::{Command, ExitCode};
 
-use lachesis::diff::{classify, Allowlist};
-use lachesis::Cache;
+use lachesis::diff::{classify, parity, Allowlist};
+use lachesis::propose::{make_record, LlmProposer, TriageQueue};
+use lachesis::PipelineCacheExt;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -18,10 +19,17 @@ fn main() -> ExitCode {
     //   --emit <mode>  selects output (ast|mir|ssa|c|asm|native|check)
     //   -o <file>      redirects output to a file instead of stdout
     //   --check        run the Lachesis type + borrow checker before codegen
+    //   --diff         run the moira-diff divergence harness against rustc
+    //   --parity       in --diff, also print the error-message parity audit
+    //   --propose      in --diff, attach the AI root-cause proposer + triage queue
+    //   --allowlist    override the divergence allowlist file
+    //   --update-allowlist  persist divergences seen in a run into the allowlist
     let mut emit = "ast".to_string();
     let mut output: Option<String> = None;
     let mut check = false;
     let mut diff = false;
+    let mut parity_flag = false;
+    let mut propose_flag = false;
     let mut allowlist_path: Option<String> = None;
     let mut update_allowlist = false;
     let mut positional: Vec<String> = Vec::new();
@@ -40,6 +48,8 @@ fn main() -> ExitCode {
             }
             "--check" => check = true,
             "--diff" => diff = true,
+            "--parity" => parity_flag = true,
+            "--propose" => propose_flag = true,
             "--allowlist" => {
                 if let Some(path) = iter.next() {
                     allowlist_path = Some(path.clone());
@@ -82,15 +92,26 @@ fn main() -> ExitCode {
         (buf, prog)
     };
 
-    let input_path = positional.first().map(|p| std::path::Path::new(p).to_path_buf());
+    let input_path = positional
+        .first()
+        .map(|p| std::path::Path::new(p).to_path_buf());
     if diff {
-        return run_diff(&source, &program, input_path.as_deref(), allowlist_path.as_deref(), update_allowlist);
+        return run_diff(
+            &source,
+            &program,
+            input_path.as_deref(),
+            allowlist_path.as_deref(),
+            update_allowlist,
+            parity_flag,
+            propose_flag,
+        );
     }
 
     // End-to-end integration: optionally (or for the `check` emit) run the
-    // Lachesis type + borrow checker before lowering/codegen.
+    // Lachesis type + borrow checker before lowering/codegen. The result is read
+    // through the whole-pipeline content-addressed cache when caching is on.
     if check {
-        if let Err(diags) = lachesis::check(&program) {
+        if let Err(diags) = pipeline().checked(&source, || lachesis::check(&program)) {
             for d in &diags {
                 eprintln!("moira: {}", d);
             }
@@ -100,7 +121,7 @@ fn main() -> ExitCode {
     }
 
     match emit.as_str() {
-        "check" => match lachesis::check(&program) {
+        "check" => match pipeline().checked(&source, || lachesis::check(&program)) {
             Ok(()) => println!("moira: type-check and borrow-check passed"),
             Err(diags) => {
                 for d in &diags {
@@ -173,6 +194,12 @@ fn main() -> ExitCode {
     ExitCode::SUCCESS
 }
 
+/// The whole-pipeline content-addressed cache, or a no-op wrapper when
+/// `MOIRA_NO_CACHE` is set (used by cross-process determinism checks).
+fn pipeline() -> PipelineCacheExt {
+    PipelineCacheExt::new()
+}
+
 fn lower_and_ssa(program: &clotho::ast::Program) -> Result<atropos::SsaProgram, String> {
     let mir = atropos::lower_program(program).map_err(|e| e.to_string())?;
     let mut ssa = atropos::build_ssa(&mir)?;
@@ -182,27 +209,15 @@ fn lower_and_ssa(program: &clotho::ast::Program) -> Result<atropos::SsaProgram, 
 
 /// Lower to SSA text, consulting the disk-backed content-addressed cache so an
 /// unchanged source string reuses its previously computed SSA instead of
-/// recomputing it (the Phase-2 incremental cache, demonstrated on `--emit ssa`).
+/// recomputing it (the Phase-4 whole-pipeline cache: this is one of the
+/// artifacts keyed by source hash alongside the check result and MIR).
 fn ssa_text(source: &str, program: &clotho::ast::Program) -> Result<String, String> {
-    let key = lachesis::content_hash(source);
-    let cache_dir = std::env::temp_dir().join("moira_cache");
-    // `MOIRA_NO_CACHE=1` bypasses the incremental cache so the SSA is recomputed
-    // from scratch every invocation. This is what makes cross-process
-    // determinism checks (and reproducible self-host builds) meaningful: without
-    // it, a cached first run would mask any nondeterminism in the emit path.
-    if std::env::var("MOIRA_NO_CACHE").is_err() {
-        if let Ok(cache) = Cache::open(&cache_dir) {
-            if let Some(bytes) = cache.get(key) {
-                if let Ok(s) = String::from_utf8(bytes) {
-                    return Ok(s);
-                }
-            }
-            let s = lower_and_ssa(program).map(|ssa| ssa.to_string())?;
-            let _ = cache.insert(key, s.as_bytes());
-            return Ok(s);
-        }
-    }
-    lower_and_ssa(program).map(|ssa| ssa.to_string())
+    let s = pipeline().text(source, "ssa", || {
+        lower_and_ssa(program)
+            .map(|ssa| ssa.to_string())
+            .unwrap_or_default()
+    });
+    Ok(s)
 }
 
 fn emit_text(text: &str, output: &Option<String>) {
@@ -223,12 +238,17 @@ fn emit_text(text: &str, output: &Option<String>) {
 /// that tracked, known divergences don't fail the run; `--update-allowlist`
 /// persists the divergences seen here back into that file. A run "succeeds"
 /// (exit 0) when every divergence is covered by the allowlist.
+///
+/// With `--parity` the error-message parity audit is printed; with `--propose`
+/// the offline AI root-cause proposer runs and appends to the triage queue.
 fn run_diff(
     source: &str,
     program: &clotho::ast::Program,
     input_path: Option<&std::path::Path>,
     allowlist_path: Option<&str>,
     update_allowlist: bool,
+    parity_flag: bool,
+    propose_flag: bool,
 ) -> ExitCode {
     let moira_errors = match lachesis::check(program) {
         Ok(()) => Vec::new(),
@@ -244,7 +264,11 @@ fn run_diff(
     let mut allowlist = match Allowlist::load(&allow_file) {
         Ok(a) => a,
         Err(e) => {
-            eprintln!("moira-diff: could not read allowlist `{}`: {}", allow_file.display(), e);
+            eprintln!(
+                "moira-diff: could not read allowlist `{}`: {}",
+                allow_file.display(),
+                e
+            );
             Allowlist::default()
         }
     };
@@ -255,6 +279,12 @@ fn run_diff(
         moira_errors.len(),
         rustc_errors.len()
     );
+
+    if parity_flag {
+        let pr = parity(&moira_errors, &rustc_errors);
+        println!("  {}", pr.describe());
+    }
+
     let mut unallowed = Vec::new();
     for &d in &report.divergences {
         if allowlist.allows(input_path, hash, d) {
@@ -274,12 +304,45 @@ fn run_diff(
         }
     }
 
+    // AI-assisted diffing: propose root cause + minimal fix per divergence and
+    // record it in the triage queue.
+    if propose_flag && !report.divergences.is_empty() {
+        let proposer = llm_proposer_from_env();
+        let queue_path = std::path::Path::new(".moira-triage.jsonl");
+        let mut queue = match TriageQueue::open(queue_path) {
+            Ok(q) => Some(q),
+            Err(e) => {
+                eprintln!(
+                    "moira-diff: could not open triage queue `{}`: {}",
+                    queue_path.display(),
+                    e
+                );
+                TriageQueue::open(&std::env::temp_dir().join("moira_triage.jsonl")).ok()
+            }
+        };
+        for &d in &report.divergences {
+            let rec = make_record(d, &moira_errors, &rustc_errors, &proposer, hash);
+            println!("  PROPOSAL [{}]: {}", rec.label, rec.root_cause);
+            println!("           fix: {}", rec.minimal_fix);
+            if let Some(q) = &mut queue {
+                let _ = q.push(rec);
+            }
+        }
+        if let Some(q) = &queue {
+            println!("moira-diff: triage queue has {} record(s)", q.len());
+        }
+    }
+
     if update_allowlist && !report.divergences.is_empty() {
         for &d in &report.divergences {
             allowlist.insert(input_path, hash, d);
         }
         if let Err(e) = allowlist.save(&allow_file) {
-            eprintln!("moira-diff: could not write allowlist `{}`: {}", allow_file.display(), e);
+            eprintln!(
+                "moira-diff: could not write allowlist `{}`: {}",
+                allow_file.display(),
+                e
+            );
         } else {
             println!(
                 "moira-diff: recorded {} divergence(s) into `{}`",
@@ -293,6 +356,52 @@ fn run_diff(
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE
+    }
+}
+
+/// Build the root-cause proposer, attaching an LLM backend if `MOIRA_LLM_CMD` is
+/// set (an OpenAI-compatible chat command reading the prompt on stdin and
+/// printing the reply to stdout, e.g. `ollama run <model>` or a `curl` call).
+fn llm_proposer_from_env() -> LlmProposer {
+    match std::env::var("MOIRA_LLM_CMD") {
+        Ok(cmd) if !cmd.trim().is_empty() => {
+            let cmd = cmd.clone();
+            LlmProposer::with_backend(move |prompt: &str| -> String {
+                run_llm_command(&cmd, prompt)
+            })
+        }
+        _ => LlmProposer::offline(),
+    }
+}
+
+#[cfg(windows)]
+fn run_llm_command(cmd: &str, prompt: &str) -> String {
+    run_llm_command_shell("cmd", &["/C", cmd], prompt)
+}
+
+#[cfg(not(windows))]
+fn run_llm_command(cmd: &str, prompt: &str) -> String {
+    run_llm_command_shell("sh", &["-c", cmd], prompt)
+}
+
+fn run_llm_command_shell(shell: &str, args: &[&str], prompt: &str) -> String {
+    use std::io::Write;
+    let child = Command::new(shell)
+        .args(args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+    let mut child = match child {
+        Ok(c) => c,
+        Err(_) => return String::new(),
+    };
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(prompt.as_bytes());
+    }
+    match child.wait_with_output() {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
+        _ => String::new(),
     }
 }
 

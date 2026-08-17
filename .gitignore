@@ -38,3 +38,6 @@ Thumbs.db
 
 # moira-diff known-divergence allowlist (auto-generated / local triage state)
 .moira-divergence-allowlist
+
+# moira-diff AI triage queue (auto-generated local state)
+.moira-triage.jsonl

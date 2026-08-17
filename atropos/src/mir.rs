@@ -110,6 +110,14 @@ pub enum Rvalue {
     /// Write `value` into `struct_operand.field`. When `deref` is true the
     /// operand is a pointer and the write is `operand->field = value`.
     StoreField(Operand, String, Operand, bool),
+    /// Type cast `operand as TargetType` — `ty` is the target C type name
+    /// (e.g. `i64`, `u32`, `i32*`). Models `expr as Type`.
+    Cast(Operand, String),
+    /// Array literal `[e0, e1, …]` — `elem_ty` is the C type of each element
+    /// (the array temp is declared `elem_ty name[len]` and initialized inline).
+    Array(String, Vec<Operand>),
+    /// Array indexing `base[idx]` — reads `base[idx]` into the destination.
+    Index(Operand, Operand),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -283,6 +291,12 @@ impl fmt::Display for Rvalue {
                     write!(f, "{}.{} = {}", s, field, v)
                 }
             }
+            Rvalue::Cast(o, ty) => write!(f, "({}) {}", ty, o),
+            Rvalue::Array(ty, elems) => {
+                let es: Vec<String> = elems.iter().map(|e| e.to_string()).collect();
+                write!(f, "[{}; {}]", ty, es.join(", "))
+            }
+            Rvalue::Index(b, i) => write!(f, "{}[{}]", b, i),
         }
     }
 }

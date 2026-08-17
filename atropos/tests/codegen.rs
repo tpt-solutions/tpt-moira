@@ -148,3 +148,21 @@ fn end_to_end_runs() {
     // s = 3+4 = 7, m = max(7,10) = 10, t = sum_to(5) = 0+1+2+3+4 = 10
     assert_eq!(stdout.trim(), "7\n10\n10", "unexpected program output");
 }
+
+/// Lower an arbitrary Moira source string (rather than the demo file) so
+/// feature-specific codegen can be tested in isolation.
+fn lower_src(src: &str) -> atropos::MirProgram {
+    let prog = clotho::parse_source(src).expect("source should parse");
+    atropos::lower_program(&prog).expect("source should lower")
+}
+
+#[test]
+fn cast_lowers_to_c_cast() {
+    // `x as i64` must lower to a C-style `(i64)x` conversion (the documented
+    // `as`-cast self-host gap for `atropos`).
+    let mir = lower_src("fn f(x: i32) -> i64 { x as i64 }");
+    let c = atropos::codegen_c::emit_c(&mir);
+    assert!(c.contains("(i64)x"), "expected a C cast `(i64)x`:\n{c}");
+    // The cast temporary must be declared with the narrowed target type.
+    assert!(c.contains("int64_t"), "cast temp should be i64:\n{c}");
+}

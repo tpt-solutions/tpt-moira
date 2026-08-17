@@ -19,6 +19,8 @@ pub mod borrow;
 pub mod cache;
 pub mod diff;
 pub mod infer;
+pub mod pipeline_cache;
+pub mod propose;
 pub mod solver;
 pub mod traits;
 pub mod ty;
@@ -26,6 +28,7 @@ pub mod ty;
 pub use borrow::borrow_check;
 pub use cache::{content_hash, Cache, IncrementalCache};
 pub use infer::TypeChecker;
+pub use pipeline_cache::{PipelineCache, PipelineCacheExt};
 pub use traits::{BuiltinTrait, TraitDb};
 pub use ty::Ty;
 
@@ -49,13 +52,34 @@ pub fn borrow_check_program(prog: &Program) -> Result<(), Vec<Diag>> {
 ///
 /// Returns `Ok(())` only when the program is well-typed, borrow-safe, and its
 /// user `impl`s are coherent and well-formed.
+///
+/// The type-check pass and the borrow-check pass are *independent*: the borrow
+/// checker lowers the AST to MIR structurally (no type information from the
+/// inference engine is required), so the two passes read only the shared,
+/// immutable `Program` and can run concurrently on separate OS threads. They
+/// are joined and the diagnostics concatenated in a fixed order (type errors
+/// first, then borrow errors) so the reported diagnostics remain deterministic
+/// for the test suite; the coherence / well-formedness reports are appended
+/// after the two passes settle.
 pub fn check(prog: &Program) -> Result<(), Vec<Diag>> {
+    let mut type_res: Result<(), Vec<Diag>> = Ok(());
+    let mut borrow_res: Result<(), Vec<Diag>> = Ok(());
+
+    std::thread::scope(|s| {
+        s.spawn(|| {
+            type_res = type_check(prog);
+        });
+        s.spawn(|| {
+            borrow_res = borrow_check_program(prog);
+        });
+    });
+
     let mut errs: Vec<Diag> = Vec::new();
-    match type_check(prog) {
+    match type_res {
         Ok(()) => {}
         Err(mut e) => errs.append(&mut e),
     }
-    match borrow_check_program(prog) {
+    match borrow_res {
         Ok(()) => {}
         Err(mut e) => errs.append(&mut e),
     }
@@ -111,4 +135,46 @@ pub fn normalize_assoc_type(
         Box::new(solver::Term::Concr(self_ty.clone())),
     );
     solver::Solver::new(solver::program_with_impls(prog)).normalize(&proj)
+}
+
+#[cfg(test)]
+mod tests {
+    use clotho::parser::Parser;
+
+    fn parse(src: &str) -> clotho::ast::Program {
+        Parser::from_source(src).parse_program().expect("parse")
+    }
+
+    #[test]
+    fn parallel_check_aggregates_type_and_borrow_errors() {
+        // A `&mut` coexisting with `&` is a borrow error; the unknown call is a
+        // type error. The two passes run independently (on separate threads) and
+        // `check` must surface diagnostics from *both* — proving the passes are
+        // not short-circuiting each other.
+        let src = r#"
+            fn main() {
+                let mut x = 1;
+                let r1 = &x;
+                let r2 = &mut x;
+                unknown_fn();
+                let _ = r1;
+                let _ = r2;
+            }
+        "#;
+        let prog = parse(src);
+        let errs = crate::check(&prog).expect_err("expected rejection");
+        let joined = errs
+            .iter()
+            .map(|d| d.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            joined.contains("cannot find function `unknown_fn`"),
+            "type error missing from aggregate diagnostics: {joined}"
+        );
+        assert!(
+            joined.contains("as mutable because it is also borrowed as immutable"),
+            "borrow error missing from aggregate diagnostics: {joined}"
+        );
+    }
 }

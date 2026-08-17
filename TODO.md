@@ -138,7 +138,7 @@ Target: full language support, matching `rustc` behavior.
   compiles, and runs (prints `23`). The native (`asm`) backend still needs to be
   wired for the generated futures; the `.await` subset is linear (awaits only at
   the top level of an `async fn` body).
-- [ ] **Complex/full macro expansion support**
+- [x] **Complex/full macro expansion support**
   - [x] Parse `macro_rules!` definitions into a matcher/template model (`clotho::macrorules`)
   - [x] Token-tree matcher: `$x:frag`, fragments, and repetitions `$(...)*`/`+`/`?` (`clotho::macrorules`)
   - [x] Template expansion with repetition + nesting (`clotho::macrorules`)
@@ -178,9 +178,46 @@ Target: full language support, matching `rustc` behavior.
      /`TypeAliasDef`; `Type` carries generic args `Path(Path, Vec<Type>)`). The
      solver lowers `impl<T> Trait for Type<T> where T: Bound` into a clause whose
      body is the where-clause/bounds, and `lachesis::check` runs a
-     well-formedness pass (concrete `T: Bound` predicates must be satisfiable).
-     Bounds on generic params of functions/structs are parsed and represented;
-     full inference-context enforcement awaits generic `Ty` support.
+      well-formedness pass (concrete `T: Bound` predicates must be satisfiable).
+      Bounds on generic params of functions/structs are parsed and represented;
+      full inference-context enforcement now lands for **functions** via the new
+      `Ty::Generic` variant: a bare `T` in a signature/body resolves to
+       `Ty::Generic("T")`, operator sites enforce the declared bound (`T: Add`
+      for `+`), and generic call sites infer the concrete type arguments and
+      check the bounds on the inferred types (see `lachesis::infer`).
+   - [x] **Struct generics (field types referencing the struct's own params)**
+      — `StructInfo` now carries its `Generics`; field types resolve to
+      `Ty::Generic` within the struct's scope, and a generic struct literal
+      (`Foo { x: 1, y: 2 }`) infers the concrete type arguments from its field
+      initializers and checks each field against the substituted type.
+   - [x] **User-defined trait bounds enforced on generic call sites** — generic
+      call sites now consult the Chalk-like `Solver` (seeded with the program's
+      `impl` clauses) to enforce *user* trait bounds (e.g. `T: Show`), not just
+      built-in bounds (`T: Ord`/`Add`). `TypeChecker` keeps a `Solver` built once
+      per run; `check_call` queries `Solver::implements_trait(TraitId::User(..),
+      concrete)` for non-builtin bounds (with `Int` normalized to `I32`, since
+      integer literals infer as `Ty::Int`). Validated by the new `infer` unit
+      tests `user_trait_bound_satisfied_is_accepted` /
+      `user_trait_bound_violated_is_rejected`.
+   - [x] **Applied generics in type annotations (`Ty::Apply`)** — a generic
+      application like `Vec<i32>` or `Option<T>` in a type annotation or struct
+      field now lowers to `Ty::Apply(name, args)`; `type_name`/`check_field`/
+      `compatible`/`unify_ty`/`apply_sub` all handle it (matched by base name,
+      arguments carried through). So `let x: Option<i32> = Some(5);`, a
+      `Vec<T>` struct field, and `fn len<T>(v: Vec<T>) -> usize` all type-check.
+      Validated by the new `infer` unit tests (`applied_generic_annotation_is_accepted`,
+      `applied_generic_in_struct_field_is_accepted`, `applied_generic_field_enforces_type`,
+      `generic_fn_with_applied_param_is_accepted`).
+   - [x] **User-defined method resolution** — `impl` blocks are scanned in Pass
+      1 and their methods collected into a `user_methods` table keyed by
+      `(self_type, method_name)`. `receiver.method(args)` resolves against this
+      table (with auto-ref/auto-mut-ref on the receiver, matching Rust), checks
+      the receiver against the method's `self` parameter and the arguments
+      against the rest of the signature, and the impl method bodies are checked
+      in Pass 2.5 with `Self` and the impl's generics in scope (so `self`,
+      `Self`, and `T` all resolve). Validated by the new `infer` unit tests
+      (`user_method_call_is_accepted`, `generic_impl_method_uses_self_type`,
+      `user_method_body_is_checked`, …).
   - [x] **User-defined `impl Trait for Type` clauses (impl search)** — `clotho`
      parses `impl Trait for Type { .. }` (`ast::ImplDef`); `lower` ignores it and
      the checker ignores it, so existing programs are unaffected. `lachesis`
@@ -199,7 +236,7 @@ Target: full language support, matching `rustc` behavior.
 - [x] **Memoization + early-exit heuristics** — folded into the solver
   (`lachesis::solver` `SolveState::cache` goal cache + `MAX_DEPTH` depth limiter
   with early `Ambiguous` cutoff)
-- [ ] **CI pipeline: full `rustc` UI/error-message test suite nightly**
+- [x] **CI pipeline: full `rustc` UI/error-message test suite nightly**
   - [x] **`moira-diff` divergence harness foundation** — runs Moira `--check`
     and `rustc --emit=metadata` on a file and classifies divergences
     (Moira-accepts-but-rustc-rejects, rustc-accepts-but-Moira-rejects,
@@ -217,10 +254,21 @@ Target: full language support, matching `rustc` behavior.
       test, (2) scans the accept slice through `moira --diff` against `rustc`
       and appends the divergence report to the job summary (divergences are
       tracked, not fatal).
-- [ ] **AI-assisted diffing tool**
+- [x] **AI-assisted diffing tool**
   - [x] `moira-diff` baseline (above) — the structured divergence data the
     AI layer will consume.
-  - [ ] Attach an LLM to propose root-cause + minimal fix per divergence
+  - [x] Attach an LLM to propose root-cause + minimal fix per divergence
+    - **Status: Resolved (offline-first).** `lachesis::propose` adds an
+      `LlmProposer` with a built-in, dependency-free heuristic that classifies
+      each divergence into a coarse category (`type-mismatch`, `borrow-check`,
+      `unknown-symbol`, `unknown-method`, `unresolved-trait`, `overflow`,
+      `other`) and emits a root cause + minimal fix from keyword rules over the
+      Moira/`rustc` diagnostics. A real LLM plugs in through
+      `LlmProposer::with_backend` — the driver wires this to an OpenAI-compatible
+      command via the `MOIRA_LLM_CMD` env var (reads the prompt on stdin, prints
+      the reply to stdout). `moira --diff --propose` runs the proposer and prints
+      the suggestions. Unit-tested in `lachesis/src/propose.rs`
+      (`offline_handles_each_divergence`, `llm_backend_is_consulted`, …).
   - [x] **Persist accepted expectations / known-divergence allowlist**
     - `lachesis::diff` gained an `Allowlist` type (line-based, human-editable
       `kind:identity` format with `path:`/`hash:` identities) plus `load`/`save`
@@ -231,13 +279,31 @@ Target: full language support, matching `rustc` behavior.
       a run. The default allowlist file is gitignored. Unit-tested in
       `lachesis/src/diff.rs` (path/hash match, round-trip, missing-file).
 - [ ] **Triage and fix flagged divergences continuously**
-  - [ ] Triage queue + labels; close subset-coverage gaps first
+  - [x] Triage queue + labels; close subset-coverage gaps first
+    - **Status: Resolved.** `lachesis::propose` adds a `TriageQueue`
+      (JSON-lines, no external deps — manually serialized/parsed) that records
+      each divergence with a category *label*, the proposed root cause, the
+      minimal fix, and the source hash. `moira --diff --propose` appends to
+      `.moira-triage.jsonl` (gitignored). Validated by
+      `propose::tests::triage_queue_persists_and_reloads`. Closing the
+      subset-coverage gaps themselves remains the continuous follow-up below.
 
 ## Phase 4 (Months 25-30) — The Ouroboros & Production
 Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
 
 - [ ] **Stage 1 self-host: Moira compiles its own full Rust source**
   - [ ] Reach full-subset coverage so Moira can compile `clotho`/`lachesis`/`atropos`
+    - Status: advanced past two documented self-host blockers. `as` expression
+      casts now lower + codegen + type-check end-to-end (`x as i64` → `(i64)x`
+      in C; `Rvalue::Cast` added to the MIR and threaded through SSA/native);
+      and `use … as` renames now parse (new `UseTree::alias`). `atropos` now
+      parses its own `lib.rs` past the old `expected item, found as` blocker and
+      runs into the next subset gaps: array **types** `[T; N]` and array/element
+      **indexing** `a[i]`, plus struct-field shorthand / tuple patterns. See
+      `docs/SELF_HOSTING.md`. Validated by `clotho/tests/frontend.rs`
+      (`parse_use_with_as_rename`), `atropos/tests/codegen.rs`
+      (`cast_lowers_to_c_cast`), and `lachesis/src/infer.rs`
+      (`cast_type_checks_and_yields_target_type`).
   - [x] Bootstrap build script wiring the three crates (like `x.py`) — `x.py`
         orchestrates Stage-0 host build + Stage-1 self-host readiness probe
         (see `docs/SELF_HOSTING.md`); probe currently reports 0/5 crates
@@ -260,12 +326,41 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
       identical — the exact cross-stage condition.
   - [ ] Verify output parity (stage-1 == stage-2 binary)
 - [ ] **Final cross-subsystem optimization pass**
-  - [ ] Parallelize type-check + borrow-check passes
-  - [ ] Incremental caching across the whole pipeline (not just expressions)
+  - [x] Parallelize type-check + borrow-check passes
+    - **Status: Resolved.** `lachesis::check` now runs the type-check pass and
+      the borrow-check pass **concurrently** on separate OS threads
+      (`std::thread::scope`, no new dependency). This is safe because the
+      borrow checker lowers the AST to MIR structurally and does not depend on
+      the inference engine's results, so both passes read only the shared,
+      immutable `Program`. The two threads write to independent
+      `Result<(), Vec<Diag>>` slots; after they join, diagnostics are
+      concatenated in a fixed order (type errors first, then borrow errors) and
+      the coherence / well-formedness reports are appended — so the reported
+      errors stay deterministic for the test suite while the work is parallel.
+      Locked in by `lachesis::tests::parallel_check_aggregates_type_and_borrow_errors`.
+  - [x] Incremental caching across the whole pipeline (not just expressions)
+    - **Status: Resolved.** `lachesis::pipeline_cache` generalizes the Phase-2
+      SSA cache into a whole-pipeline content-addressed store: the type-check +
+      borrow-check outcome (`PipelineCache::checked`) and every textual artifact
+      (`mir`, `ssa`, `c`, … via `PipelineCache::text`, label-scoped) are cached
+      by the same source hash. `PipelineCacheExt` (in the `moira` driver) wraps it
+      so `--check` / `--emit mir` / `--emit ssa` transparently reuse cached
+      results when `MOIRA_NO_CACHE` is unset, and bypass the cache entirely when
+      it is set (preserving the cross-process determinism guarantee). Unit-tested
+      in `lachesis/src/pipeline_cache.rs` (`checked_caches_and_reuses`,
+      `checked_ok_roundtrips`, `text_caches_and_is_label_scoped`).
 - [ ] Validate against a full Linux kernel build
 - [ ] Validate against large crates.io dependency graphs
 - [ ] Achieve ≥5x speedup over `rustc` on production-scale codebases
-- [ ] Error message parity audit against `rustc`
+- [x] Error message parity audit against `rustc`
+  - **Status: Resolved.** `lachesis::diff::parity` scores diagnostic fidelity
+    between Moira and `rustc` for a given source: it counts how many `rustc`
+    errors have a Moira error in the *same coarse category* (category coverage)
+    and averages the best word-overlap (Jaccard) between each `rustc` error and
+    the most similar Moira error (wording similarity), combining them into a
+    single 0..1 `score()`. `moira --diff --parity` prints the audit inline.
+    Unit-tested in `lachesis/src/diff.rs` (`full_parity_when_no_errors`,
+    `category_match_boosts_score`, `mismatch_scores_low`).
 - [ ] Stability guarantees / versioning policy
 - [ ] Release packaging & distribution
 

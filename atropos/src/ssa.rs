@@ -155,6 +155,11 @@ fn build_function(f: &mir::Function) -> Result<SsaFunction, String> {
                 ),
                 mir::Rvalue::Field(o, fld, _deref) => Op::Field(resolve(o, &last_def), fld.clone()),
                 mir::Rvalue::Ref(o, _) => Op::Ref(resolve(o, &last_def)),
+                // `expr as Type` is an identity move in the SSA/native backend;
+                // the cast target type is recorded on the resulting temporary via
+                // `temp_types` (set during lowering), so downstream passes see the
+                // narrowed/narrowed type without altering the value bits.
+                mir::Rvalue::Cast(o, _ty) => Op::Copy(resolve(o, &last_def)),
                 // `StoreField` and the suspending `Switch` terminator belong to
                 // the `async fn` state machine, which is generated only for the
                 // Stage-0 C backend. The from-scratch native backend does not
@@ -164,6 +169,15 @@ fn build_function(f: &mir::Function) -> Result<SsaFunction, String> {
                     return Err(
                         "the native backend does not support `async fn` state machines (use the \
                          C backend, `--emit c`)"
+                            .to_string(),
+                    )
+                }
+                // Arrays and indexing are emitted only by the C backend; the
+                // from-scratch native backend does not model array layout.
+                mir::Rvalue::Array(..) | mir::Rvalue::Index(..) => {
+                    return Err(
+                        "the native backend does not support arrays/indexing (use the C backend, \
+                         `--emit c`)"
                             .to_string(),
                     )
                 }

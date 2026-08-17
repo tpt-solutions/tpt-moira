@@ -48,6 +48,18 @@ pub enum Ty {
     Pin(Box<Ty>),
     /// A range `a..b`, produced by the `..` operator (used by `for`).
     Range,
+    /// A generic type parameter, e.g. `T` in `fn f<T>(x: T) -> T`. Carries the
+    /// parameter's name so the inference engine can enforce the trait bounds
+    /// declared on it (`T: Add`) and substitute a concrete type at call sites.
+    Generic(String),
+    /// A type constructor applied to type arguments, e.g. `Vec<i32>` or
+    /// `Option<T>`. Carries the base type name and its (already-resolved)
+    /// argument types. Used wherever the Phase-3 subset writes a generic
+    /// application in a type annotation or struct field.
+    Apply(String, Vec<Ty>),
+    /// A fixed-length array `[T; N]` (or an unsized slice `[T]` modelled with
+    /// `N == 0`). Carries the element type and the (compile-time) length.
+    Array(Box<Ty>, u128),
     /// Error sentinel.
     Unknown,
 }
@@ -147,6 +159,18 @@ impl fmt::Display for Ty {
             Ty::Future(t) => write!(f, "Future<{}>", t),
             Ty::Pin(t) => write!(f, "Pin<{}>", t),
             Ty::Range => write!(f, "Range"),
+            Ty::Generic(n) => write!(f, "{}", n),
+            Ty::Apply(n, args) => {
+                write!(f, "{}<", n)?;
+                for (i, a) in args.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", a)?;
+                }
+                write!(f, ">")
+            }
+            Ty::Array(t, n) => write!(f, "[{}; {}]", t, n),
             Ty::Unknown => write!(f, "<unknown>"),
         }
     }

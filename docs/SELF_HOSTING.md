@@ -67,14 +67,19 @@ probe to flip from *blocked* to *self-hostable*.
 - [x] Inherent `impl T { }` (no `for`) + trait generics (`impl Trait<T> for …`)
 - [x] Method receiver `self` / `&self` / `&mut self` in params
 - [x] Raw pointer types `*const T` / `*mut T`
-- [x] `as` casts parsed (target type currently **discarded** — a tracked gap)
+- [x] `as` casts parsed **and** lowered / codegen'd / type-checked (`x as T` →
+  `(T)x` in C via a new `Rvalue::Cast`; the inner operand is still type-checked
+  and the cast's type is the explicit target type) — see `lachesis`/`infer.rs`
+  and `atropos`/`lower.rs` + `codegen_c.rs`
+- [x] `use … as` renames parse (`UseTree::alias` records the rename; `use` is
+  otherwise dropped by the Phase-1 subset)
 
 ### Open — surfaced by `python3 x.py self-host` (parse now reaches deep into each crate)
 Per-crate parse errors after the module/generics/attribute pass:
 - **moira-alloc** (`impl` generics): `expected for, found <` — `impl<T> Trait for Ty<T>` generics-in-`impl` edge
 - **clotho / lachesis** (closures / pipes): `expected expression, found |` — closures `|a, b| …` and `|` patterns
-- **atropos** (`as`): `expected item, found as` — `x as T` casts and `use … as …`
-- **moira (driver)** (`let` in expr): `expected expression, found let` — `let`-chains / `let-else` / control-flow in expr position
+- **atropos** (arrays / indexing): `[T; N]` array **types** (`expected ], found integer` in `codegen_native.rs`) and `a[i]` array **indexing** (`expected expression, found ]` in `codegen_c.rs`) — the `as`-cast blocker is **resolved**
+- **moira (driver)** (`let` in expr): `expected expression, found let` — `let`-chains / `let-else` / control-flow in expr position; and string-literal `match` patterns (`expected pattern, found string`)
 
 ### Broader remaining gaps (not yet drilled into)
 - [ ] `impl` inherent + trait methods with `self`/`&self` receivers
