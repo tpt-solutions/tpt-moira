@@ -486,7 +486,7 @@ impl Parser {
                 let mut bounds = Vec::new();
                 if self.eat(&TokenKind::Colon) {
                     loop {
-                        let path = self.parse_path()?;
+                        let path = self.parse_path(true)?;
                         bounds.push(TypeBound::Trait(path));
                         if !self.eat(&TokenKind::Plus) {
                             break;
@@ -522,7 +522,7 @@ impl Parser {
             self.expect(TokenKind::Colon)?;
             let mut bounds = Vec::new();
             loop {
-                let path = self.parse_path()?;
+                let path = self.parse_path(true)?;
                 bounds.push(TypeBound::Trait(path));
                 if !self.eat(&TokenKind::Plus) {
                     break;
@@ -1068,7 +1068,7 @@ impl Parser {
                 ExprKind::Lit(Lit::Bool(false))
             }
             TokenKind::Ident(_) => {
-                let path = self.parse_path()?;
+                let path = self.parse_path(false)?;
                 // A trailing `{` is a struct literal only when this path is a
                 // primary expression; otherwise it is a following block.
                 if allow_struct && self.check(&TokenKind::LBrace) {
@@ -1511,12 +1511,18 @@ impl Parser {
         Ok(Param { pat, ty })
     }
 
-    fn parse_path(&mut self) -> ParseResult<Path> {
+    /// Parse a `::`-separated path. When `allow_generics` is set, a leading
+    /// `<...>` after the first segment is consumed as generic arguments
+    /// (e.g. `Vec<i32>`) — this is type/bound syntax. In expression context it
+    /// must be `false`, otherwise a comparison like `i < n` would be misparsed as
+    /// a path-with-generic-args `i<n>` and the following `<` swallowed as a type.
+    /// The `::<...>` turbofish form is always allowed regardless of this flag.
+    fn parse_path(&mut self, allow_generics: bool) -> ParseResult<Path> {
         let mut segments = Vec::new();
         segments.push(self.expect_name()?);
         loop {
             // Generic arguments in angle-bracket form (`Vec<i32>`, `Result<T, E>`).
-            if self.eat(&TokenKind::Lt) {
+            if allow_generics && self.eat(&TokenKind::Lt) {
                 self.parse_generic_args()?;
             }
             if self.eat(&TokenKind::ColonColon) {
@@ -1616,7 +1622,7 @@ impl Parser {
                 TypeKind::Infer
             }
             _ if self.is_primitive_type() || matches!(self.peek_kind(), TokenKind::Ident(_)) => {
-                let path = self.parse_path()?;
+                let path = self.parse_path(false)?;
                 let args = if self.eat(&TokenKind::Lt) {
                     self.parse_generic_args()?
                 } else {

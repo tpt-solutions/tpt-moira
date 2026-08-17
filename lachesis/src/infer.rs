@@ -41,6 +41,9 @@ pub struct TypeChecker {
     /// Methods `receiver.method()`, keyed by `(receiver_type_name, method_name)`.
     /// Used by the standard-library prelude.
     methods: HashMap<(String, String), FnSig>,
+    /// Nullary prelude values usable without a call site, e.g. `None` (a unit
+    /// value of type `Option`), mirroring how `None` is a bare variant in Rust.
+    values: HashMap<String, Ty>,
     env: Vec<HashMap<String, Ty>>,
     ret: Ty,
     ret_span: Span,
@@ -54,6 +57,7 @@ impl Default for TypeChecker {
             fns: HashMap::new(),
             assoc_fns: HashMap::new(),
             methods: HashMap::new(),
+            values: HashMap::new(),
             env: Vec::new(),
             ret: Ty::Unit,
             ret_span: Span::default(),
@@ -213,8 +217,13 @@ impl TypeChecker {
                 match self.lookup(&name) {
                     Some(t) => t,
                     None => {
-                        self.err(span, format!("cannot find value `{}`", name));
-                        Ty::Unknown
+                        // Nullary prelude values usable without a call site.
+                        if let Some(t) = self.values.get(&name) {
+                            t.clone()
+                        } else {
+                            self.err(span, format!("cannot find value `{}`", name));
+                            Ty::Unknown
+                        }
                     }
                 }
             }
@@ -708,6 +717,9 @@ impl TypeChecker {
         self.fns.insert("Some".into(), sig(vec![Unknown], std("Option")));
         self.fns
             .insert("None".into(), sig(vec![], std("Option")));
+        // `None` is also usable as a bare nullary value (a unit variant), unlike
+        // `Some` which always takes an argument.
+        self.values.insert("None".into(), std("Option"));
         self.fns.insert("Ok".into(), sig(vec![Unknown], std("Result")));
         self.fns
             .insert("Err".into(), sig(vec![Unknown], std("Result")));
@@ -764,6 +776,40 @@ impl TypeChecker {
         );
         self.methods
             .insert(("String".into(), "len".into()), sig(vec![], Usize));
+
+        // Wider primitive output helpers (mirror the C/native backend runtimes).
+        self.fns.insert(
+            "print_i64".to_string(),
+            FnSig {
+                params: vec![Ty::I64],
+                ret: Ty::Unit,
+                is_async: false,
+            },
+        );
+        self.fns.insert(
+            "print_usize".to_string(),
+            FnSig {
+                params: vec![Ty::Usize],
+                ret: Ty::Unit,
+                is_async: false,
+            },
+        );
+        self.fns.insert(
+            "print_f64".to_string(),
+            FnSig {
+                params: vec![Ty::F64],
+                ret: Ty::Unit,
+                is_async: false,
+            },
+        );
+        self.fns.insert(
+            "print_str".to_string(),
+            FnSig {
+                params: vec![Ty::Str],
+                ret: Ty::Unit,
+                is_async: false,
+            },
+        );
     }
 
     fn lookup(&self, name: &str) -> Option<Ty> {

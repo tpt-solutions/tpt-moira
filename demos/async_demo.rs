@@ -11,5 +11,5 @@ async fn double(x: i64) -> i64 {
 
 fn main() {
     let r = await double(10);
-    print_i32(r);
+    print_i64(r);
 }

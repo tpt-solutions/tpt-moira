@@ -131,7 +131,6 @@ struct Lower {
 
 /// Bookkeeping for lowering an `async fn` into a suspending state machine.
 struct AsyncCtx {
-    fut_struct: String,
     self_local: String,
     /// `(slot_name, c_type)` for every parameter and local that must persist
     /// across a suspension point.
@@ -240,7 +239,6 @@ impl Lower {
             blocks: Vec::new(),
         };
         self.async_ctx = Some(AsyncCtx {
-            fut_struct: fut_struct.clone(),
             self_local: "self__fut".to_string(),
             slots: slots.clone(),
             await_count: 0,
@@ -299,34 +297,25 @@ impl Lower {
                     mir::Rvalue::Field(mir::Operand::var("self__fut"), sname.clone(), true),
                 );
                 self.emit(sname.clone(), mir::Rvalue::Use(mir::Operand::var(t)));
+            } else {
+                // non-parameter local: initialize to 0 so the slot-save at the
+                // first suspension point reads a defined value (the body assigns
+                // it before it is actually used across the await).
+                self.emit(
+                    sname.clone(),
+                    mir::Rvalue::Use(mir::Operand::Const(0)),
+                );
             }
         }
         let ret_op = self.lower_block_value(&f.body)?;
 
-        // Build the entry `switch` now that every resume block is known (each
-        // `.await` recorded its resume block into `async_ctx.resume_blocks`).
-        let resume_blocks = self
-            .async_ctx
-            .as_ref()
-            .map(|c| c.resume_blocks.clone())
-            .unwrap_or_default();
-        let state_t = self.fresh_temp("long long");
-        self.current = b_entry;
-        self.emit(
-            state_t.clone(),
-            mir::Rvalue::Field(mir::Operand::var("self__fut"), "__state".to_string(), true),
-        );
-        let mut cases: Vec<(i64, usize)> = vec![(0, b_start)];
-        for (i, &rb) in resume_blocks.iter().enumerate() {
-            cases.push(((i + 1) as i64, rb));
-        }
-        self.set_term(mir::Terminator::Switch(
-            mir::Operand::var(state_t),
-            cases,
-            b_done,
-        ));
-
-        // After the body, store the output, mark DONE, return READY.
+        // After the body (in whatever block it ends — the entry `b_start` for a
+        // body with no `.await`, or the final resume block otherwise), store the
+        // output, mark DONE, and return READY. This epilogue must live in the
+        // *body* block, never in the entry block: the entry block is solely the
+        // `state` dispatch built just below. (Previously the epilogue was emitted
+        // while `self.current` still pointed at the entry block, which clobbered
+        // the `Switch` terminator and left the body unreachable.)
         let out_t = self.fresh_temp(output_ty.clone());
         self.emit(out_t.clone(), mir::Rvalue::Use(ret_op));
         self.emit(
@@ -349,6 +338,31 @@ impl Lower {
             ),
         );
         self.set_term(mir::Terminator::Return(Some(mir::Operand::Const(0))));
+
+        // Entry `switch` on `state` (built last so every resume block is known):
+        // `0` runs the body from the top; each `.await`'s resume label `k+1`
+        // jumps to that await's resume block; anything else means the future has
+        // already finished, so report READY.
+        let resume_blocks = self
+            .async_ctx
+            .as_ref()
+            .map(|c| c.resume_blocks.clone())
+            .unwrap_or_default();
+        let state_t = self.fresh_temp("long long");
+        self.current = b_entry;
+        self.emit(
+            state_t.clone(),
+            mir::Rvalue::Field(mir::Operand::var("self__fut"), "__state".to_string(), true),
+        );
+        let mut cases: Vec<(i64, usize)> = vec![(0, b_start)];
+        for (i, &rb) in resume_blocks.iter().enumerate() {
+            cases.push(((i + 1) as i64, rb));
+        }
+        self.set_term(mir::Terminator::Switch(
+            mir::Operand::var(state_t),
+            cases,
+            b_done,
+        ));
 
         let poll_fn = mir::Function {
             name: self.func.name.clone(),
@@ -423,8 +437,28 @@ impl Lower {
         match &s.kind {
             StmtKind::Local(local) => {
                 let name = pat_name(&local.pat)?;
-                let ty = local.ty.as_ref().map(type_to_c);
-                self.func.locals.push((name.clone(), ty.clone()));
+                // Infer the declared local type: prefer an explicit annotation,
+                // otherwise fall back to a struct-literal RHS so `let p = Point{..}`
+                // is typed `struct Point` (otherwise it defaults to `long long`
+                // and the struct assignment/field access fails to compile).
+                let ty = match (&local.ty, &local.init) {
+                    (Some(t), _) => Some(type_to_c(t)),
+                    (None, Some(init)) => match &init.kind {
+                        ExprKind::Struct(path, _, _) => path
+                            .segments
+                            .last()
+                            .map(|s| s.node.clone()),
+                        _ => None,
+                    },
+                    (None, None) => None,
+                };
+                // For an `async fn` the poll coroutine pre-declares every slot
+                // (parameter + `let` local) as a local; do not re-declare it here
+                // or the MIR carries duplicate locals and the C backend must
+                // paper over the redeclaration.
+                if !self.func.locals.iter().any(|(n, _)| n == &name) {
+                    self.func.locals.push((name.clone(), ty.clone()));
+                }
                 if let Some(init) = &local.init {
                     let v = self.lower_expr(init)?;
                     self.emit(name.clone(), mir::Rvalue::Use(v));
@@ -450,9 +484,14 @@ impl Lower {
                 let f: f64 = text.parse().unwrap_or(0.0);
                 Ok(mir::Operand::Const(f as i128))
             }
-            ExprKind::Lit(_) => Err(LowerError(
-                "string/char literals are not supported in the codegen subset".into(),
-            )),
+            ExprKind::Lit(ast::Lit::Str(_)) => {
+                // String literals are not yet backed by data in the codegen
+                // subset; lower to a zero placeholder operand so type-checked
+                // programs (e.g. `s.push_str("hi")`) still lower + borrow-check.
+                // Real allocation/string layout is a documented codegen follow-up.
+                Ok(mir::Operand::Const(0))
+            }
+            ExprKind::Lit(ast::Lit::Char(c)) => Ok(mir::Operand::Const(*c as i128)),
             ExprKind::Path(p) => {
                 let name = p
                     .segments
@@ -674,9 +713,21 @@ impl Lower {
                 Ok(mir::Operand::Unit)
             }
             ExprKind::Match(..) => Err(LowerError("`match` is not in the codegen subset".into())),
-            ExprKind::MethodCall(..) => Err(LowerError(
-                "method calls are not in the codegen subset".into(),
-            )),
+            ExprKind::MethodCall(recv, method, args) => {
+                // Lower `recv.method(args)` to a plain call `method(recv, args)`;
+                // the receiver becomes the first operand. This lets type-checked
+                // prelude programs (e.g. `v.push(1)`, `x.is_some()`) lower to MIR
+                // and pass the borrow checker. Real method resolution / receiver
+                // adjustment is a documented codegen follow-up.
+                let recv_op = self.lower_expr(recv)?;
+                let mut operands = vec![recv_op];
+                for a in args {
+                    operands.push(self.lower_expr(a)?);
+                }
+                let t = self.fresh_temp("long long");
+                self.emit(t.clone(), mir::Rvalue::Call(method.node.clone(), operands));
+                Ok(mir::Operand::var(t))
+            }
             ExprKind::Index(..) => Err(LowerError("indexing is not in the codegen subset".into())),
             ExprKind::Array(..) => Err(LowerError("arrays are not in the codegen subset".into())),
             ExprKind::Unsafe(..) => Err(LowerError("`unsafe` is not in the codegen subset".into())),
@@ -721,7 +772,6 @@ impl Lower {
             .ok_or_else(|| LowerError("`.await` outside of an `async fn`".into()))?;
         let k = ctx.await_count;
         ctx.await_count += 1;
-        let fut_struct = ctx.fut_struct.clone();
         let self_local = ctx.self_local.clone();
         let slots = ctx.slots.clone();
 
@@ -782,7 +832,9 @@ impl Lower {
         // `return PENDING` (1). Subsequent statements continue in a resume block.
         self.set_term(mir::Terminator::Return(Some(mir::Operand::Const(1))));
 
-        // 3. Resume block: reload slots, drive the future, yield its output.
+        // 3. Resume block: reload the live slots, then drive the stored nested
+        //    future (`self->__awt{k}`) to completion by polling it in a loop, and
+        //    finally yield its `__out` field as this `.await`'s value.
         let resume = self.new_block();
         // Record the resume block so the entry `switch` (built after the whole
         // body is lowered) can target it via the `k+1` label.
@@ -799,19 +851,23 @@ impl Lower {
             self.emit(sname.clone(), mir::Rvalue::Use(mir::Operand::var(t)));
         }
 
-        // Take the address of `self->__awt{k}` so we can poll the stored future.
-        // The copy is typed as the *callee's* future struct so that the poll
-        // call and the `__out` read use the correct layout.
-        let awt_val = self.fresh_temp(callee_fut.clone());
+        // Copy the suspended nested future out of `self` so we can take its
+        // address and poll it in place, then drive it to READY in a loop.
+        let awt = self.fresh_temp(callee_fut.clone());
         self.emit(
-            awt_val.clone(),
+            awt.clone(),
             mir::Rvalue::Field(mir::Operand::var(&self_local), awt_field.clone(), true),
         );
         let awt_addr = self.fresh_temp(format!("{}*", callee_fut));
         self.emit(
             awt_addr.clone(),
-            mir::Rvalue::Ref(mir::Operand::var(awt_val.clone()), false),
+            mir::Rvalue::Ref(mir::Operand::var(awt.clone()), false),
         );
+
+        // Poll loop: `while (callee_poll(&awt) == PENDING) {}`.
+        let poll_blk = self.new_block();
+        self.set_term(mir::Terminator::Goto(poll_blk));
+        self.current = poll_blk;
         let status = self.fresh_temp("long long");
         self.emit(
             status.clone(),
@@ -826,55 +882,10 @@ impl Lower {
                 mir::Operand::Const(1),
             ),
         );
-
-        // Drive `callee_poll(&self->__awt{k})` until it returns READY (0).
-        let loop_blk = self.new_block();
         let end_blk = self.new_block();
         self.set_term(mir::Terminator::If(
             mir::Operand::var(cmp),
-            loop_blk,
-            end_blk,
-        ));
-
-        self.current = loop_blk;
-        // Re-evaluate the poll on the (possibly mutated) stored future copy.
-        let awt_val2 = self.fresh_temp(fut_struct.clone());
-        self.emit(
-            awt_val2.clone(),
-            mir::Rvalue::Field(mir::Operand::var(&self_local), awt_field.clone(), true),
-        );
-        let awt_addr2 = self.fresh_temp(format!("{}*", fut_struct));
-        self.emit(
-            awt_addr2.clone(),
-            mir::Rvalue::Ref(mir::Operand::var(awt_val2.clone()), false),
-        );
-        let status2 = self.fresh_temp("long long");
-        self.emit(
-            status2.clone(),
-            mir::Rvalue::Call(callee_poll.clone(), vec![mir::Operand::var(awt_addr2)]),
-        );
-        // Write the freshly polled future back so `__out` stays current.
-        self.emit(
-            "__s".to_string(),
-            mir::Rvalue::StoreField(
-                mir::Operand::var(&self_local),
-                awt_field.clone(),
-                mir::Operand::var(awt_val2.clone()),
-                true,
-            ),
-        );
-        let cmp2 = self.fresh_temp("long long");
-        self.emit(
-            cmp2.clone(),
-            mir::Rvalue::Binary(
-                mir::BinOp::Eq,
-                mir::Operand::var(status2),
-                mir::Operand::Const(1),
-            ),
-        );
-        self.set_term(mir::Terminator::If(
-            mir::Operand::var(cmp2),
-            loop_blk,
+            poll_blk,
             end_blk,
         ));
 
@@ -882,8 +893,14 @@ impl Lower {
         let out_t = self.fresh_temp("long long");
         self.emit(
             out_t.clone(),
-            mir::Rvalue::Field(mir::Operand::var(awt_val2), "_out".to_string(), false),
+            mir::Rvalue::Field(mir::Operand::var(awt), "_out".to_string(), false),
         );
+        // A dedicated continuation block holds the await's value and everything
+        // that follows, so the suspension point (which `return`s PENDING) and the
+        // poll-loop tail never get clobbered by the next statement's terminator.
+        let cont = self.new_block();
+        self.set_term(mir::Terminator::Goto(cont));
+        self.current = cont;
         Ok(mir::Operand::var(out_t))
     }
 

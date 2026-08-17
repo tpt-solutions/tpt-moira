@@ -5,6 +5,10 @@ on:
     branches: [master]
   pull_request:
     branches: [master]
+  # Nightly `rustc` compatibility / divergence scan (Phase 3).
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -63,13 +67,35 @@ jobs:
       - name: Run benchmark harness
         run: cargo run -p moira-bench --quiet
 
-  # Placeholder for the nightly `rustc` UI/error-suite differential run (Phase 3).
+  # Phase 3 compatibility suite: run the curated Phase-1-subset slice through
+  # Moira's acceptance tests, then scan the slice with `moira --diff` against
+  # `rustc` and publish the divergence report. Divergences are tracked (not
+  # fatal) so a nightly regression shows up as a report delta rather than a hard
+  # red build.
   compatibility:
-    name: Compatibility suite (skeleton)
+    name: Phase-1 compatibility slice (nightly)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
-      - name: No-op placeholder
-        run: echo "Phase 3 rustc compatibility suite will run here."
+      - name: Build workspace
+        run: cargo build --workspace
+      - name: Run Phase-1 slice acceptance tests
+        run: cargo test -p lachesis --test phase1_slice --verbose
+      - name: Divergence scan against rustc
+        id: scan
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          BIN="$(cargo metadata --format-version=1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])'/debug/moira)"
+          SLICE="lachesis/tests/phase1-slice/accept"
+          echo "## Moira vs rustc divergence scan (Phase-1 slice)" >> "$GITHUB_STEP_SUMMARY"
+          for f in "$SLICE"/*.rs; do
+            echo "### $f" >> "$GITHUB_STEP_SUMMARY"
+            "$BIN" --diff "$f" >> "$GITHUB_STEP_SUMMARY" || true
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+          done
+      - name: Divergence summary
+        if: always()
+        run: echo "Divergence scan complete; see the job summary for the report."

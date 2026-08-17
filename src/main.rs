@@ -8,7 +8,7 @@
 use std::io::Read;
 use std::process::{Command, ExitCode};
 
-use lachesis::diff::{classify, Divergence};
+use lachesis::diff::{classify, Allowlist};
 use lachesis::Cache;
 
 fn main() -> ExitCode {
@@ -22,6 +22,8 @@ fn main() -> ExitCode {
     let mut output: Option<String> = None;
     let mut check = false;
     let mut diff = false;
+    let mut allowlist_path: Option<String> = None;
+    let mut update_allowlist = false;
     let mut positional: Vec<String> = Vec::new();
     let mut iter = args.iter();
     while let Some(a) = iter.next() {
@@ -38,6 +40,12 @@ fn main() -> ExitCode {
             }
             "--check" => check = true,
             "--diff" => diff = true,
+            "--allowlist" => {
+                if let Some(path) = iter.next() {
+                    allowlist_path = Some(path.clone());
+                }
+            }
+            "--update-allowlist" => update_allowlist = true,
             other => positional.push(other.to_string()),
         }
     }
@@ -74,8 +82,9 @@ fn main() -> ExitCode {
         (buf, prog)
     };
 
+    let input_path = positional.first().map(|p| std::path::Path::new(p).to_path_buf());
     if diff {
-        return run_diff(&source, &program);
+        return run_diff(&source, &program, input_path.as_deref(), allowlist_path.as_deref(), update_allowlist);
     }
 
     // End-to-end integration: optionally (or for the `check` emit) run the
@@ -209,7 +218,18 @@ fn emit_text(text: &str, output: &Option<String>) {
 
 /// `moira-diff` baseline: run Moira's checker and `rustc --emit=metadata` on the
 /// same source and classify any divergence between the two compilers.
-fn run_diff(source: &str, program: &clotho::ast::Program) -> ExitCode {
+///
+/// `allowlist_path` (defaulting to [`Allowlist::DEFAULT_FILE`]) is consulted so
+/// that tracked, known divergences don't fail the run; `--update-allowlist`
+/// persists the divergences seen here back into that file. A run "succeeds"
+/// (exit 0) when every divergence is covered by the allowlist.
+fn run_diff(
+    source: &str,
+    program: &clotho::ast::Program,
+    input_path: Option<&std::path::Path>,
+    allowlist_path: Option<&str>,
+    update_allowlist: bool,
+) -> ExitCode {
     let moira_errors = match lachesis::check(program) {
         Ok(()) => Vec::new(),
         Err(diags) => diags.iter().map(|d| d.to_string()).collect(),
@@ -217,20 +237,31 @@ fn run_diff(source: &str, program: &clotho::ast::Program) -> ExitCode {
     let rustc_errors = run_rustc_check(source);
     let report = classify(&moira_errors, &rustc_errors);
 
+    let allow_file = allowlist_path
+        .map(std::path::Path::new)
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| std::path::PathBuf::from(Allowlist::DEFAULT_FILE));
+    let mut allowlist = match Allowlist::load(&allow_file) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("moira-diff: could not read allowlist `{}`: {}", allow_file.display(), e);
+            Allowlist::default()
+        }
+    };
+    let hash = lachesis::content_hash(source);
+
     println!(
         "moira-diff: Moira errors={}, rustc errors={}",
         moira_errors.len(),
         rustc_errors.len()
     );
-    for d in &report.divergences {
-        match d {
-            Divergence::MoiraAcceptsButRustcRejects => {
-                println!("  DIVERGENCE: Moira accepts but rustc rejects")
-            }
-            Divergence::RustcAcceptsButMoiraRejects => {
-                println!("  DIVERGENCE: rustc accepts but Moira rejects")
-            }
-            Divergence::BothReject => println!("  DIVERGENCE: both reject (messages may differ)"),
+    let mut unallowed = Vec::new();
+    for &d in &report.divergences {
+        if allowlist.allows(input_path, hash, d) {
+            println!("  ALLOWED (known divergence): {}", d.describe());
+        } else {
+            unallowed.push(d);
+            println!("  DIVERGENCE: {}", d.describe());
         }
     }
     if report.divergences.is_empty() {
@@ -243,7 +274,22 @@ fn run_diff(source: &str, program: &clotho::ast::Program) -> ExitCode {
         }
     }
 
-    if report.divergences.is_empty() {
+    if update_allowlist && !report.divergences.is_empty() {
+        for &d in &report.divergences {
+            allowlist.insert(input_path, hash, d);
+        }
+        if let Err(e) = allowlist.save(&allow_file) {
+            eprintln!("moira-diff: could not write allowlist `{}`: {}", allow_file.display(), e);
+        } else {
+            println!(
+                "moira-diff: recorded {} divergence(s) into `{}`",
+                report.divergences.len(),
+                allow_file.display()
+            );
+        }
+    }
+
+    if unallowed.is_empty() {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE

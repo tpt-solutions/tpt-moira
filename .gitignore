@@ -35,3 +35,6 @@ Thumbs.db
 # Local config
 .kilo
 .kilocode
+
+# moira-diff known-divergence allowlist (auto-generated / local triage state)
+.moira-divergence-allowlist
