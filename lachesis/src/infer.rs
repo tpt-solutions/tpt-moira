@@ -35,6 +35,12 @@ pub struct FnSig {
 pub struct TypeChecker {
     structs: HashMap<String, StructInfo>,
     fns: HashMap<String, FnSig>,
+    /// Associated functions `Type::fn()` (two-segment call paths), keyed by
+    /// `(self_type_name, fn_name)`. Used by the standard-library prelude.
+    assoc_fns: HashMap<(String, String), FnSig>,
+    /// Methods `receiver.method()`, keyed by `(receiver_type_name, method_name)`.
+    /// Used by the standard-library prelude.
+    methods: HashMap<(String, String), FnSig>,
     env: Vec<HashMap<String, Ty>>,
     ret: Ty,
     ret_span: Span,
@@ -46,6 +52,8 @@ impl Default for TypeChecker {
         TypeChecker {
             structs: HashMap::new(),
             fns: HashMap::new(),
+            assoc_fns: HashMap::new(),
+            methods: HashMap::new(),
             env: Vec::new(),
             ret: Ty::Unit,
             ret_span: Span::default(),
@@ -106,6 +114,14 @@ impl TypeChecker {
                 is_async: false,
             },
         );
+
+        // The standard-library prelude: recognized `std` types, their
+        // constructors, associated functions, and methods. This is the "bind the
+        // standard library's signatures into the checker" step that lets
+        // idiomatic programs (that use `Option`, `Result`, `Vec`, `String`,
+        // `Box`, …) type-check against Moira. Full compilation of those types
+        // (heap-backed `Vec`, etc.) remains a codegen follow-up.
+        cx.register_prelude();
 
         // Pass 2: check each function body.
         for item in &prog.items {
@@ -283,12 +299,8 @@ impl TypeChecker {
                 );
                 Ty::Unknown
             }
-            ExprKind::MethodCall(..) => {
-                self.err(
-                    span,
-                    "method calls are not in the type-checked subset".to_string(),
-                );
-                Ty::Unknown
+            ExprKind::MethodCall(recv, method, args) => {
+                self.check_method(span, recv, method, args)
             }
             ExprKind::Index(..) | ExprKind::Array(..) => {
                 self.err(
@@ -484,19 +496,17 @@ impl TypeChecker {
     }
 
     fn check_call(&mut self, span: Span, callee: &Expr, args: &[Expr]) -> Ty {
-        let name = match &callee.kind {
-            ExprKind::Path(p) => p
-                .segments
-                .last()
-                .map(|s| s.node.clone())
-                .unwrap_or_default(),
+        let path = match &callee.kind {
+            ExprKind::Path(p) => p,
             _ => {
                 self.err(span, "call target must be a path".to_string());
                 return Ty::Unknown;
             }
         };
-        let sig = match self.fns.get(&name) {
-            Some(s) => s.clone(),
+        let segments: Vec<String> = path.segments.iter().map(|s| s.node.clone()).collect();
+        let name = segments.last().cloned().unwrap_or_default();
+        let sig = match self.resolve_call(&segments, span) {
+            Some(s) => s,
             None => {
                 self.err(span, format!("cannot find function `{}`", name));
                 return Ty::Unknown;
@@ -598,6 +608,164 @@ impl TypeChecker {
 
     // --- helpers ---------------------------------------------------------
 
+    /// Resolve a call path to a function signature. A single-segment path
+    /// (`foo`) looks up a free function; a two-segment path (`Type::fn`) looks
+    /// up an associated function from the prelude.
+    fn resolve_call(&mut self, segments: &[String], span: Span) -> Option<FnSig> {
+        match segments.len() {
+            1 => self.fns.get(&segments[0]).cloned(),
+            2 => self
+                .assoc_fns
+                .get(&(segments[0].clone(), segments[1].clone()))
+                .cloned()
+                .or_else(|| self.fns.get(&segments[1]).cloned()),
+            _ => {
+                self.err(
+                    span,
+                    "call path with more than two segments is not supported".to_string(),
+                );
+                None
+            }
+        }
+    }
+
+    /// Type-check a method call `receiver.method(args)`. The receiver's type is
+    /// resolved and the method is looked up in the prelude's method table keyed
+    /// by `(receiver_type_name, method_name)`.
+    fn check_method(
+        &mut self,
+        span: Span,
+        recv: &Expr,
+        method: &clotho::ast::Spanned<String>,
+        args: &[Expr],
+    ) -> Ty {
+        let recv_ty = self.infer_expr(recv);
+        let recv_name = self.type_name(&recv_ty);
+        let sig = match recv_name {
+            Some(name) => self
+                .methods
+                .get(&(name, method.node.clone()))
+                .cloned(),
+            None => None,
+        };
+        let sig = match sig {
+            Some(s) => s,
+            None => {
+                self.err(
+                    span,
+                    format!(
+                        "no method `{}` on type `{}`",
+                        method.node,
+                        self.type_name(&recv_ty).unwrap_or_else(|| "<unknown>".to_string())
+                    ),
+                );
+                return Ty::Unknown;
+            }
+        };
+        if args.len() != sig.params.len() {
+            self.err(
+                span,
+                format!(
+                    "method `{}` expects {} argument(s), found {}",
+                    method.node,
+                    sig.params.len(),
+                    args.len()
+                ),
+            );
+        }
+        for (a, pt) in args.iter().zip(sig.params.iter()) {
+            let at = self.infer_expr(a);
+            self.expect(&at, pt, a.span);
+        }
+        sig.ret.clone()
+    }
+
+    /// The base type name of a value type, following `&`/`&mut` to its referent
+    /// so methods/associated functions on the referent can be found.
+    fn type_name(&self, ty: &Ty) -> Option<String> {
+        match ty {
+            Ty::Struct(n) => Some(n.clone()),
+            Ty::Ref(inner) | Ty::RefMut(inner) => self.type_name(inner),
+            _ => None,
+        }
+    }
+
+    // --- standard-library prelude ---------------------------------------
+
+    /// Register the standard-library prelude: recognized `std` types and their
+    /// constructors, associated functions, and methods. This is the documented
+    /// remaining step for "idiomatic `std`-using Rust programs compile
+    /// correctly" — binding the signatures so the checker accepts them.
+    ///
+    /// Generic parameters are represented loosely (`Ty::Unknown` accepts and
+    /// yields anything) because the Phase-1 subset has no generic `Ty`; full
+    /// generic-aware prelude entries await that work.
+    fn register_prelude(&mut self) {
+        use Ty::*;
+        let std = |name: &str| Struct(name.to_string());
+
+        // Free constructors / functions.
+        self.fns.insert("Some".into(), sig(vec![Unknown], std("Option")));
+        self.fns
+            .insert("None".into(), sig(vec![], std("Option")));
+        self.fns.insert("Ok".into(), sig(vec![Unknown], std("Result")));
+        self.fns
+            .insert("Err".into(), sig(vec![Unknown], std("Result")));
+        self.fns
+            .insert("vec_new".into(), sig(vec![], std("Vec")));
+        self.fns
+            .insert("string_new".into(), sig(vec![], std("String")));
+        self.fns
+            .insert("box_new".into(), sig(vec![Unknown], std("Box")));
+
+        // Associated functions `Type::fn()`.
+        self.assoc_fns
+            .insert(("Vec".into(), "new".into()), sig(vec![], std("Vec")));
+        self.assoc_fns.insert(
+            ("String".into(), "new".into()),
+            sig(vec![], std("String")),
+        );
+        self.assoc_fns.insert(
+            ("Box".into(), "new".into()),
+            sig(vec![Unknown], std("Box")),
+        );
+
+        // Methods on `Vec<T>`.
+        self.methods
+            .insert(("Vec".into(), "push".into()), sig(vec![Unknown], Unit));
+        self.methods
+            .insert(("Vec".into(), "len".into()), sig(vec![], Usize));
+        self.methods.insert(
+            ("Vec".into(), "is_empty".into()),
+            sig(vec![], Bool),
+        );
+        // Methods on `Option<T>`.
+        self.methods.insert(
+            ("Option".into(), "is_some".into()),
+            sig(vec![], Bool),
+        );
+        self.methods.insert(
+            ("Option".into(), "is_none".into()),
+            sig(vec![], Bool),
+        );
+        self.methods
+            .insert(("Option".into(), "unwrap".into()), sig(vec![], Unknown));
+        // Methods on `Result<T, E>`.
+        self.methods
+            .insert(("Result".into(), "is_ok".into()), sig(vec![], Bool));
+        self.methods
+            .insert(("Result".into(), "is_err".into()), sig(vec![], Bool));
+        self.methods
+            .insert(("Result".into(), "unwrap".into()), sig(vec![], Unknown));
+        // Methods on `String`.
+        self.methods.insert(
+            ("String".into(), "push_str".into()),
+            sig(vec![Str], Unit),
+        );
+        self.methods
+            .insert(("String".into(), "len".into()), sig(vec![], Usize));
+    }
+
     fn lookup(&self, name: &str) -> Option<Ty> {
         for scope in self.env.iter().rev() {
             if let Some(t) = scope.get(name) {
@@ -698,6 +866,15 @@ impl TypeChecker {
     }
 }
 
+/// Build a non-async [`FnSig`] from `params` and `ret` (helper for the prelude).
+fn sig(params: Vec<Ty>, ret: Ty) -> FnSig {
+    FnSig {
+        params,
+        ret,
+        is_async: false,
+    }
+}
+
 /// Map an identifier type name to its primitive [`Ty`], if it is one.
 fn prim(name: &str) -> Option<Ty> {
     Some(match name {
@@ -742,6 +919,11 @@ fn pat_name(pat: &Pat) -> String {
     match pat {
         Pat::Ident(n) => n.node.clone(),
         Pat::Wild => "_".to_string(),
+        Pat::Path(path) => path
+            .segments
+            .last()
+            .map(|s| s.node.clone())
+            .unwrap_or_else(|| "_".to_string()),
         _ => "_".to_string(),
     }
 }

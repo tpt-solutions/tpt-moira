@@ -133,7 +133,6 @@ struct Lower {
 struct AsyncCtx {
     fut_struct: String,
     self_local: String,
-    output_ty: String,
     /// `(slot_name, c_type)` for every parameter and local that must persist
     /// across a suspension point.
     slots: Vec<(String, String)>,
@@ -224,10 +223,8 @@ impl Lower {
 
         // Future struct layout: `state`, params, locals, output, one nested
         // future slot per `.await` point (filled in as we discover them).
-        let mut poll_locals: Vec<(String, Option<String>)> = vec![(
-            "self__fut".to_string(),
-            Some(format!("{}*", fut_struct)),
-        )];
+        let mut poll_locals: Vec<(String, Option<String>)> =
+            vec![("self__fut".to_string(), Some(format!("{}*", fut_struct)))];
         // Each slot is a local of the poll coroutine (the body reads params /
         // locals as ordinary locals; the entry block copies them out of
         // `self__fut` and resume blocks copy them back in).
@@ -245,7 +242,6 @@ impl Lower {
         self.async_ctx = Some(AsyncCtx {
             fut_struct: fut_struct.clone(),
             self_local: "self__fut".to_string(),
-            output_ty: output_ty.clone(),
             slots: slots.clone(),
             await_count: 0,
             resume_blocks: Vec::new(),
@@ -259,7 +255,6 @@ impl Lower {
         if let Some(e) = err {
             return Err(e);
         }
-        let n_await = await_points.len();
 
         // --- future struct fields ---
         let mut fut_fields: Vec<(String, String)> =
@@ -268,9 +263,9 @@ impl Lower {
             fut_fields.push((sname.clone(), sty.clone()));
         }
         fut_fields.push(("_out".to_string(), output_ty.clone()));
-        for i in 0..n_await {
+        for (i, ap) in await_points.iter().enumerate() {
             // The nested slot holds the awaited future's own generated struct.
-            let callee = match &await_points[i].kind {
+            let callee = match &ap.kind {
                 ExprKind::Call(c, _) => match &c.kind {
                     ExprKind::Path(p) => p.segments.last().map(|s| s.node.clone()),
                     _ => None,
@@ -293,8 +288,7 @@ impl Lower {
         // b_start: copy parameters into locals, then run the body.
         self.current = b_start;
         for (sname, _sty) in &slots {
-            if f
-                .params
+            if f.params
                 .iter()
                 .any(|p| pat_name(&p.pat).ok().as_deref() == Some(sname))
             {
@@ -302,11 +296,7 @@ impl Lower {
                 let t = self.fresh_temp("long long");
                 self.emit(
                     t.clone(),
-                    mir::Rvalue::Field(
-                        mir::Operand::var("self__fut"),
-                        sname.clone(),
-                        true,
-                    ),
+                    mir::Rvalue::Field(mir::Operand::var("self__fut"), sname.clone(), true),
                 );
                 self.emit(sname.clone(), mir::Rvalue::Use(mir::Operand::var(t)));
             }
@@ -324,11 +314,7 @@ impl Lower {
         self.current = b_entry;
         self.emit(
             state_t.clone(),
-            mir::Rvalue::Field(
-                mir::Operand::var("self__fut"),
-                "__state".to_string(),
-                true,
-            ),
+            mir::Rvalue::Field(mir::Operand::var("self__fut"), "__state".to_string(), true),
         );
         let mut cases: Vec<(i64, usize)> = vec![(0, b_start)];
         for (i, &rb) in resume_blocks.iter().enumerate() {
@@ -374,8 +360,8 @@ impl Lower {
         };
 
         // --- run wrapper: `(args) -> T`, builds the future, polls to done ---
-        let run_fn = build_run_wrapper(&f, &fut_struct, &poll_name, &output_ty, &slots);
-        let ctor_fn = build_ctor_wrapper(&f, &fut_struct);
+        let run_fn = build_run_wrapper(f, &fut_struct, &poll_name, &output_ty, &slots);
+        let ctor_fn = build_ctor_wrapper(f, &fut_struct);
 
         Ok(AsyncLower {
             def: mir::AsyncDef {
@@ -694,10 +680,14 @@ impl Lower {
             ExprKind::Index(..) => Err(LowerError("indexing is not in the codegen subset".into())),
             ExprKind::Array(..) => Err(LowerError("arrays are not in the codegen subset".into())),
             ExprKind::Unsafe(..) => Err(LowerError("`unsafe` is not in the codegen subset".into())),
-            ExprKind::Closure { .. } => Err(LowerError("closures are not in the codegen subset".into())),
+            ExprKind::Closure { .. } => {
+                Err(LowerError("closures are not in the codegen subset".into()))
+            }
             ExprKind::Cast(..) => Err(LowerError("casts are not in the codegen subset".into())),
             ExprKind::Macro(..) => Err(LowerError("macros are not in the codegen subset".into())),
-            ExprKind::Try(..) => Err(LowerError("the `?` operator is not in the codegen subset".into())),
+            ExprKind::Try(..) => Err(LowerError(
+                "the `?` operator is not in the codegen subset".into(),
+            )),
             ExprKind::Await(inner) => {
                 if self.async_ctx.is_some() {
                     self.lower_await(inner)
@@ -804,11 +794,7 @@ impl Lower {
             let t = self.fresh_temp("long long");
             self.emit(
                 t.clone(),
-                mir::Rvalue::Field(
-                    mir::Operand::var(&self_local),
-                    sname.clone(),
-                    true,
-                ),
+                mir::Rvalue::Field(mir::Operand::var(&self_local), sname.clone(), true),
             );
             self.emit(sname.clone(), mir::Rvalue::Use(mir::Operand::var(t)));
         }
@@ -819,11 +805,7 @@ impl Lower {
         let awt_val = self.fresh_temp(callee_fut.clone());
         self.emit(
             awt_val.clone(),
-            mir::Rvalue::Field(
-                mir::Operand::var(&self_local),
-                awt_field.clone(),
-                true,
-            ),
+            mir::Rvalue::Field(mir::Operand::var(&self_local), awt_field.clone(), true),
         );
         let awt_addr = self.fresh_temp(format!("{}*", callee_fut));
         self.emit(
@@ -859,11 +841,7 @@ impl Lower {
         let awt_val2 = self.fresh_temp(fut_struct.clone());
         self.emit(
             awt_val2.clone(),
-            mir::Rvalue::Field(
-                mir::Operand::var(&self_local),
-                awt_field.clone(),
-                true,
-            ),
+            mir::Rvalue::Field(mir::Operand::var(&self_local), awt_field.clone(), true),
         );
         let awt_addr2 = self.fresh_temp(format!("{}*", fut_struct));
         self.emit(
@@ -1105,10 +1083,10 @@ fn build_run_wrapper(
     // `fut = (fut_struct){ .__state = 0, .param = arg, ... };`
     let fut = "t_fut".to_string();
     func.temp_types.insert(fut.clone(), fut_struct.to_string());
-    let mut inits: Vec<(String, mir::Operand)> = vec![("__state".to_string(), mir::Operand::Const(0))];
+    let mut inits: Vec<(String, mir::Operand)> =
+        vec![("__state".to_string(), mir::Operand::Const(0))];
     for (sname, _sty) in slots {
-        if f
-            .params
+        if f.params
             .iter()
             .any(|p| pat_name(&p.pat).ok().as_deref() == Some(sname))
         {
@@ -1168,10 +1146,7 @@ fn build_run_wrapper(
 /// parameters copied from the call arguments. This is the value produced when an
 /// async call is used inside `.await` (as opposed to `__run`, which drives the
 /// future to completion).
-fn build_ctor_wrapper(
-    f: &ast::Function,
-    fut_struct: &str,
-) -> mir::Function {
+fn build_ctor_wrapper(f: &ast::Function, fut_struct: &str) -> mir::Function {
     let mut func = mir::Function {
         name: format!("{}__ctor", f.name.node),
         params: Vec::new(),
@@ -1205,6 +1180,11 @@ fn pat_name(p: &Pat) -> Result<String> {
     match p {
         Pat::Ident(n) => Ok(n.node.clone()),
         Pat::Wild => Ok("_".to_string()),
+        Pat::Path(path) => Ok(path
+            .segments
+            .last()
+            .map(|s| s.node.clone())
+            .unwrap_or_else(|| "_".to_string())),
         _ => Err(LowerError("only identifier patterns are supported".into())),
     }
 }

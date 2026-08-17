@@ -12,10 +12,11 @@
 //! stages are decoupled.
 
 use crate::ast::Program;
+use crate::derive::expand_derives;
 use crate::error::{Diag, ParseResult};
 use crate::lexer;
-use crate::macros::{expand_program_concurrent, extract_macros, MacroTable};
 use crate::macrorules::{expand_macro_rules_calls, extract_macro_rules};
+use crate::macros::{expand_program_concurrent, extract_macros, MacroTable};
 use crate::parser::Parser;
 use std::io::Read;
 
@@ -31,7 +32,8 @@ pub fn compile(source: &str) -> ParseResult<Program> {
     let (mr_table, rest2) = extract_macro_rules(&rest)?;
     let expanded_tokens = expand_macro_rules_calls(&rest2, &mr_table);
     let parsed = Parser::new(expanded_tokens).parse_program()?;
-    let expanded = expand_program_concurrent(&parsed, &table);
+    let with_derives = expand_derives(&parsed);
+    let expanded = expand_program_concurrent(&with_derives, &table);
     Ok(expanded)
 }
 

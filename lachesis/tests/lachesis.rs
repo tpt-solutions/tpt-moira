@@ -1,8 +1,8 @@
 //! Integration tests for the Lachesis type-checker and borrow-checker.
 
 use clotho::compile_source;
-use lachesis::ty::Ty;
 use lachesis::solver::{Answer, Term};
+use lachesis::ty::Ty;
 use lachesis::{
     borrow_check, build_solver, check, coherence_report, content_hash, normalize_assoc_type,
     type_check, user_impl_implements, Cache, IncrementalCache,
@@ -204,8 +204,16 @@ fn user_impl_is_found_by_solver() {
     );
     // The program must still type-check (the impl is ignored by the checker).
     assert!(check(&prog).is_ok());
-    assert!(user_impl_implements(&prog, "Eq", &Ty::Struct("Point".into())));
-    assert!(!user_impl_implements(&prog, "Ord", &Ty::Struct("Point".into())));
+    assert!(user_impl_implements(
+        &prog,
+        "Eq",
+        &Ty::Struct("Point".into())
+    ));
+    assert!(!user_impl_implements(
+        &prog,
+        "Ord",
+        &Ty::Struct("Point".into())
+    ));
 }
 
 #[test]
@@ -260,8 +268,7 @@ fn associated_type_normalization() {
     assert_eq!(normalized, Some(Term::Concr(Ty::I32)));
 
     // The public helper resolves through the parsed program directly.
-    let via_helper =
-        normalize_assoc_type(&prog, "Iterator", "Item", &Ty::Struct("Point".into()));
+    let via_helper = normalize_assoc_type(&prog, "Iterator", "Item", &Ty::Struct("Point".into()));
     assert_eq!(via_helper, Some(Term::Concr(Ty::I32)));
 }
 
@@ -322,4 +329,94 @@ fn distinct_impls_are_coherent() {
     );
     assert!(check(&prog).is_ok());
     assert!(coherence_report(&prog).is_empty());
+}
+
+// --- standard-library prelude (Phase-2 "idiomatic std" validation) --------
+
+#[test]
+fn std_option_is_accepted() {
+    assert!(check(&parse(
+        "fn main() {
+            let x = Some(5);
+            let _ = x.is_some();
+            let _ = x.is_none();
+            let _ = x.unwrap();
+            let y = None;
+            let _ = y;
+        }"
+    )).is_ok());
+}
+
+#[test]
+fn std_result_is_accepted() {
+    assert!(check(&parse(
+        "fn main() {
+            let r = Ok(5);
+            let e = Err(0);
+            let _ = r.is_ok();
+            let _ = r.is_err();
+            let _ = e.is_err();
+            let _ = r.unwrap();
+        }"
+    )).is_ok());
+}
+
+#[test]
+fn std_vec_methods_are_accepted() {
+    assert!(check(&parse(
+        "fn main() {
+            let v = Vec::new();
+            v.push(1);
+            v.push(2);
+            let _ = v.len();
+            let _ = v.is_empty();
+        }"
+    )).is_ok());
+}
+
+#[test]
+fn std_string_methods_are_accepted() {
+    assert!(check(&parse(
+        "fn main() {
+            let s = String::new();
+            s.push_str(\"hi\");
+            let _ = s.len();
+        }"
+    )).is_ok());
+}
+
+#[test]
+fn std_constructor_free_functions_are_accepted() {
+    assert!(check(&parse(
+        "fn main() {
+            let v = vec_new();
+            v.push(1);
+            let s = string_new();
+            let b = box_new(7);
+            let _ = v;
+            let _ = s;
+            let _ = b;
+        }"
+    )).is_ok());
+}
+
+#[test]
+fn unknown_std_method_is_rejected() {
+    // `Vec` has no `frobnicate` method; the checker must still reject it.
+    assert!(check(&parse(
+        "fn main() {
+            let v = Vec::new();
+            v.frobnicate();
+        }"
+    )).is_err());
+}
+
+#[test]
+fn std_method_argument_count_is_checked() {
+    assert!(check(&parse(
+        "fn main() {
+            let v = Vec::new();
+            v.push();
+        }"
+    )).is_err());
 }

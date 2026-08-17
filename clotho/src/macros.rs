@@ -186,6 +186,7 @@ fn expand_item(item: &Item, table: &MacroTable) -> Item {
     Item {
         visibility: item.visibility,
         kind,
+        attributes: item.attributes.clone(),
     }
 }
 

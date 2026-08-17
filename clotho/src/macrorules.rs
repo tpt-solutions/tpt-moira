@@ -266,10 +266,8 @@ fn split_top_level(tts: &[Token], kind: TokenKind) -> Vec<Vec<Token>> {
     for t in tts {
         match t.kind {
             TokenKind::LParen | TokenKind::LBrace | TokenKind::LBracket => depth += 1,
-            TokenKind::RParen | TokenKind::RBrace | TokenKind::RBracket => {
-                if depth > 0 {
-                    depth -= 1;
-                }
+            TokenKind::RParen | TokenKind::RBrace | TokenKind::RBracket if depth > 0 => {
+                depth -= 1;
             }
             _ => {}
         }
@@ -289,10 +287,8 @@ fn split_at_top_level(tts: &[Token], kind: TokenKind) -> Option<(Vec<Token>, Vec
     for idx in 0..tts.len() {
         match tts[idx].kind {
             TokenKind::LParen | TokenKind::LBrace | TokenKind::LBracket => depth += 1,
-            TokenKind::RParen | TokenKind::RBrace | TokenKind::RBracket => {
-                if depth > 0 {
-                    depth -= 1;
-                }
+            TokenKind::RParen | TokenKind::RBrace | TokenKind::RBracket if depth > 0 => {
+                depth -= 1;
             }
             _ => {}
         }
@@ -339,7 +335,10 @@ fn parse_matcher(tts: &[Token]) -> ParseResult<Vec<Matcher>> {
                 );
                 if next_open {
                     let (inner, sep, kind, next) = parse_rep(tts, i)?;
-                    stack.last_mut().unwrap().push(Matcher::Rep(inner, sep, kind));
+                    stack
+                        .last_mut()
+                        .unwrap()
+                        .push(Matcher::Rep(inner, sep, kind));
                     i = next;
                     continue;
                 }
@@ -391,19 +390,16 @@ fn parse_matcher(tts: &[Token]) -> ParseResult<Vec<Matcher>> {
                 continue;
             }
             TokenKind::RParen | TokenKind::RBrace | TokenKind::RBracket => {
-                let inner = stack.pop().ok_or_else(|| {
-                    Diag::error("macro_rules!: unbalanced `)` in matcher", None)
-                })?;
+                let inner = stack
+                    .pop()
+                    .ok_or_else(|| Diag::error("macro_rules!: unbalanced `)` in matcher", None))?;
                 let delim = delim_of_close(&tts[i].kind).ok_or_else(|| {
                     Diag::error("macro_rules!: unbalanced delimiter in matcher", None)
                 })?;
                 if let Some(parent) = stack.last_mut() {
                     parent.push(Matcher::Group(delim, inner));
                 } else {
-                    return Err(Diag::error(
-                        "macro_rules!: unbalanced `)` in matcher",
-                        None,
-                    ));
+                    return Err(Diag::error("macro_rules!: unbalanced `)` in matcher", None));
                 }
                 i += 1;
                 continue;
@@ -982,7 +978,9 @@ pub fn expand_macro_rules_calls(tokens: &[Token], table: &MacroRulesTable) -> Ve
                     let mut j = i + 2;
                     loop {
                         match tokens[j].kind {
-                            TokenKind::LParen | TokenKind::LBrace | TokenKind::LBracket => depth += 1,
+                            TokenKind::LParen | TokenKind::LBrace | TokenKind::LBracket => {
+                                depth += 1
+                            }
                             TokenKind::RParen | TokenKind::RBrace | TokenKind::RBracket => {
                                 depth -= 1;
                                 if depth == 0 {

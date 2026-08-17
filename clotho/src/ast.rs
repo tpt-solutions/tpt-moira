@@ -1,6 +1,6 @@
 //! Abstract Syntax Tree for the Phase-1 Rust subset.
 
-use crate::token::Span;
+use crate::token::{Span, Token};
 
 /// A syntax node carrying a source span.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,6 +29,20 @@ pub struct Program {
 pub struct Item {
     pub visibility: Visibility,
     pub kind: ItemKind,
+    /// Attributes applied to this item, e.g. `#[derive(Clone)]` or `#[inline]`.
+    pub attributes: Vec<Attribute>,
+}
+
+/// A single attribute `#[path(args)]` (or inner `#![path(args)]`).
+///
+/// The `path` is the attribute name (its last segment, e.g. `derive`),
+/// and `args` is the raw token stream inside the delimiters — empty for
+/// delimiter-less attributes. Later passes (e.g. derive expansion in
+/// [`crate::derive`]) read these to drive code generation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Attribute {
+    pub path: Path,
+    pub args: Vec<Token>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,6 +91,8 @@ pub struct StructDef {
     pub name: Spanned<String>,
     pub generics: Generics,
     pub fields: Vec<Field>,
+    /// Attributes applied to this struct (e.g. `#[derive(..)]`, `#[repr(..)]`).
+    pub attributes: Vec<Attribute>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -89,6 +105,8 @@ pub struct Field {
 pub struct EnumDef {
     pub name: Spanned<String>,
     pub variants: Vec<Variant>,
+    /// Attributes applied to this enum (e.g. `#[derive(..)]`, `#[repr(..)]`).
+    pub attributes: Vec<Attribute>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -235,6 +253,10 @@ pub enum Pat {
     Ident(Spanned<String>),
     Wild,
     Tuple(Vec<Pat>),
+    /// A path/variant pattern, e.g. `Foo`, `Self::Bar`, or `ns::Baz`. Tuple and
+    /// struct variant payloads are parsed but (per the Phase-1 approximation)
+    /// represented here only by the path.
+    Path(Path),
     Struct(String, Vec<(String, Pat)>),
 }
 

@@ -140,8 +140,18 @@ fn c_type(ty: &str, struct_names: &std::collections::HashSet<&str>) -> String {
         return format!("struct {}", ty);
     }
     let mapped = match ty {
-        "i8" | "i16" | "i32" | "i64" | "i128" | "isize" => "long long",
-        "u8" | "u16" | "u32" | "u64" | "u128" | "usize" => "unsigned long long",
+        "i8" => "int8_t",
+        "i16" => "int16_t",
+        "i32" => "int32_t",
+        "i64" => "int64_t",
+        "i128" => "long long",
+        "isize" => "long long",
+        "u8" => "uint8_t",
+        "u16" => "uint16_t",
+        "u32" => "uint32_t",
+        "u64" => "uint64_t",
+        "u128" => "unsigned long long",
+        "usize" => "unsigned long long",
         "bool" => "int",
         "char" => "char",
         "f32" => "float",

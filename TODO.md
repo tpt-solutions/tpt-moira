@@ -80,7 +80,30 @@ Target: full language support, matching `rustc` behavior.
   - [x] Token-tree matcher: `$x:frag`, fragments, and repetitions `$(...)*`/`+`/`?` (`clotho::macrorules`)
   - [x] Template expansion with repetition + nesting (`clotho::macrorules`)
   - [x] Integrate `macro_rules!` into the concurrent expansion pipeline (`clotho::pipeline::compile`)
-  - [ ] Attribute macros + `derive` macros (not yet supported)
+  - [x] Attribute macros + `derive` macros — attribute parsing + built-in derive
+        expansion is now wired end-to-end through the frontend.
+    - The lexer already emits `#`, so attributes parse cleanly. `clotho::ast`
+      gained an `Attribute { path, args }` type and an `attributes: Vec<Attribute>`
+      field on `Item`, `StructDef`, and `EnumDef` (`ast.rs`).
+    - `clotho::parser` now parses `#[...]` / `#![...]` attribute groups (capturing
+      the name path and raw token args) and threads them onto items, structs, and
+      enums; the old no-op `skip_attributes` placeholder is gone.
+    - `clotho::derive::expand_derives` was previously dead code (the module was
+      never declared in `lib.rs` and the pipeline never called it). It is now
+      declared as `pub mod derive` and invoked from `clotho::pipeline::compile`,
+      so `#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Ord,
+      PartialOrd)]` on structs **and enums** lowers to the corresponding trait
+      `impl`s (enum derives now emit correct `match self { Self::Variant => ... }`
+      arms; this required adding `Pat::Path` to the pattern AST and fixing a
+      `parse_match` scrutinee ambiguity where `match self {` greedily consumed
+      `self {` as a struct literal).
+    - Validated by `clotho/tests/derive.rs` (all four tests now pass, including
+      `attributes_are_retained_on_item` and `derive_on_enum_generates_impls`).
+    - **Caveat:** the generated `impl` *method bodies* rely on method calls
+      (`p.clone()`), which are outside the Phase-1 codegen/type-check subset
+      ("method calls are not in the type-checked subset"). The frontend expansion
+      is complete; lowering/calling derived methods waits on the Phase-2/3 trait
+      and method-resolution work.
 - [ ] **Next-generation Chalk-like Prolog-style trait solver**
   - [x] **Solver foundation: `Goal`/`Clause` model + SLD-style resolution with
     inference-variable unification + memoization** (`lachesis::solver`); backs

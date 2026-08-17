@@ -22,8 +22,10 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 mod results;
-use results::{current_commit, detect_regressions, geomean_regression, load_history, now_timestamp,
-              append_run, history_path, format_timestamp, Entry, RunRecord, DEFAULT_RESULTS_DIR};
+use results::{
+    append_run, current_commit, detect_regressions, format_timestamp, geomean_regression,
+    history_path, load_history, now_timestamp, Entry, RunRecord, DEFAULT_RESULTS_DIR,
+};
 
 /// Percent slowdown vs. the previous run that counts as a regression.
 const REGRESSION_PCT: f64 = 10.0;
@@ -176,12 +178,7 @@ fn run_benchmark(record: bool, results_dir: &Path) {
             (Some(m), Some(r)) => {
                 let ratio = r / m;
                 ratios.push(ratio);
-                (
-                    fmt(m),
-                    fmt(r),
-                    format!("{ratio:>9.2}x"),
-                    Some(ratio),
-                )
+                (fmt(m), fmt(r), format!("{ratio:>9.2}x"), Some(ratio))
             }
             (Some(m), None) => (fmt(m), "  n/a".to_string(), "  n/a".to_string(), None),
             (None, Some(r)) => ("  n/a".to_string(), fmt(r), "  n/a".to_string(), None),
@@ -192,7 +189,10 @@ fn run_benchmark(record: bool, results_dir: &Path) {
                 None,
             ),
         };
-        println!("{:<8} {:>12} {:>12} {:>10}", name, moira_s, rustc_s, ratio_s);
+        println!(
+            "{:<8} {:>12} {:>12} {:>10}",
+            name, moira_s, rustc_s, ratio_s
+        );
 
         entries.push(Entry {
             program: (*name).to_string(),

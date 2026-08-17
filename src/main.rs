@@ -260,7 +260,12 @@ fn run_rustc_check(source: &str) -> Vec<String> {
         return Vec::new();
     }
     let output = Command::new("rustc")
-        .args(["--emit=metadata", "-o", &out.to_string_lossy(), &src.to_string_lossy()])
+        .args([
+            "--emit=metadata",
+            "-o",
+            &out.to_string_lossy(),
+            &src.to_string_lossy(),
+        ])
         .output();
     let _ = std::fs::remove_file(&src);
     let _ = std::fs::remove_file(&out);

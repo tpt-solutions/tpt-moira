@@ -13,10 +13,11 @@
 //! ```
 
 pub mod ast;
+pub mod derive;
 pub mod error;
 pub mod lexer;
-pub mod macros;
 pub mod macrorules;
+pub mod macros;
 pub mod parser;
 pub mod pipeline;
 pub mod token;
@@ -65,10 +66,7 @@ fn flatten_modules(prog: ast::Program, base: &Path) -> Result<ast::Program, erro
     Ok(ast::Program { items })
 }
 
-fn flatten_items(
-    items: Vec<ast::Item>,
-    base: &Path,
-) -> Result<Vec<ast::Item>, error::Diag> {
+fn flatten_items(items: Vec<ast::Item>, base: &Path) -> Result<Vec<ast::Item>, error::Diag> {
     let mut out = Vec::with_capacity(items.len());
     for item in items {
         match item.kind {
@@ -79,7 +77,10 @@ fn flatten_items(
                 ast::ModuleKind::External => {
                     let candidate = base.join(format!("{}.rs", m.name.node));
                     let (sub_path, sub_base) = if candidate.is_file() {
-                        (candidate.clone(), candidate.parent().unwrap_or(base).to_path_buf())
+                        (
+                            candidate.clone(),
+                            candidate.parent().unwrap_or(base).to_path_buf(),
+                        )
                     } else {
                         let mod_rs = base.join(&m.name.node).join("mod.rs");
                         (mod_rs, base.join(&m.name.node))
@@ -102,6 +103,7 @@ fn flatten_items(
             other => out.push(ast::Item {
                 visibility: item.visibility,
                 kind: other,
+                attributes: item.attributes.clone(),
             }),
         }
     }

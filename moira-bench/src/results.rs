@@ -54,7 +54,13 @@ pub fn now_timestamp() -> String {
 pub fn current_commit() -> Option<String> {
     let root = workspace_root()?;
     let out = Command::new("git")
-        .args(["-C", &root.to_string_lossy(), "rev-parse", "--short", "HEAD"])
+        .args([
+            "-C",
+            &root.to_string_lossy(),
+            "rev-parse",
+            "--short",
+            "HEAD",
+        ])
         .output()
         .ok()?;
     if !out.status.success() {
@@ -289,10 +295,7 @@ pub fn format_timestamp(ts: &str) -> String {
     let h = sod / 3600;
     let mn = (sod % 3600) / 60;
     let s = sod % 60;
-    format!(
-        "{:04}-{:02}-{:02} {:02}:{:02}:{:02} UTC",
-        y, m, d, h, mn, s
-    )
+    format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02} UTC", y, m, d, h, mn, s)
 }
 
 #[cfg(test)]

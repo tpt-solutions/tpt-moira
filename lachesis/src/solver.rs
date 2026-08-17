@@ -18,7 +18,7 @@
 
 use crate::traits::BuiltinTrait;
 use crate::ty::Ty;
-use std::collections::{HashMap, hash_map::DefaultHasher};
+use std::collections::{hash_map::DefaultHasher, HashMap};
 use std::hash::{Hash, Hasher};
 
 /// A compiler-known trait, mirroring [`BuiltinTrait`].
@@ -311,8 +311,24 @@ pub fn implements_rule(t: TraitId, ty: &Ty) -> bool {
 /// implements each trait), mirroring `TraitDb`.
 pub fn builtin_program() -> Program {
     let types = [
-        Ty::Int, Ty::I8, Ty::I16, Ty::I32, Ty::I64, Ty::I128, Ty::Isize, Ty::U8, Ty::U16, Ty::U32,
-        Ty::U64, Ty::U128, Ty::Usize, Ty::F32, Ty::F64, Ty::Bool, Ty::Char, Ty::Str,
+        Ty::Int,
+        Ty::I8,
+        Ty::I16,
+        Ty::I32,
+        Ty::I64,
+        Ty::I128,
+        Ty::Isize,
+        Ty::U8,
+        Ty::U16,
+        Ty::U32,
+        Ty::U64,
+        Ty::U128,
+        Ty::Usize,
+        Ty::F32,
+        Ty::F64,
+        Ty::Bool,
+        Ty::Char,
+        Ty::Str,
     ];
     let traits = [
         TraitId::Add,
@@ -370,7 +386,11 @@ pub fn program_with_impls(prog: &clotho::ast::Program) -> Program {
 fn ast_type_to_term(ty: &clotho::ast::Type, vars: &HashMap<String, usize>) -> Term {
     match &ty.kind {
         clotho::ast::TypeKind::Path(p, args) => {
-            let name = p.segments.last().map(|s| s.node.clone()).unwrap_or_default();
+            let name = p
+                .segments
+                .last()
+                .map(|s| s.node.clone())
+                .unwrap_or_default();
             if let Some(&v) = vars.get(&name) {
                 return Term::Var(v);
             }
@@ -426,10 +446,7 @@ fn impl_to_clause(imp: &clotho::ast::ImplDef) -> (Clause, Vec<(Term, Term)>) {
         let vi = vars[&p.name.node];
         for bound in &p.bounds {
             let bname = bound_trait_name(bound);
-            body.push(Term::App(
-                TraitId::User(bname),
-                Box::new(Term::Var(vi)),
-            ));
+            body.push(Term::App(TraitId::User(bname), Box::new(Term::Var(vi))));
         }
     }
     for pred in &imp.generics.where_clause {
@@ -552,9 +569,7 @@ pub fn coherence_report(prog: &clotho::ast::Program) -> Vec<(clotho::token::Span
 /// and a primitive or built-in type must actually satisfy `Bound`; otherwise the
 /// `impl` is ill-formed. Predicates over user struct types are skipped because
 /// they require full generic instantiation, which is out of scope here.
-pub fn well_formedness_report(
-    prog: &clotho::ast::Program,
-) -> Vec<(clotho::token::Span, String)> {
+pub fn well_formedness_report(prog: &clotho::ast::Program) -> Vec<(clotho::token::Span, String)> {
     let solver = Solver::new(program_with_impls(prog));
     let mut errors = Vec::new();
     for item in &prog.items {
@@ -586,11 +601,7 @@ pub fn well_formedness_report(
         }
         for pred in &imp.generics.where_clause {
             for bound in &pred.bounds {
-                predicates.push((
-                    pred.ty.clone(),
-                    bound_trait_name(bound),
-                    pred.ty.span,
-                ));
+                predicates.push((pred.ty.clone(), bound_trait_name(bound), pred.ty.span));
             }
         }
         for (ty, bound, span) in predicates {
@@ -613,9 +624,7 @@ pub fn well_formedness_report(
             if !holds {
                 errors.push((
                     span,
-                    format!(
-                        "where-clause bound `{ty}: {bound}` is not satisfied for `{ty}`"
-                    ),
+                    format!("where-clause bound `{ty}: {bound}` is not satisfied for `{ty}`"),
                 ));
             }
         }
@@ -648,7 +657,13 @@ mod tests {
     fn solver_matches_trait_db() {
         let solver = builtin_solver();
         let types = [
-            Ty::Int, Ty::I32, Ty::U64, Ty::F64, Ty::Bool, Ty::Char, Ty::Str,
+            Ty::Int,
+            Ty::I32,
+            Ty::U64,
+            Ty::F64,
+            Ty::Bool,
+            Ty::Char,
+            Ty::Str,
         ];
         let traits = [
             BuiltinTrait::Add,

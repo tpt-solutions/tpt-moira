@@ -311,7 +311,9 @@ fn reachable_from(start: usize, succs: &[Vec<usize>]) -> HashSet<usize> {
 
 fn operands_of(rv: &Rvalue) -> Vec<String> {
     match rv {
-        Rvalue::Use(o) | Rvalue::Unary(_, o) | Rvalue::Ref(o, _) | Rvalue::Field(o, _, _) => names(o),
+        Rvalue::Use(o) | Rvalue::Unary(_, o) | Rvalue::Ref(o, _) | Rvalue::Field(o, _, _) => {
+            names(o)
+        }
         Rvalue::Binary(_, l, r) => {
             let mut v = names(l);
             v.extend(names(r));

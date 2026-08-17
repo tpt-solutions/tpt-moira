@@ -18,8 +18,8 @@
 pub mod borrow;
 pub mod cache;
 pub mod diff;
-pub mod solver;
 pub mod infer;
+pub mod solver;
 pub mod traits;
 pub mod ty;
 

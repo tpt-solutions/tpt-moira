@@ -57,10 +57,8 @@ fn derives_of(item: &Item) -> Vec<String> {
             for t in &attr.args {
                 if let crate::token::TokenKind::Ident(name) = &t.kind {
                     cur = name.clone();
-                } else if matches!(t.kind, crate::token::TokenKind::Comma) {
-                    if !cur.is_empty() {
-                        out.push(std::mem::take(&mut cur));
-                    }
+                } else if matches!(t.kind, crate::token::TokenKind::Comma) && !cur.is_empty() {
+                    out.push(std::mem::take(&mut cur));
                 }
             }
             if !cur.is_empty() {
@@ -99,18 +97,14 @@ fn derive_struct(trait_name: &str, s: &StructDef) -> Option<String> {
                 .map(|f| format!("{}: self.{}.clone()", f.name.node, f.name.node))
                 .collect::<Vec<_>>()
                 .join(", ");
-            format!(
-                "impl Clone for {name} {{ fn clone(&self) -> Self {{ Self {{ {inits} }} }} }}"
-            )
+            format!("impl Clone for {name} {{ fn clone(&self) -> Self {{ Self {{ {inits} }} }} }}")
         }
         "Copy" => {
             // No methods; emit a marker impl with an empty body.
             format!("impl Copy for {name} {{ }}")
         }
         "Debug" => {
-            format!(
-                "impl Debug for {name} {{ fn fmt(&self, f: &mut Formatter) -> () {{ 0; }} }}"
-            )
+            format!("impl Debug for {name} {{ fn fmt(&self, f: &mut Formatter) -> () {{ 0; }} }}")
         }
         "Default" => {
             let inits = fields
@@ -118,14 +112,17 @@ fn derive_struct(trait_name: &str, s: &StructDef) -> Option<String> {
                 .map(|f| format!("{}: Default::default()", f.name.node))
                 .collect::<Vec<_>>()
                 .join(", ");
-            format!(
-                "impl Default for {name} {{ fn default() -> Self {{ Self {{ {inits} }} }} }}"
-            )
+            format!("impl Default for {name} {{ fn default() -> Self {{ Self {{ {inits} }} }} }}")
         }
         "PartialEq" => {
             let conds = fields
                 .iter()
-                .map(|f| format!("self.{fn_field} == other.{fn_field}", fn_field = f.name.node))
+                .map(|f| {
+                    format!(
+                        "self.{fn_field} == other.{fn_field}",
+                        fn_field = f.name.node
+                    )
+                })
                 .collect::<Vec<_>>()
                 .join(" && ");
             let conds = if conds.is_empty() {
@@ -144,13 +141,9 @@ fn derive_struct(trait_name: &str, s: &StructDef) -> Option<String> {
                 .map(|f| format!("self.{fn_field}.hash(h);", fn_field = f.name.node))
                 .collect::<Vec<_>>()
                 .join(" ");
-            format!(
-                "impl Hash for {name} {{ fn hash(&self, h: &mut Hasher) -> () {{ {body} }} }}"
-            )
+            format!("impl Hash for {name} {{ fn hash(&self, h: &mut Hasher) -> () {{ {body} }} }}")
         }
-        "Ord" => format!(
-            "impl Ord for {name} {{ fn cmp(&self, other: &Self) -> i32 {{ 0 }} }}"
-        ),
+        "Ord" => format!("impl Ord for {name} {{ fn cmp(&self, other: &Self) -> i32 {{ 0 }} }}"),
         "PartialOrd" => format!(
             "impl PartialOrd for {name} {{ fn partial_cmp(&self, other: &Self) -> i32 {{ 0 }} }}"
         ),
@@ -175,9 +168,9 @@ fn derive_enum(trait_name: &str, e: &EnumDef) -> Option<String> {
             )
         }
         "Copy" => format!("impl Copy for {name} {{ }}"),
-        "Debug" => format!(
-            "impl Debug for {name} {{ fn fmt(&self, f: &mut Formatter) -> () {{ 0; }} }}"
-        ),
+        "Debug" => {
+            format!("impl Debug for {name} {{ fn fmt(&self, f: &mut Formatter) -> () {{ 0; }} }}")
+        }
         "PartialEq" => {
             // Compare by discriminant index: map each variant to its ordinal
             // and test the two ordinals for equality.
@@ -192,12 +185,10 @@ fn derive_enum(trait_name: &str, e: &EnumDef) -> Option<String> {
             )
         }
         "Eq" => format!("impl Eq for {name} {{ }}"),
-        "Hash" => format!(
-            "impl Hash for {name} {{ fn hash(&self, h: &mut Hasher) -> () {{ 0; }} }}"
-        ),
-        "Ord" => format!(
-            "impl Ord for {name} {{ fn cmp(&self, other: &Self) -> i32 {{ 0 }} }}"
-        ),
+        "Hash" => {
+            format!("impl Hash for {name} {{ fn hash(&self, h: &mut Hasher) -> () {{ 0; }} }}")
+        }
+        "Ord" => format!("impl Ord for {name} {{ fn cmp(&self, other: &Self) -> i32 {{ 0 }} }}"),
         "PartialOrd" => format!(
             "impl PartialOrd for {name} {{ fn partial_cmp(&self, other: &Self) -> i32 {{ 0 }} }}"
         ),

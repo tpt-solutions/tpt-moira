@@ -153,9 +153,7 @@ fn build_function(f: &mir::Function) -> Result<SsaFunction, String> {
                         .map(|(fld, o)| (fld.clone(), resolve(o, &last_def)))
                         .collect(),
                 ),
-                mir::Rvalue::Field(o, fld, _deref) => {
-                    Op::Field(resolve(o, &last_def), fld.clone())
-                }
+                mir::Rvalue::Field(o, fld, _deref) => Op::Field(resolve(o, &last_def), fld.clone()),
                 mir::Rvalue::Ref(o, _) => Op::Ref(resolve(o, &last_def)),
                 // `StoreField` and the suspending `Switch` terminator belong to
                 // the `async fn` state machine, which is generated only for the

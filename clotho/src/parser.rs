@@ -117,10 +117,7 @@ impl Parser {
     /// `unsafe trait` is also skipped (while `unsafe fn`/`unsafe impl` are kept).
     fn is_skippable_item(&self) -> bool {
         let mut i = self.pos;
-        if matches!(
-            self.tokens.get(i).map(|t| &t.kind),
-            Some(TokenKind::Unsafe)
-        ) {
+        if matches!(self.tokens.get(i).map(|t| &t.kind), Some(TokenKind::Unsafe)) {
             i += 1;
         }
         matches!(
@@ -163,9 +160,9 @@ impl Parser {
         Ok(())
     }
 
-    fn parse_item(&mut self) -> ParseResult<Item> {
+    pub(crate) fn parse_item(&mut self) -> ParseResult<Item> {
         loop {
-            let _ = self.skip_attributes();
+            let attributes = self.parse_attributes()?;
             let visibility = self.parse_visibility();
             // Items the Phase-1 subset does not yet model (e.g. `trait`,
             // `macro_rules!`, `extern`) are dropped silently so the program still
@@ -175,15 +172,16 @@ impl Parser {
                 self.skip_rest_of_item()?;
                 continue;
             }
-            let kind = self.parse_item_kind()?;
+            let kind = self.parse_item_kind(attributes.clone())?;
             return Ok(Item {
                 visibility,
                 kind,
+                attributes,
             });
         }
     }
 
-    fn parse_item_kind(&mut self) -> ParseResult<ItemKind> {
+    fn parse_item_kind(&mut self, attributes: Vec<Attribute>) -> ParseResult<ItemKind> {
         // `unsafe fn` / `unsafe impl` keep their unsafe-ness; `unsafe trait` is
         // dropped by the caller's `is_skippable_item` check.
         let is_unsafe = self.eat(&TokenKind::Unsafe);
@@ -204,8 +202,8 @@ impl Parser {
             TokenKind::Fn | TokenKind::Async => {
                 Ok(ItemKind::Function(self.parse_function(is_unsafe)?))
             }
-            TokenKind::Struct => Ok(ItemKind::Struct(self.parse_struct()?)),
-            TokenKind::Enum => Ok(ItemKind::Enum(self.parse_enum()?)),
+            TokenKind::Struct => Ok(ItemKind::Struct(self.parse_struct(attributes)?)),
+            TokenKind::Enum => Ok(ItemKind::Enum(self.parse_enum(attributes)?)),
             TokenKind::Const => Ok(ItemKind::Const(self.parse_const()?)),
             TokenKind::Static => Ok(ItemKind::Static(self.parse_static()?)),
             TokenKind::Use => Ok(ItemKind::Use(self.parse_use()?)),
@@ -266,7 +264,11 @@ impl Parser {
     fn parse_param(&mut self) -> ParseResult<Param> {
         if self.peek_is_receiver() {
             let is_ref = self.eat(&TokenKind::Amp);
-            let is_mut = if is_ref { self.eat(&TokenKind::Mut) } else { false };
+            let is_mut = if is_ref {
+                self.eat(&TokenKind::Mut)
+            } else {
+                false
+            };
             let name = self.expect_ident()?; // `self`
             let span = name.span;
             let self_ty = Type {
@@ -313,7 +315,7 @@ impl Parser {
         }
     }
 
-    fn parse_struct(&mut self) -> ParseResult<StructDef> {
+    fn parse_struct(&mut self, attributes: Vec<Attribute>) -> ParseResult<StructDef> {
         self.expect(TokenKind::Struct)?;
         let name = self.expect_ident()?;
         let generics = self.parse_generics()?;
@@ -329,10 +331,15 @@ impl Parser {
                 break;
             }
         }
-        Ok(StructDef { name, generics, fields })
+        Ok(StructDef {
+            name,
+            generics,
+            fields,
+            attributes,
+        })
     }
 
-    fn parse_enum(&mut self) -> ParseResult<EnumDef> {
+    fn parse_enum(&mut self, attributes: Vec<Attribute>) -> ParseResult<EnumDef> {
         self.expect(TokenKind::Enum)?;
         let name = self.expect_ident()?;
         self.expect(TokenKind::LBrace)?;
@@ -366,7 +373,11 @@ impl Parser {
                 break;
             }
         }
-        Ok(EnumDef { name, variants })
+        Ok(EnumDef {
+            name,
+            variants,
+            attributes,
+        })
     }
 
     fn parse_const(&mut self) -> ParseResult<ConstDef> {
@@ -538,9 +549,17 @@ impl Parser {
                 let tok = self.peek().clone();
                 // Split `>>` into `>` `>`: rewrite the current token and insert
                 // a second `>` after it.
-                self.tokens
-                    .insert(self.pos + 1, Token { kind: TokenKind::Gt, span: tok.span });
-                self.tokens[self.pos] = Token { kind: TokenKind::Gt, span: tok.span };
+                self.tokens.insert(
+                    self.pos + 1,
+                    Token {
+                        kind: TokenKind::Gt,
+                        span: tok.span,
+                    },
+                );
+                self.tokens[self.pos] = Token {
+                    kind: TokenKind::Gt,
+                    span: tok.span,
+                };
                 self.bump();
                 Ok(())
             }
@@ -624,13 +643,74 @@ impl Parser {
         Ok(Block { stmts, tail })
     }
 
-    /// Skip a leading attribute group, plus any leading `pub`/`unsafe`/`async`
-    /// visibility/modifier keyword so that the real item parser sees a clean
-    /// token stream. The Phase-1 lexer does not emit attribute tokens, so this
-    /// is effectively a no-op placeholder reserved for future attribute
-    /// support.
-    fn skip_attributes(&mut self) -> ParseResult<()> {
-        Ok(())
+    /// Parse a sequence of leading attributes `#[path(args)]` (and inner
+    /// `#![path(args)]`). Each attribute records its name `path` and the raw
+    /// token stream inside the brackets (`args`). Returns the collected
+    /// attributes (possibly empty).
+    fn parse_attributes(&mut self) -> ParseResult<Vec<Attribute>> {
+        let mut attrs = Vec::new();
+        while self.peek_kind() == &TokenKind::Hash {
+            self.bump(); // consume `#`
+                         // Inner attribute `#![...]`: consume the `!` if present. It is stored
+                         // identically to an outer attribute for now.
+            if self.peek_kind() == &TokenKind::Bang {
+                self.bump();
+            }
+            self.expect(TokenKind::LBracket)?;
+            // Parse the attribute path: `ident` (`::` `ident`)*.
+            let mut segments = Vec::new();
+            loop {
+                if let TokenKind::Ident(name) = self.peek_kind().clone() {
+                    let span = self.peek().span;
+                    segments.push(Spanned::new(name, span));
+                } else {
+                    return Err(Diag::error(
+                        "expected attribute name",
+                        Some(self.peek().span),
+                    ));
+                }
+                self.bump();
+                if self.eat(&TokenKind::ColonColon) {
+                    continue;
+                }
+                break;
+            }
+            let path = Path { segments };
+            // Capture the raw token stream until the matching `]`.
+            let mut args = Vec::new();
+            let mut depth = 0i32;
+            loop {
+                match self.peek_kind() {
+                    TokenKind::Eof => {
+                        return Err(Diag::error(
+                            "unterminated attribute",
+                            Some(self.peek().span),
+                        ))
+                    }
+                    TokenKind::LBracket | TokenKind::LParen | TokenKind::LBrace => {
+                        depth += 1;
+                        args.push(self.bump());
+                    }
+                    TokenKind::RBracket | TokenKind::RParen | TokenKind::RBrace => {
+                        if depth == 0 {
+                            if matches!(self.peek_kind(), TokenKind::RBracket) {
+                                self.bump();
+                                break;
+                            }
+                            return Err(Diag::error(
+                                "unexpected delimiter in attribute",
+                                Some(self.peek().span),
+                            ));
+                        }
+                        depth -= 1;
+                        args.push(self.bump());
+                    }
+                    _ => args.push(self.bump()),
+                }
+            }
+            attrs.push(Attribute { path, args });
+        }
+        Ok(attrs)
     }
 
     fn starts_expr(&self) -> bool {
@@ -741,7 +821,50 @@ impl Parser {
             }
             TokenKind::Ident(_) => {
                 let name = self.expect_ident()?;
-                Ok(Pat::Ident(name))
+                if self.eat(&TokenKind::ColonColon) {
+                    // A path/variant pattern: `Foo`, `Self::Bar`, `ns::Baz`.
+                    let mut segments = vec![name.clone(), self.expect_ident()?];
+                    while self.eat(&TokenKind::ColonColon) {
+                        segments.push(self.expect_ident()?);
+                    }
+                    let path = Path { segments };
+                    // Consume an optional tuple/struct payload so variant
+                    // patterns with fields also parse (approximated as a path).
+                    if self.peek_kind() == &TokenKind::LParen
+                        || self.peek_kind() == &TokenKind::LBrace
+                    {
+                        let open = self.peek_kind().clone();
+                        let close = match open {
+                            TokenKind::LParen => TokenKind::RParen,
+                            _ => TokenKind::RBrace,
+                        };
+                        self.bump();
+                        let mut depth = 0i32;
+                        loop {
+                            match self.peek_kind() {
+                                TokenKind::Eof => break,
+                                k if *k == open => {
+                                    depth += 1;
+                                    self.bump();
+                                }
+                                k if *k == close => {
+                                    if depth == 0 {
+                                        self.bump();
+                                        break;
+                                    }
+                                    depth -= 1;
+                                    self.bump();
+                                }
+                                _ => {
+                                    self.bump();
+                                }
+                            }
+                        }
+                    }
+                    Ok(Pat::Path(path))
+                } else {
+                    Ok(Pat::Ident(name))
+                }
             }
             _ => Err(Diag::error(
                 format!("expected pattern, found {}", self.peek_kind()),
@@ -1280,7 +1403,10 @@ impl Parser {
     fn parse_match(&mut self) -> ParseResult<Expr> {
         let start = self.peek().span.start;
         self.expect(TokenKind::Match)?;
-        let scrutinee = self.parse_expr_bp(1, true)?;
+        // `allow_struct = false`: a trailing `{` after the scrutinee belongs to
+        // the `match` body, not a struct-literal scrutinee (which must be
+        // parenthesized, e.g. `match (Point { .. }) { .. }`).
+        let scrutinee = self.parse_expr_bp(1, false)?;
         self.expect(TokenKind::LBrace)?;
         let mut arms = Vec::new();
         while !self.eat(&TokenKind::RBrace) {
