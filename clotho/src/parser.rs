@@ -47,6 +47,16 @@ impl Parser {
         matches!(self.peek_kind(), TokenKind::Eof)
     }
 
+    /// Whether the token *after* the current one is `:`. Used to distinguish a
+    /// named field/param (`x: T`) from a bare (unnamed tuple) type in an enum
+    /// variant or tuple struct.
+    fn next_is_colon(&self) -> bool {
+        matches!(
+            self.tokens.get(self.pos + 1).map(|t| &t.kind),
+            Some(TokenKind::Colon)
+        )
+    }
+
     fn check(&self, k: &TokenKind) -> bool {
         self.peek_kind() == k
     }
@@ -185,12 +195,12 @@ impl Parser {
         // `unsafe fn` / `unsafe impl` keep their unsafe-ness; `unsafe trait` is
         // dropped by the caller's `is_skippable_item` check.
         let is_unsafe = self.eat(&TokenKind::Unsafe);
-        // `impl` lexes as an identifier (it is not a keyword token), so detect
-        // it by name before the keyword-driven match below.
+        // `impl` is a keyword token; detect it before the name-based checks below.
+        if let TokenKind::Impl = self.peek_kind() {
+            return Ok(ItemKind::Impl(self.parse_impl(is_unsafe)?));
+        }
+        // `mod` / `type` still lex as identifiers, so detect them by name.
         if let TokenKind::Ident(name) = self.peek_kind() {
-            if name == "impl" {
-                return Ok(ItemKind::Impl(self.parse_impl(is_unsafe)?));
-            }
             if name == "mod" {
                 return Ok(ItemKind::Module(self.parse_module()?));
             }
@@ -218,10 +228,11 @@ impl Parser {
         // Consume the `type` identifier.
         self.bump();
         let name = self.expect_ident()?;
+        let generics = self.parse_generics()?;
         self.expect(TokenKind::Eq)?;
         let ty = self.parse_type()?;
         self.eat(&TokenKind::Semicolon);
-        Ok(TypeAliasDef { name, ty })
+        Ok(TypeAliasDef { name, generics, ty })
     }
 
     fn parse_function(&mut self, is_unsafe: bool) -> ParseResult<Function> {
@@ -230,16 +241,7 @@ impl Parser {
         let name = self.expect_ident()?;
         let generics = self.parse_generics()?;
         self.expect(TokenKind::LParen)?;
-        let mut params = Vec::new();
-        if !self.check(&TokenKind::RParen) {
-            loop {
-                params.push(self.parse_param()?);
-                if !self.eat(&TokenKind::Comma) {
-                    break;
-                }
-            }
-        }
-        self.expect(TokenKind::RParen)?;
+        let params = self.parse_delimited(TokenKind::RParen, |s| s.parse_param())?;
         let ret = if self.eat(&TokenKind::Arrow) {
             Some(self.parse_type()?)
         } else {
@@ -267,7 +269,8 @@ impl Parser {
             let is_mut = if is_ref {
                 self.eat(&TokenKind::Mut)
             } else {
-                false
+                // By-value mutable receiver: `mut self`.
+                self.eat(&TokenKind::Mut)
             };
             let name = self.expect_ident()?; // `self`
             let span = name.span;
@@ -306,6 +309,10 @@ impl Parser {
     fn peek_is_receiver(&self) -> bool {
         match self.peek_kind() {
             TokenKind::Ident(name) => name.as_str() == "self",
+            TokenKind::Mut => matches!(
+                self.tokens.get(self.pos + 1).map(|t| &t.kind),
+                Some(TokenKind::Ident(n)) if n.as_str() == "self"
+            ),
             TokenKind::Amp => match self.tokens.get(self.pos + 1).map(|t| &t.kind) {
                 Some(TokenKind::Ident(n)) => n.as_str() == "self",
                 Some(TokenKind::Mut) => true,
@@ -315,22 +322,82 @@ impl Parser {
         }
     }
 
+    /// Consume an optional visibility qualifier (`pub`, `pub(crate)`,
+    /// `pub(in path)`, …). The Phase-1 subset does not model fine-grained
+    /// visibility, so the qualifier (and any restriction group) is simply
+    /// dropped. This is shared by item-level and field-level visibility.
+    fn skip_vis(&mut self) {
+        if self.eat(&TokenKind::Pub) {
+            if self.eat(&TokenKind::LParen) {
+                let mut depth = 0i32;
+                loop {
+                    match self.peek_kind() {
+                        TokenKind::Eof => break,
+                        TokenKind::LParen | TokenKind::LBracket | TokenKind::LBrace => {
+                            depth += 1;
+                            self.bump();
+                        }
+                        TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace => {
+                            if depth == 0 {
+                                self.bump();
+                                break;
+                            }
+                            depth -= 1;
+                            self.bump();
+                        }
+                        _ => {
+                            self.bump();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     fn parse_struct(&mut self, attributes: Vec<Attribute>) -> ParseResult<StructDef> {
         self.expect(TokenKind::Struct)?;
         let name = self.expect_ident()?;
         let generics = self.parse_generics()?;
-        self.expect(TokenKind::LBrace)?;
-        let mut fields = Vec::new();
-        while !self.eat(&TokenKind::RBrace) {
-            let fname = self.expect_ident()?;
-            self.expect(TokenKind::Colon)?;
-            let ty = self.parse_type()?;
-            fields.push(Field { name: fname, ty });
-            if !self.eat(&TokenKind::Comma) {
-                self.expect(TokenKind::RBrace)?;
-                break;
+        // A struct may be a brace struct `S { .. }`, a tuple struct `S(..);`, or
+        // a unit struct `S;`. Tuple/unit fields carry no names (represented with
+        // an empty name), which the type-checker/codegen treat as the
+        // positional form for the Phase-1 subset.
+        let fields = if self.eat(&TokenKind::LParen) {
+            let mut fs = Vec::new();
+            if !self.check(&TokenKind::RParen) {
+                loop {
+                    self.skip_vis();
+                    let ty = self.parse_type()?;
+                    fs.push(Field {
+                        name: Spanned::new(String::new(), ty.span),
+                        ty,
+                    });
+                    if !self.eat(&TokenKind::Comma) {
+                        break;
+                    }
+                }
             }
-        }
+            self.expect(TokenKind::RParen)?;
+            fs
+        } else if self.eat(&TokenKind::LBrace) {
+            let mut fs = Vec::new();
+            while !self.eat(&TokenKind::RBrace) {
+                self.skip_vis();
+                let fname = self.expect_ident()?;
+                self.expect(TokenKind::Colon)?;
+                let ty = self.parse_type()?;
+                fs.push(Field { name: fname, ty });
+                if !self.eat(&TokenKind::Comma) {
+                    self.expect(TokenKind::RBrace)?;
+                    break;
+                }
+            }
+            fs
+        } else {
+            // Unit struct `S;`.
+            Vec::new()
+        };
+        self.eat(&TokenKind::Semicolon);
         Ok(StructDef {
             name,
             generics,
@@ -345,14 +412,32 @@ impl Parser {
         self.expect(TokenKind::LBrace)?;
         let mut variants = Vec::new();
         while !self.eat(&TokenKind::RBrace) {
+            // A variant may carry attributes (`#[default]`, `#[repr(..)]`,
+            // …). The Phase-1 subset ignores them, so they are parsed and
+            // dropped here to keep variant-heavy code parseable.
+            let _ = self.parse_attributes()?;
+            self.skip_vis();
             let vname = self.expect_ident()?;
             let fields = if self.eat(&TokenKind::LParen) {
                 let mut fs = Vec::new();
                 if !self.check(&TokenKind::RParen) {
                     loop {
-                        let fname = self.expect_ident()?;
-                        self.expect(TokenKind::Colon)?;
-                        let ty = self.parse_type()?;
+                        self.skip_vis();
+                        // An unnamed tuple-field (`Variant(T)`) parses a bare type
+                        // where a `name: Type` field would go. A named field
+                        // (`Variant { x: T }`) keeps its field name. A field is
+                        // "named" only when an identifier is immediately followed
+                        // by `:`.
+                        let (fname, ty) = if matches!(self.peek_kind(), TokenKind::Ident(_))
+                            && self.next_is_colon()
+                        {
+                            let fname = self.expect_ident()?;
+                            self.expect(TokenKind::Colon)?;
+                            (fname, self.parse_type()?)
+                        } else {
+                            let ty = self.parse_type()?;
+                            (Spanned::new(String::new(), ty.span), ty)
+                        };
                         fs.push(Field { name: fname, ty });
                         if !self.eat(&TokenKind::Comma) {
                             break;
@@ -360,6 +445,26 @@ impl Parser {
                     }
                 }
                 self.expect(TokenKind::RParen)?;
+                Some(fs)
+            } else if self.eat(&TokenKind::LBrace) {
+                // Struct variant `Variant { field: Type, … }`.
+                let mut fs = Vec::new();
+                if !self.check(&TokenKind::RBrace) {
+                    loop {
+                        self.skip_vis();
+                        let fname = self.expect_ident()?;
+                        self.expect(TokenKind::Colon)?;
+                        let ty = self.parse_type()?;
+                        fs.push(Field { name: fname, ty });
+                        if !self.eat(&TokenKind::Comma) {
+                            break;
+                        }
+                        if self.check(&TokenKind::RBrace) {
+                            break;
+                        }
+                    }
+                }
+                self.expect(TokenKind::RBrace)?;
                 Some(fs)
             } else {
                 None
@@ -482,12 +587,32 @@ impl Parser {
         let mut params = Vec::new();
         if !self.check(&TokenKind::Gt) {
             loop {
+                // Lifetimes are dropped at the lexer level, so a generic list
+                // such as `<'a, T>` or `<'a>` leaves a dangling `,` (or nothing)
+                // behind. Skip a leading `,` and stop at the closing `>` so the
+                // remaining real parameters still parse.
+                if matches!(self.peek_kind(), TokenKind::Comma) {
+                    self.bump();
+                    if matches!(self.peek_kind(), TokenKind::Gt | TokenKind::GtGt) {
+                        break;
+                    }
+                    continue;
+                }
+                if matches!(self.peek_kind(), TokenKind::Gt | TokenKind::GtGt) {
+                    break;
+                }
                 let name = self.expect_ident()?;
                 let mut bounds = Vec::new();
                 if self.eat(&TokenKind::Colon) {
                     loop {
-                        let path = self.parse_path(true)?;
-                        bounds.push(TypeBound::Trait(path));
+                        // A dropped lifetime bound (`T: Clone + 'static`) leaves a
+                        // trailing `+` before `>`, so stop when the bound list ends.
+                        if matches!(self.peek_kind(), TokenKind::Gt | TokenKind::GtGt) {
+                            break;
+                        }
+                        if let Some(b) = self.parse_bound()? {
+                            bounds.push(b);
+                        }
                         if !self.eat(&TokenKind::Plus) {
                             break;
                         }
@@ -518,12 +643,26 @@ impl Parser {
         }
         self.bump(); // consume `where`
         loop {
+            // The where-clause ends where the function/impl body (or another
+            // token) begins; stop at `{` rather than trying to parse it as a type.
+            if matches!(self.peek_kind(), TokenKind::LBrace) {
+                break;
+            }
             let ty = self.parse_type()?;
             self.expect(TokenKind::Colon)?;
             let mut bounds = Vec::new();
             loop {
-                let path = self.parse_path(true)?;
-                bounds.push(TypeBound::Trait(path));
+                // A dropped lifetime bound leaves a trailing `+` before the
+                // enclosing delimiter; stop the bound list there.
+                if matches!(
+                    self.peek_kind(),
+                    TokenKind::Comma | TokenKind::LBrace | TokenKind::Gt | TokenKind::GtGt
+                ) {
+                    break;
+                }
+                if let Some(b) = self.parse_bound()? {
+                    bounds.push(b);
+                }
                 if !self.eat(&TokenKind::Plus) {
                     break;
                 }
@@ -599,16 +738,7 @@ impl Parser {
             }
             // nested braces
             if self.eat(&TokenKind::LBrace) {
-                let mut nested = Vec::new();
-                if !self.check(&TokenKind::RBrace) {
-                    loop {
-                        nested.push(self.parse_use_tree()?);
-                        if !self.eat(&TokenKind::Comma) {
-                            break;
-                        }
-                    }
-                }
-                self.expect(TokenKind::RBrace)?;
+                let nested = self.parse_delimited(TokenKind::RBrace, |s| s.parse_use_tree())?;
                 return Ok(UseTree {
                     prefix,
                     kind: UseKind::Nested(nested),
@@ -760,7 +890,7 @@ impl Parser {
     fn parse_stmt(&mut self) -> ParseResult<Stmt> {
         match self.peek_kind() {
             TokenKind::Let => {
-                let local = self.parse_local()?;
+                let local = self.parse_local(true)?;
                 Ok(Stmt {
                     kind: StmtKind::Local(local),
                 })
@@ -804,7 +934,7 @@ impl Parser {
         }
     }
 
-    fn parse_local(&mut self) -> ParseResult<Local> {
+    fn parse_local(&mut self, allow_struct_init: bool) -> ParseResult<Local> {
         self.expect(TokenKind::Let)?;
         let mutable = self.eat(&TokenKind::Mut);
         let pat = self.parse_pat()?;
@@ -814,7 +944,22 @@ impl Parser {
             None
         };
         let init = if self.eat(&TokenKind::Eq) {
-            Some(self.parse_expr()?)
+            // In expression position (`if let`/`while let`) the RHS must not
+            // swallow the following block as a struct literal, so struct literals
+            // are disabled; in statement position they are allowed (`let x = Foo { .. }`).
+            let e = if allow_struct_init {
+                self.parse_expr()?
+            } else {
+                self.parse_expr_bp(0, false)?
+            };
+            // `let P = E else { .. }` — the else branch diverges (returns /
+            // breaks / panics). The Phase-1 subset does not model the diverging
+            // control flow, so the block is parsed and dropped to keep `let`-else
+            // code parseable.
+            if self.eat(&TokenKind::Else) {
+                self.parse_block()?;
+            }
+            Some(e)
         } else {
             None
         };
@@ -828,55 +973,127 @@ impl Parser {
     }
 
     fn parse_pat(&mut self) -> ParseResult<Pat> {
-        match self.peek_kind() {
+        // Leading range / rest pattern: `..`, `..=b`, `..b`.
+        if matches!(self.peek_kind(), TokenKind::DotDot) {
+            let inclusive = self.consume_range_op();
+            let rhs = if self.is_range_end(self.peek_kind()) {
+                None
+            } else {
+                Some(Box::new(self.parse_pat()?))
+            };
+            return Ok(Pat::Range(None, rhs, inclusive));
+        }
+        let pat = match self.peek_kind() {
+            TokenKind::Mut => {
+                // Mutable binding pattern `mut x` (in fn params / `for` loops).
+                self.bump();
+                let name = self.expect_ident()?;
+                Ok(Pat::Ident(name))
+            }
             TokenKind::Underscore => {
                 self.bump();
                 Ok(Pat::Wild)
             }
+            TokenKind::Amp => {
+                // Reference pattern `&pat` (binds the matched value by reference).
+                self.bump();
+                let inner = self.parse_pat()?;
+                Ok(Pat::Ref(Box::new(inner)))
+            }
+            TokenKind::LParen => {
+                // Tuple pattern `(a, b, c)` (and the single-element `(a,)` form,
+                // which keeps a trailing comma).
+                self.bump();
+                let mut pats = Vec::new();
+                if !self.check(&TokenKind::RParen) {
+                    loop {
+                        pats.push(self.parse_pat()?);
+                        if !self.eat(&TokenKind::Comma) {
+                            break;
+                        }
+                        if self.check(&TokenKind::RParen) {
+                            break;
+                        }
+                    }
+                }
+                self.expect(TokenKind::RParen)?;
+                Ok(Pat::Tuple(pats))
+            }
+            TokenKind::Int { value, suffix } => {
+                let lit = Lit::Int(*value, suffix.clone());
+                self.bump();
+                Ok(Pat::Lit(lit))
+            }
+            TokenKind::Float { text, suffix } => {
+                let lit = Lit::Float(text.clone(), suffix.clone());
+                self.bump();
+                Ok(Pat::Lit(lit))
+            }
+            TokenKind::Str(s) => {
+                let lit = Lit::Str(s.clone());
+                self.bump();
+                Ok(Pat::Lit(lit))
+            }
+            TokenKind::Char(c) => {
+                let lit = Lit::Char(*c);
+                self.bump();
+                Ok(Pat::Lit(lit))
+            }
+            TokenKind::True => {
+                self.bump();
+                Ok(Pat::Lit(Lit::Bool(true)))
+            }
+            TokenKind::False => {
+                self.bump();
+                Ok(Pat::Lit(Lit::Bool(false)))
+            }
             TokenKind::Ident(_) => {
                 let name = self.expect_ident()?;
+                let mut segments = vec![name.clone()];
                 if self.eat(&TokenKind::ColonColon) {
-                    // A path/variant pattern: `Foo`, `Self::Bar`, `ns::Baz`.
-                    let mut segments = vec![name.clone(), self.expect_ident()?];
+                    // A qualified variant pattern: `Foo::Bar`, `ns::Baz`.
+                    segments.push(self.expect_ident()?);
                     while self.eat(&TokenKind::ColonColon) {
                         segments.push(self.expect_ident()?);
                     }
-                    let path = Path { segments };
-                    // Consume an optional tuple/struct payload so variant
-                    // patterns with fields also parse (approximated as a path).
-                    if self.peek_kind() == &TokenKind::LParen
-                        || self.peek_kind() == &TokenKind::LBrace
-                    {
-                        let open = self.peek_kind().clone();
-                        let close = match open {
-                            TokenKind::LParen => TokenKind::RParen,
-                            _ => TokenKind::RBrace,
-                        };
-                        self.bump();
-                        let mut depth = 0i32;
-                        loop {
-                            match self.peek_kind() {
-                                TokenKind::Eof => break,
-                                k if *k == open => {
-                                    depth += 1;
+                }
+                let path = Path { segments };
+                // Consume an optional tuple/struct payload so variant patterns
+                // with fields parse, whether qualified (`Foo::Bar(x)`) or not
+                // (`Some(a)`, `Ok(v)`, `Err(e)`, `Point { x, y }`).
+                if self.peek_kind() == &TokenKind::LParen
+                    || self.peek_kind() == &TokenKind::LBrace
+                {
+                    let open = self.peek_kind().clone();
+                    let close = match open {
+                        TokenKind::LParen => TokenKind::RParen,
+                        _ => TokenKind::RBrace,
+                    };
+                    self.bump();
+                    let mut depth = 0i32;
+                    loop {
+                        match self.peek_kind() {
+                            TokenKind::Eof => break,
+                            k if *k == open => {
+                                depth += 1;
+                                self.bump();
+                            }
+                            k if *k == close => {
+                                if depth == 0 {
                                     self.bump();
+                                    break;
                                 }
-                                k if *k == close => {
-                                    if depth == 0 {
-                                        self.bump();
-                                        break;
-                                    }
-                                    depth -= 1;
-                                    self.bump();
-                                }
-                                _ => {
-                                    self.bump();
-                                }
+                                depth -= 1;
+                                self.bump();
+                            }
+                            _ => {
+                                self.bump();
                             }
                         }
                     }
                     Ok(Pat::Path(path))
                 } else {
+                    // A plain binding pattern, e.g. `x` (no path, no payload).
                     Ok(Pat::Ident(name))
                 }
             }
@@ -884,7 +1101,18 @@ impl Parser {
                 format!("expected pattern, found {}", self.peek_kind()),
                 Some(self.peek().span),
             )),
+        }?;
+        // Range pattern with a left operand: `a..b`, `a..=b`, `a..`.
+        if matches!(self.peek_kind(), TokenKind::DotDot) {
+            let inclusive = self.consume_range_op();
+            let rhs = if self.is_range_end(self.peek_kind()) {
+                None
+            } else {
+                Some(Box::new(self.parse_pat()?))
+            };
+            return Ok(Pat::Range(Some(Box::new(pat)), rhs, inclusive));
         }
+        Ok(pat)
     }
 
     // ---- expressions ----
@@ -918,6 +1146,47 @@ impl Parser {
                     span,
                 };
                 continue;
+            }
+            // Range operator `..` / `..=` (with the left operand already in
+            // `lhs`). `a..b` (exclusive, both sides) falls through to
+            // `binop_bp` (Binary(Range)) so the `for` loop path is unchanged;
+            // we only build the new `ExprKind::Range` node for `..=` (inclusive)
+            // and `a..` (trailing, right-elided).
+            if self.check(&TokenKind::DotDot) {
+                let next_is_eq = self
+                    .tokens
+                    .get(self.pos + 1)
+                    .map(|t| t.kind == TokenKind::Eq)
+                    .unwrap_or(false);
+                if next_is_eq {
+                    // Inclusive `a..=b`.
+                    let _ = self.consume_range_op();
+                    let rhs = if self.is_range_end(self.peek_kind()) {
+                        None
+                    } else {
+                        Some(Box::new(self.parse_expr_bp(3, false)?))
+                    };
+                    let span =
+                        Span::new(lhs.span.start, rhs.as_ref().map(|r| r.span.end).unwrap_or(lhs.span.end));
+                    lhs = Expr {
+                        kind: ExprKind::Range(Some(Box::new(lhs)), rhs, true),
+                        span,
+                    };
+                    continue;
+                }
+                // Exclusive trailing `a..`.
+                let after = self.tokens.get(self.pos + 1).map(|t| t.kind.clone());
+                if let Some(k) = after {
+                    if self.is_range_end(&k) {
+                        let _ = self.consume_range_op();
+                        let span = Span::new(lhs.span.start, lhs.span.end);
+                        lhs = Expr {
+                            kind: ExprKind::Range(Some(Box::new(lhs)), None, false),
+                            span,
+                        };
+                        continue;
+                    }
+                }
             }
             let Some((l_bp, r_bp, op)) = self.binop_bp() else {
                 break;
@@ -999,8 +1268,49 @@ impl Parser {
         Some((l, r, op))
     }
 
+    /// Whether `k` terminates a range expression (i.e. there is no right
+    /// operand): a closing/separator delimiter, the `=>`/`|` that end a match
+    /// arm, or end-of-input.
+    fn is_range_end(&self, k: &TokenKind) -> bool {
+        matches!(
+            k,
+            TokenKind::RParen
+                | TokenKind::RBracket
+                | TokenKind::RBrace
+                | TokenKind::LBrace
+                | TokenKind::Comma
+                | TokenKind::Semicolon
+                | TokenKind::Eof
+                | TokenKind::FatArrow
+                | TokenKind::Pipe
+                | TokenKind::PipePipe
+        )
+    }
+
+    /// Consume a `..` or `..=` range operator, returning `true` for the inclusive
+    /// `..=` form. Assumes the cursor is positioned at `..`.
+    fn consume_range_op(&mut self) -> bool {
+        self.eat(&TokenKind::DotDot);
+        self.eat(&TokenKind::Eq)
+    }
+
     fn parse_unary_or_atom(&mut self, allow_struct: bool) -> ParseResult<Expr> {
         let start = self.peek().span.start;
+        // A leading `..` / `..=` (open or right-open range) begins a range
+        // expression with no left operand.
+        if matches!(self.peek_kind(), TokenKind::DotDot) {
+            let inclusive = self.consume_range_op();
+            let rhs = if self.is_range_end(self.peek_kind()) {
+                None
+            } else {
+                Some(Box::new(self.parse_expr_bp(3, false)?))
+            };
+            let end = rhs.as_ref().map(|r| r.span.end).unwrap_or(start);
+            return Ok(Expr {
+                kind: ExprKind::Range(None, rhs, inclusive),
+                span: Span::new(start, end),
+            });
+        }
         let kind = match self.peek_kind() {
             TokenKind::Minus => {
                 self.bump();
@@ -1051,6 +1361,31 @@ impl Parser {
         })
     }
 
+    /// Parse a comma-separated list terminated by `close`, each element via
+    /// `parse_one`. A trailing comma immediately before `close` is tolerated
+    /// (matching Rust's grammar, e.g. `[1, 2,]` and `f(a, b,)`), so callers do
+    /// not need bespoke trailing-comma handling.
+    fn parse_delimited<T>(
+        &mut self,
+        close: TokenKind,
+        mut parse_one: impl FnMut(&mut Self) -> ParseResult<T>,
+    ) -> ParseResult<Vec<T>> {
+        let mut items = Vec::new();
+        if !self.check(&close) {
+            loop {
+                items.push(parse_one(self)?);
+                if !self.eat(&TokenKind::Comma) {
+                    break;
+                }
+                if self.check(&close) {
+                    break;
+                }
+            }
+        }
+        self.expect(close)?;
+        Ok(items)
+    }
+
     fn parse_atom(&mut self, allow_struct: bool) -> ParseResult<Expr> {
         let start = self.peek().span.start;
         let expr = match self.peek_kind().clone() {
@@ -1081,7 +1416,24 @@ impl Parser {
                 self.bump();
                 ExprKind::Lit(Lit::Bool(false))
             }
-            TokenKind::Ident(_) => {
+            TokenKind::Ident(_)
+            | TokenKind::I8
+            | TokenKind::I16
+            | TokenKind::I32
+            | TokenKind::I64
+            | TokenKind::I128
+            | TokenKind::Isize
+            | TokenKind::U8
+            | TokenKind::U16
+            | TokenKind::U32
+            | TokenKind::U64
+            | TokenKind::U128
+            | TokenKind::Usize
+            | TokenKind::Bool
+            | TokenKind::CharKw
+            | TokenKind::StrKw
+            | TokenKind::F32
+            | TokenKind::F64 => {
                 let path = self.parse_path(false)?;
                 // A trailing `{` is a struct literal only when this path is a
                 // primary expression; otherwise it is a following block.
@@ -1099,17 +1451,35 @@ impl Parser {
             TokenKind::LParen => {
                 self.bump();
                 if self.eat(&TokenKind::RParen) {
-                    // unit literal
+                    // unit literal `()`
                     ExprKind::Lit(Lit::Str(String::new()))
                 } else {
-                    let e = self.parse_expr()?;
+                    let first = self.parse_expr()?;
+                    if self.eat(&TokenKind::Comma) {
+                        // Tuple literal `(a, b, …)`. `parse_delimited` already
+                        // consumes the closing `)`; for the single-element
+                        // trailing-comma form `(a,)` we must consume it here.
+                        let mut elems = vec![first];
+                        if !self.check(&TokenKind::RParen) {
+                            elems.extend(self.parse_delimited(TokenKind::RParen, |s| s.parse_expr())?);
+                        } else {
+                            self.expect(TokenKind::RParen)?;
+                        }
+                        let end = self.peek().span.start;
+                        return self.parse_postfix(Expr {
+                            kind: ExprKind::Tuple(elems),
+                            span: Span::new(start, end),
+                        });
+                    }
+                    // Parenthesized single expression.
                     self.expect(TokenKind::RParen)?;
+                    let end = self.peek().span.start;
                     return self.parse_postfix(Expr {
                         kind: ExprKind::Block(Block {
                             stmts: vec![],
-                            tail: Some(Box::new(e)),
+                            tail: Some(Box::new(first)),
                         }),
-                        span: Span::new(start, self.peek().span.start),
+                        span: Span::new(start, end),
                     });
                 }
             }
@@ -1119,16 +1489,7 @@ impl Parser {
             }
             TokenKind::LBracket => {
                 self.bump();
-                let mut elems = Vec::new();
-                if !self.check(&TokenKind::RBracket) {
-                    loop {
-                        elems.push(self.parse_expr()?);
-                        if !self.eat(&TokenKind::Comma) {
-                            break;
-                        }
-                    }
-                }
-                self.expect(TokenKind::RBracket)?;
+                let elems = self.parse_delimited(TokenKind::RBracket, |s| s.parse_expr())?;
                 ExprKind::Array(elems)
             }
             TokenKind::If => return self.parse_if(),
@@ -1174,16 +1535,7 @@ impl Parser {
             match self.peek_kind() {
                 TokenKind::LParen => {
                     self.bump();
-                    let mut args = Vec::new();
-                    if !self.check(&TokenKind::RParen) {
-                        loop {
-                            args.push(self.parse_expr()?);
-                            if !self.eat(&TokenKind::Comma) {
-                                break;
-                            }
-                        }
-                    }
-                    self.expect(TokenKind::RParen)?;
+                    let args = self.parse_delimited(TokenKind::RParen, |s| s.parse_expr())?;
                     let end = self.peek().span.start;
                     expr = Expr {
                         kind: ExprKind::Call(Box::new(expr), args),
@@ -1200,21 +1552,31 @@ impl Parser {
                             Some(self.peek().span),
                         ));
                     }
-                    if self.check(&TokenKind::Ident(String::new()))
+                    if let TokenKind::Int { value, .. } = self.peek_kind().clone() {
+                        // Tuple field access `expr.0` — represented as a field with
+                        // a numeric name; resolution to the tuple element happens
+                        // during type-check/lowering. This keeps tuple-heavy code
+                        // (e.g. `a.0.cmp(b.0)`) parseable.
+                        let span = self.peek().span;
+                        self.bump();
+                        let end = self.peek().span.start;
+                        expr = Expr {
+                            kind: ExprKind::Field(Box::new(expr), Spanned::new(value.to_string(), span)),
+                            span: Span::new(start, end),
+                        };
+                    } else if self.check(&TokenKind::Ident(String::new()))
                         || matches!(self.peek_kind(), TokenKind::Ident(_))
                     {
                         let method = self.expect_ident()?;
+                        // Optional turbofish `::<T>` (e.g. `.collect::<Vec<_>>()`).
+                        // The Phase-1 subset ignores the inferred type arguments,
+                        // but the parser must accept them so method chains in real
+                        // Rust code parse.
+                        if self.eat(&TokenKind::ColonColon) && self.eat(&TokenKind::Lt) {
+                            self.parse_generic_args()?;
+                        }
                         if self.eat(&TokenKind::LParen) {
-                            let mut args = Vec::new();
-                            if !self.check(&TokenKind::RParen) {
-                                loop {
-                                    args.push(self.parse_expr()?);
-                                    if !self.eat(&TokenKind::Comma) {
-                                        break;
-                                    }
-                                }
-                            }
-                            self.expect(TokenKind::RParen)?;
+                            let args = self.parse_delimited(TokenKind::RParen, |s| s.parse_expr())?;
                             let end = self.peek().span.start;
                             expr = Expr {
                                 kind: ExprKind::MethodCall(Box::new(expr), method, args),
@@ -1264,18 +1626,23 @@ impl Parser {
                             ))
                         }
                     };
-                    let (delimiter, close) = if self.eat(&TokenKind::LParen) {
-                        (MacroDelim::Paren, TokenKind::RParen)
+                    let (open, close, delimiter) = if self.eat(&TokenKind::LParen) {
+                        (TokenKind::LParen, TokenKind::RParen, MacroDelim::Paren)
                     } else if self.eat(&TokenKind::LBracket) {
-                        (MacroDelim::Bracket, TokenKind::RBracket)
+                        (TokenKind::LBracket, TokenKind::RBracket, MacroDelim::Bracket)
                     } else if self.eat(&TokenKind::LBrace) {
-                        (MacroDelim::Brace, TokenKind::RBrace)
+                        (TokenKind::LBrace, TokenKind::RBrace, MacroDelim::Brace)
                     } else {
                         return Err(Diag::error(
                             "expected `(`, `[`, or `{` after macro name",
                             Some(self.peek().span),
                         ));
                     };
+                    // Track depth only on the macro's *own* delimiter pair. Other
+                    // delimiters (`(`, `{`) inside the token stream are captured
+                    // verbatim as macro content; mixing the two made a nested
+                    // `(` (e.g. `vec![f(g())]`) desynchronize depth and swallow
+                    // the rest of the file.
                     let mut depth = 1i32;
                     let mut tokens = Vec::new();
                     loop {
@@ -1289,7 +1656,7 @@ impl Parser {
                                 self.bump();
                                 depth -= 1;
                             }
-                            TokenKind::LParen | TokenKind::LBracket | TokenKind::LBrace => {
+                            k if *k == open => {
                                 self.bump();
                                 depth += 1;
                             }
@@ -1336,8 +1703,18 @@ impl Parser {
                 break;
             }
             let name = self.expect_ident()?;
-            self.expect(TokenKind::Colon)?;
-            let value = self.parse_expr()?;
+            // Field shorthand `Foo { x }` desugars to `Foo { x: x }`; an explicit
+            // `Foo { x: e }` is also accepted.
+            let value = if self.eat(&TokenKind::Colon) {
+                self.parse_expr()?
+            } else {
+                Expr {
+                    kind: ExprKind::Path(Path {
+                        segments: vec![name.clone()],
+                    }),
+                    span: name.span,
+                }
+            };
             fields.push((name, value));
             if !self.eat(&TokenKind::Comma) {
                 self.expect(TokenKind::RBrace)?;
@@ -1350,7 +1727,9 @@ impl Parser {
     fn parse_if(&mut self) -> ParseResult<Expr> {
         let start = self.peek().span.start;
         self.expect(TokenKind::If)?;
-        let cond = self.parse_expr_bp(1, true)?;
+        // The condition must not consume the then-block's `{` as a struct
+        // literal (`if c { .. }` is not `if (c { .. })`).
+        let cond = self.parse_expr_bp(1, false)?;
         let then_block = self.parse_block()?;
         let else_branch = if self.eat(&TokenKind::Else) {
             if self.check(&TokenKind::If) {
@@ -1380,7 +1759,7 @@ impl Parser {
     fn parse_while(&mut self) -> ParseResult<Expr> {
         let start = self.peek().span.start;
         self.expect(TokenKind::While)?;
-        let cond = self.parse_expr_bp(1, true)?;
+        let cond = self.parse_expr_bp(1, false)?;
         let block = self.parse_block()?;
         let end = self.peek().span.start;
         Ok(Expr {
@@ -1405,7 +1784,7 @@ impl Parser {
         self.expect(TokenKind::For)?;
         let pat = self.parse_pat()?;
         self.expect(TokenKind::In)?;
-        let iter = self.parse_expr_bp(1, true)?;
+        let iter = self.parse_expr_bp(1, false)?;
         let block = self.parse_block()?;
         let end = self.peek().span.start;
         Ok(Expr {
@@ -1424,7 +1803,17 @@ impl Parser {
         self.expect(TokenKind::LBrace)?;
         let mut arms = Vec::new();
         while !self.eat(&TokenKind::RBrace) {
-            let pat = self.parse_pat()?;
+            let mut pat = self.parse_pat()?;
+            while self.eat(&TokenKind::Pipe) {
+                let rhs = self.parse_pat()?;
+                pat = Pat::Or(Box::new(pat), Box::new(rhs));
+            }
+            // Match guard `Pattern if <cond> => body`. The Phase-1 subset does not
+            // model guards, so the condition is parsed and discarded; this keeps
+            // real-world code (and the compiler's own source) parseable.
+            if self.eat(&TokenKind::If) {
+                self.parse_expr()?;
+            }
             self.expect(TokenKind::FatArrow)?;
             let body = self.parse_expr()?;
             self.eat(&TokenKind::Comma);
@@ -1448,24 +1837,23 @@ impl Parser {
         })
     }
 
-    /// Parse a `let` expression (`if let`, `while let`, let-else) in expression
-    /// position. The Phase-1 subset does not model pattern guards, so this is a
-    /// structural parse that defers to `parse_local` + the surrounding
-    /// expression context where possible.
+    /// Parse a `let` in expression position, used by `if let` / `while let`
+    /// conditions. It parses only the `let pat = expr` binding (the surrounding
+    /// `if`/`while` is responsible for the following block), and represents the
+    /// binding as a single-statement `Block` so existing expression handling
+    /// applies without a new AST node.
     fn parse_let_expr(&mut self) -> ParseResult<Expr> {
         let start = self.peek().span.start;
-        let local = self.parse_local()?;
-        // A `let` expression standing alone is not supported by the Phase-1
-        // subset; surface it as a blockless expression that lower/infer will
-        // reject with a clear diagnostic.
-        let _ = local;
-        let e = self.parse_expr()?;
+        let local = self.parse_local(false)?;
+        let end = self.peek().span.start;
         Ok(Expr {
             kind: ExprKind::Block(Block {
-                stmts: Vec::new(),
-                tail: Some(Box::new(e)),
+                stmts: vec![Stmt {
+                    kind: StmtKind::Local(local),
+                }],
+                tail: None,
             }),
-            span: Span::new(start, self.peek().span.start),
+            span: Span::new(start, end),
         })
     }
 
@@ -1483,6 +1871,9 @@ impl Parser {
                 loop {
                     params.push(self.parse_closure_param()?);
                     if !self.eat(&TokenKind::Comma) {
+                        break;
+                    }
+                    if self.check(&TokenKind::Pipe) || self.check(&TokenKind::PipePipe) {
                         break;
                     }
                 }
@@ -1625,24 +2016,68 @@ impl Parser {
             }
             TokenKind::LParen => {
                 self.bump();
-                let mut tys = Vec::new();
-                if !self.check(&TokenKind::RParen) {
-                    loop {
-                        tys.push(self.parse_type()?);
-                        if !self.eat(&TokenKind::Comma) {
-                            break;
-                        }
-                    }
-                }
-                self.expect(TokenKind::RParen)?;
+                // `parse_delimited` consumes the closing `)` itself for non-empty
+                // tuples `(A, B)`; for the empty-tuple (`unit`) type there are no
+                // elements, so only the lone `)` needs swallowing (and must not be
+                // eaten again, or it would consume the enclosing paren).
+                let tys = if self.check(&TokenKind::RParen) {
+                    self.bump();
+                    Vec::new()
+                } else {
+                    self.parse_delimited(TokenKind::RParen, |s| s.parse_type())?
+                };
                 TypeKind::Tuple(tys)
             }
             TokenKind::Underscore => {
                 self.bump();
                 TypeKind::Infer
             }
+            TokenKind::Impl => {
+                // `impl Trait` in type position (parameter types, return-position
+                // impl Trait, `impl FnMut(..)`). The Phase-1 subset does not model
+                // existential/`impl Trait` types, so it is parsed as the trait path
+                // opaquely (generic/tuple arguments are consumed and ignored). This
+                // keeps the compiler's own source parseable.
+                self.bump();
+                let path = self.parse_path(true)?;
+                if self.eat(&TokenKind::LParen) {
+                    // `impl FnMut(&str)`-style parenthesized trait args: consume a
+                    // balanced paren list (parse-only; ignored).
+                    let mut depth = 1;
+                    while depth > 0 {
+                        match self.peek_kind() {
+                            TokenKind::LParen => {
+                                self.bump();
+                                depth += 1;
+                            }
+                            TokenKind::RParen => {
+                                self.bump();
+                                depth -= 1;
+                            }
+                            TokenKind::Eof => break,
+                            _ => {
+                                self.bump();
+                            }
+                        }
+                    }
+                }
+                TypeKind::Path(path, Vec::new())
+            }
             _ if self.is_primitive_type() || matches!(self.peek_kind(), TokenKind::Ident(_)) => {
                 let path = self.parse_path(false)?;
+                // `dyn Fn(..) -> ..` / `impl Fn(..)` / bare `Fn(..)` trait types:
+                // consume the parenthesized argument list, optional `-> Ret`, and
+                // any `+ Bound` trait-object bounds so the closure/trait-object
+                // types in the compiler's own source parse (represented opaquely
+                // as the leading path).
+                let last = path.segments.last().map(|s| s.node.clone());
+                let is_fn_like = matches!(last.as_deref(), Some("Fn") | Some("FnMut") | Some("FnOnce"));
+                let is_object = matches!(last.as_deref(), Some("dyn") | Some("impl"));
+                if (is_fn_like || is_object)
+                    && self.tokens.get(self.pos + 1).map(|t| &t.kind) == Some(&TokenKind::LParen)
+                {
+                    self.consume_fn_trait()?;
+                }
                 let args = if self.eat(&TokenKind::Lt) {
                     self.parse_generic_args()?
                 } else {
@@ -1662,6 +2097,51 @@ impl Parser {
             kind,
             span: Span::new(start, end),
         })
+    }
+
+    /// Consume a `Fn(Args) -> Ret (+ Bound)*` trait-type tail. Parse-only: the
+    /// argument list, return type, and trailing trait-object bounds are parsed
+    /// and discarded so closure/trait-object types in the compiler's own source
+    /// parse. The leading path (e.g. `Fn`, `dyn`) already carries the name.
+    fn consume_fn_trait(&mut self) -> ParseResult<()> {
+        self.bump(); // `Fn`/`FnMut`/`FnOnce`
+        self.expect(TokenKind::LParen)?;
+        self.parse_delimited(TokenKind::RParen, |s| s.parse_type())?;
+        if self.eat(&TokenKind::Arrow) {
+            self.parse_type()?;
+        }
+        while self.eat(&TokenKind::Plus) {
+            // A dropped lifetime bound (`+ 'static`) leaves a dangling `+` before
+            // the enclosing delimiter; stop instead of parsing it as a path.
+            if matches!(
+                self.peek_kind(),
+                TokenKind::Comma | TokenKind::LBrace | TokenKind::Gt | TokenKind::GtGt
+            ) {
+                break;
+            }
+            self.parse_path(true)?;
+        }
+        Ok(())
+    }
+
+    /// Parse a single trait bound in a `where` clause or generic parameter list.
+    /// Returns `None` for `Fn`-family trait types (which the Phase-1 subset
+    /// cannot model), so their arguments/bounds are consumed and dropped to keep
+    /// parsing alive.
+    fn parse_bound(&mut self) -> ParseResult<Option<TypeBound>> {
+        if let TokenKind::Ident(name) = self.peek_kind().clone() {
+            if (name == "Fn" || name == "FnMut" || name == "FnOnce")
+                && self
+                    .tokens
+                    .get(self.pos + 1)
+                    .map(|t| &t.kind)
+                    == Some(&TokenKind::LParen)
+            {
+                self.consume_fn_trait()?;
+                return Ok(None);
+            }
+        }
+        Ok(Some(TypeBound::Trait(self.parse_path(true)?)))
     }
 
     fn is_primitive_type(&self) -> bool {

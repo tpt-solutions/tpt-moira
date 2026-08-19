@@ -169,6 +169,8 @@ pub struct ImplDef {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypeAliasDef {
     pub name: Spanned<String>,
+    /// Optional generic parameters, e.g. `type Wrapper<T> = ...`.
+    pub generics: Generics,
     pub ty: Type,
 }
 
@@ -254,12 +256,21 @@ pub struct Local {
 pub enum Pat {
     Ident(Spanned<String>),
     Wild,
+    /// A literal pattern, e.g. `"--emit"`, `42`, `'c'`, or `true`.
+    Lit(Lit),
     Tuple(Vec<Pat>),
     /// A path/variant pattern, e.g. `Foo`, `Self::Bar`, or `ns::Baz`. Tuple and
     /// struct variant payloads are parsed but (per the Phase-1 approximation)
     /// represented here only by the path.
     Path(Path),
+    /// A reference pattern `&pat` (binds by reference).
+    Ref(Box<Pat>),
+    /// An or-pattern `pat | pat` (multiple patterns for one match arm).
+    Or(Box<Pat>, Box<Pat>),
     Struct(String, Vec<(String, Pat)>),
+    /// A range pattern: `a..b`, `a..=b`, `..b`, `a..`, or a `..` rest pattern.
+    /// Operands are `None` when elided; the `bool` is `true` for inclusive.
+    Range(Option<Box<Pat>>, Option<Box<Pat>>, bool),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -306,6 +317,14 @@ pub enum ExprKind {
     },
     /// A `expr as Type` cast.
     Cast(Box<Expr>, Type),
+    /// A tuple literal value `(a, b, c)`. A single-element tuple `(a,)` and the
+    /// empty unit value `()` are represented separately (the latter as a unit
+    /// literal, see [`ExprKind::Lit`]).
+    Tuple(Vec<Expr>),
+    /// A range expression: `a..b`, `a..=b`, `a..`, `..b`, `..`. The operands are
+    /// `None` when the corresponding side is elided; the `bool` is `true` for an
+    /// inclusive (`..=`) range.
+    Range(Option<Box<Expr>>, Option<Box<Expr>>, bool),
     /// A macro invocation `path!(tokens)` / `path![tokens]` / `path!{tokens}`.
     Macro(MacroCall),
     /// The `?` operator: `expr?`.

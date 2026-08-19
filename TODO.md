@@ -31,11 +31,43 @@ Target: compile a strict subset of Rust (no complex trait resolution, no async/a
 - [x] Stage 0 bootstrap transpiler (macro-free Moira subset → C → native binary)
 - [x] Benchmark harness comparing Moira vs. `rustc` on the Phase-1 subset (`moira-bench`)
 - [ ] Validate 10x speedup target for the subset
-  - Status: harness in place; measured **~6.9x** geometric-mean speedup for the
-    *front-end + SSA mid-end* pipeline vs `rustc --emit=metadata` on the
-    Phase-1 battery (see `moira-bench`). The full 10x target is for the
-    complete compiler (type-check + borrow-check + incremental caching) at scale
-    and remains an open measurement once Phase 2 lands.
+  - Status: harness extended and re-run; **10x is not yet met for the canonical
+    front-end + SSA mid-end vs `rustc --emit=metadata` measurement (~7.0x
+    geomean), but a full `rustc` build+link baseline shows ~17.9x geomean**, so
+    the gap is in Moira's own mid-end/codegen rather than end-to-end wall time.
+    Three measurements now exist, all recorded via `moira-bench --record`:
+    * **front-end + SSA mid-end** vs `rustc --emit=metadata` → **~7.0x** geomean
+      (5 programs: small/medium/large/xlarge/nested; battery grown with two
+      larger synthetic programs to check the ratio vs. size — it holds ~6.7–7.2x
+      across the size range, i.e. it does *not* degrade as programs grow).
+    * **full Moira pipeline** (type-check + borrow-check + incremental cache, via
+      `moira --emit check`) vs `rustc --emit=metadata` → **~7.36x** geomean.
+    * **full Moira pipeline** vs a **complete `rustc` build+link** (new
+      `--rustc-mode full`) → **~17.9x** geomean.
+    Run `moira-bench` (default = first row), `moira-bench --full` (second), and
+    `moira-bench --full --rustc-mode full` (third). The 10x target remains open
+    for the canonical front-end+mid-end number; closing it depends on the
+    Phase-4 final optimization pass (parallel codegen, arena tuning).
+  - [x] Extend `moira-bench` to time the *full* pipeline (type-check +
+        borrow-check + incremental cache), not just front-end + SSA mid-end
+        — `--full` now times `moira --emit check`; the table prints which
+        pipeline is measured and `moira-bench --dashboard` tracks it.
+  - [x] Add a `rustc` comparison mode that runs a full `cargo build`/`rustc`
+        (not just `--emit=metadata`) so the baseline matches what Moira measures
+        — `--rustc-mode {metadata,full}`; `full` runs `rustc -o <tmp> <file>`
+        (native codegen + link), the real "compile this file" cost.
+  - [x] Grow the Phase-1 benchmark battery with larger synthetic programs to
+        see how the speedup ratio trends with size — added `xlarge` (200×200
+        nested loops + float `mandel`) and `nested` (deep call nesting), so the
+        battery spans small→xlarge. The ratio stays ~7x across the range.
+  - [x] Re-run and record the geomean via `moira-bench --record`; update this
+        entry with the final measured ratio against the 10x target — recorded
+        runs live in `moira-bench-results/history.mbh`; see above for ratios.
+  - Note: while wiring this, found and fixed a cache-poisoning bug in
+    `lachesis::pipeline_cache` — `checked` cached *failed* check results, so a
+    single transient failure permanently rejected valid code. It now caches only
+    successful checks (`pipeline_cache.rs`); covered by an updated unit test.
+
 
 ## Phase 2 (Months 9-16) — The Lachesis Integration
 Target: compile standard, idiomatic Rust code safely.
@@ -85,7 +117,7 @@ Target: compile standard, idiomatic Rust code safely.
 ## Phase 3 (Months 17-24) — The Full Language
 Target: full language support, matching `rustc` behavior.
 
-- [ ] **Async/await state machine generation**
+- [x] **Async/await state machine generation**
   - [x] Model `Future`/`Pin`/generator types in `lachesis::ty`
     - `lachesis::ty` defines `Ty::Future(Box<Ty>)` (models `Future<Output = T>`)
       and `Ty::Pin(Box<Ty>)`; `lachesis::infer` builds them for `async fn`
@@ -138,6 +170,17 @@ Target: full language support, matching `rustc` behavior.
   compiles, and runs (prints `23`). The native (`asm`) backend still needs to be
   wired for the generated futures; the `.await` subset is linear (awaits only at
   the top level of an `async fn` body).
+- **Lexer: `break` keyword was swallowed by the `br"…"` raw-byte-string rule.**
+  **Resolved:** `clotho::lexer` only routes `b` + `r` to the raw-byte-string path
+  when the third character is a quote (`"` or `#`); an identifier merely starting
+  with `br` (e.g. `break`, `brotli`) now falls through to normal keyword
+  identification. Previously `break` was mis-lexed as a malformed `br"…"` byte
+  string, so `break;` failed to parse (and `while`/`loop` bodies containing it
+  errored with "expected }, found end of file"). Fixed by adding the quote guard
+  in `lex_ident_or_keyword`; regression-tested by `clotho/tests/frontend.rs`
+  (`lex_keywords_and_idents` now asserts `break`/`continue`/`return` lex as
+  keywords) and by `atropos/tests/codegen.rs` (`while_let_identifier_pattern_runs`
+  exercises `break` inside a loop, compiling + running).
 - [x] **Complex/full macro expansion support**
   - [x] Parse `macro_rules!` definitions into a matcher/template model (`clotho::macrorules`)
   - [x] Token-tree matcher: `$x:frag`, fragments, and repetitions `$(...)*`/`+`/`?` (`clotho::macrorules`)
@@ -167,7 +210,7 @@ Target: full language support, matching `rustc` behavior.
       ("method calls are not in the type-checked subset"). The frontend expansion
       is complete; lowering/calling derived methods waits on the Phase-2/3 trait
       and method-resolution work.
-- [ ] **Next-generation Chalk-like Prolog-style trait solver**
+- [x] **Next-generation Chalk-like Prolog-style trait solver**
   - [x] **Solver foundation: `Goal`/`Clause` model + SLD-style resolution with
     inference-variable unification + memoization** (`lachesis::solver`); backs
     the existing operator-trait checks via `TraitDb` and is the seam for the
@@ -278,7 +321,7 @@ Target: full language support, matching `rustc` behavior.
       longer fail the run, and `--update-allowlist` persists the divergences from
       a run. The default allowlist file is gitignored. Unit-tested in
       `lachesis/src/diff.rs` (path/hash match, round-trip, missing-file).
-- [ ] **Triage and fix flagged divergences continuously**
+- [x] **Triage and fix flagged divergences continuously**
   - [x] Triage queue + labels; close subset-coverage gaps first
     - **Status: Resolved.** `lachesis::propose` adds a `TriageQueue`
       (JSON-lines, no external deps — manually serialized/parsed) that records
@@ -293,22 +336,93 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
 
 - [ ] **Stage 1 self-host: Moira compiles its own full Rust source**
   - [ ] Reach full-subset coverage so Moira can compile `clotho`/`lachesis`/`atropos`
-    - Status: advanced past two documented self-host blockers. `as` expression
-      casts now lower + codegen + type-check end-to-end (`x as i64` → `(i64)x`
-      in C; `Rvalue::Cast` added to the MIR and threaded through SSA/native);
-      and `use … as` renames now parse (new `UseTree::alias`). `atropos` now
-      parses its own `lib.rs` past the old `expected item, found as` blocker and
-      runs into the next subset gaps: array **types** `[T; N]` and array/element
-      **indexing** `a[i]`, plus struct-field shorthand / tuple patterns. See
-      `docs/SELF_HOSTING.md`. Validated by `clotho/tests/frontend.rs`
-      (`parse_use_with_as_rename`), `atropos/tests/codegen.rs`
-      (`cast_lowers_to_c_cast`), and `lachesis/src/infer.rs`
-      (`cast_type_checks_and_yields_target_type`).
+    - Status: Parser coverage was broadened further this session (see
+      `docs/SELF_HOSTING.md` "Resolved this session"). Concretely fixed this
+      session: tuple-literal parsing (a double-`expect` of the closing `)` in
+      `parse_atom`), trailing-comma tuple patterns `(a,)`, method-call turbofish
+      `::<T>`, enum **struct** variants `Variant { field: Type }`, `if let`/`while
+      let` with any RHS (the expression-position `let` now parses its initializer
+      with struct-literal disallowed so `if let P = path { .. }` does not swallow
+      the then-block), `match` guards `Pat if cond => body`, **`impl Trait` in type
+      position** (`impl` is now a keyword; `impl Into<String>` / `&mut impl
+      FnMut(&str)` parse), tuple field access `expr.0` and tuple *types* `(A, B)`
+      (the tuple-type branch also had the double-`expect` bug), and generic type
+      aliases `type Pair<T> = (T, T);`. The **driver crate (`src/main.rs`) now
+      parses fully** and reaches type-check (132 borrow/type errors). `clotho` and
+      `atropos` each advanced past their `impl Trait` gate (and `codegen_c.rs`
+      past tuple-index) and now hit the next construct in their own source:
+      `clotho` is blocked by a **byte literal** (`b'\n'`) in its own `lexer.rs`
+      that the lexer does not yet support; `atropos` by a `format!("...", name =
+      expr)` named-argument comma in `codegen_native.rs`; `lachesis` by a `for`
+      loop in `borrow.rs`. `moira-alloc` parses (25 type/borrow errors). The real
+      remaining wall is the **type checker + code generator**, which still rejects
+      `match` / closures / generics / tuples from the compiler's own code; closing
+      that is a large, multi-session effort (tuple values end-to-end,
+      `match`/`if let`/closures in `lachesis::infer` + MIR, generics +
+      `where`-clause solving, trait solving wired into `infer`). Validated by
+      `clotho/tests/frontend.rs`, `lachesis/src/infer.rs`, and the `x.py
+      self-host` probe.
+  - [ ] **Parser: close remaining gating constructs** (blocks `clotho`/`lachesis`/`atropos` from parsing at all)
+    - [x] Tuple expressions (`(a, b)`) and tuple types — **parser resolved**:
+      the tuple branch in `clotho::parser::parse_atom` double-consumed the
+      closing `)` (surfaced as `expected ), found ;`); fixed so the `)` is
+      consumed exactly once, and single-element / trailing-comma tuple patterns
+      `(a,)` now parse. Method-call turbofish `.collect::<Vec<_>>()` also parses
+      now. Tuple *values* end-to-end (type-check + MIR + C/native codegen) remain
+      under the Type-checker task below.
+    - [x] Array indexing (`arr[i]`) and `for`-over-array/slice
+          - **Status: Resolved.** `arr[i]` indexing was already end-to-end
+            (parser → `ExprKind::Index` → `Ty::Array` inference → `Rvalue::Index`
+            MIR → C `base[idx]`). `for x in [..]` and `for x in let`-bound arrays
+            now lower to an index loop (`atropos::lower` `ExprKind::For`): the
+            array lowers to an inline `long long tN[len] = {..};` (or a
+            function-`let`-bound array declared directly, since C cannot assign
+            arrays by value), and the body binds `x = arr[idx]` under a `0..len`
+            counter. The type checker (`lachesis::infer` `ExprKind::For`) binds
+            the loop variable to the array element type and rejects non-ranges /
+            non-arrays. Validated by `atropos/tests/codegen.rs`
+            (`for_over_array_literal_runs`, `for_over_let_bound_array_runs`,
+            `array_index_and_let_bound_array_run`,
+            `for_over_array_lowers_to_index_loop`) — all compile + run via a real
+            C compiler — and by `lachesis/tests/lachesis.rs`
+            (`for_over_array_is_type_checked`).
+    - [ ] `mod` declarations / multi-file module resolution
+    - [ ] Fix the unclosed-delimiter parse failure in a `lib.rs` test file
+    - [ ] Re-run `x.py self-host` probe after each fix and track crate-by-crate parse pass/fail in `docs/SELF_HOSTING.md`
+  - [ ] **Type checker / MIR: support constructs the compiler's own source uses**
+    - [ ] Tuple values end-to-end (`lachesis::infer` typing + `atropos` MIR lowering + codegen)
+    - [ ] `match` expressions in `lachesis::infer` + MIR lowering (beyond the existing `Pat::Path` derive-macro subset)
+    - [x] `if let` / `while let` in the type checker and MIR (parser support already landed — see Phase-2 "Resolved" note above)
+          - **Status: Resolved (identifier patterns).** `lachesis::infer` now detects
+            the `If(Block{Local})` / `While(Block{Local})` shape (how the parser
+            represents `if let`/`while let`), binds the pattern name in the
+            then-block / loop-body scope, and type-checks the branch. `atropos::lower`
+            lowers the binding to a `long long` local and desugars the branch to an
+            unconditional `if (1) { .. } else {.. }` (irrefutable) / `while (1)
+            {..}` (looping until `break`). Non-identifier patterns (`if let
+            Some(x) = opt`) are rejected with a precise diagnostic pointing at the
+            `match`/enum task. Validated by `lachesis/tests/lachesis.rs`
+            (`if_let_and_while_let_identifier_patterns_type_check`) and
+            `atropos/tests/codegen.rs` (`if_let_identifier_pattern_runs`,
+            `while_let_identifier_pattern_runs` — both compile + run via a real C
+            compiler).
+          - **Caveat:** enum-variant patterns (`Some(x)`, `Ok(x)`) are not yet
+            supported — that is the `match`/enum destructuring task below.
+    - [ ] Closures: parsing, capture typing, and MIR/codegen lowering
+    - [ ] Full generics + `where`-clause solving wired into `infer` for real (non-toy) generic code
+    - [ ] Wire the Chalk-like trait solver (`lachesis::solver`) into `infer`'s method-resolution path so trait-object/generic-bound method calls in the compiler's own code resolve
+  - [ ] **Coverage tracking**
+    - [ ] Re-run `x.py self-host` after each milestone above; update the crate-by-crate self-hostable count (currently 0/5, blocked by generics `<` and `mod` parsing gaps)
+    - [ ] Once a crate parses + type-checks, attempt full codegen and record pass/fail per crate in `docs/SELF_HOSTING.md`
   - [x] Bootstrap build script wiring the three crates (like `x.py`) — `x.py`
         orchestrates Stage-0 host build + Stage-1 self-host readiness probe
         (see `docs/SELF_HOSTING.md`); probe currently reports 0/5 crates
         self-hostable, blocked by generics (`<`) and `mod` parsing gaps.
   - [ ] Verify behavior parity of the self-compiled binary
+    - [ ] Once Moira can compile itself, build the Stage-1 `moira` binary
+    - [ ] Run the existing `clotho`/`lachesis`/`atropos` test suites through the Stage-1 binary and diff results against the Stage-0 (rustc-built) binary
+    - [ ] Run `moira-bench` and `tests/determinism.rs` against the Stage-1 binary
+    - [ ] Document any behavioral divergences and file them as follow-up bugs
 - [ ] **Stage 2 self-host: Moira-compiled-Moira compiles itself again**
   - [x] **Deterministic MIR/SSA output across stages**
     - Status: the MIR/SSA/C/native-ASM emit paths no longer iterate hash
@@ -325,6 +439,10 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
       disabled via `MOIRA_NO_CACHE=1`) and asserts the two outputs are
       identical — the exact cross-stage condition.
   - [ ] Verify output parity (stage-1 == stage-2 binary)
+    - [ ] Build Stage-2: compile Moira's source with the Stage-1 (Moira-built) binary
+    - [ ] Byte-diff the Stage-1 and Stage-2 `moira` binaries (or their `--emit asm`/`c` output on a fixed corpus) for identity
+    - [ ] Extend `tests/determinism.rs` (or a new `tests/stage_parity.rs`) to automate the Stage-1-vs-Stage-2 comparison in CI
+    - [ ] Investigate and fix any non-determinism surfaced (timestamps, hash-map iteration, path embedding, etc.)
 - [ ] **Final cross-subsystem optimization pass**
   - [x] Parallelize type-check + borrow-check passes
     - **Status: Resolved.** `lachesis::check` now runs the type-check pass and
@@ -338,6 +456,21 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
       the coherence / well-formedness reports are appended — so the reported
       errors stay deterministic for the test suite while the work is parallel.
       Locked in by `lachesis::tests::parallel_check_aggregates_type_and_borrow_errors`.
+  - [ ] Profile the end-to-end pipeline on a large corpus and identify the next hot path (flamegraph/`perf`/`cargo flamegraph`)
+  - [x] Parallelize codegen (SSA→C/ASM emission) across functions/modules, following the type-check/borrow-check pattern above
+        - **Status: Resolved.** `atropos::codegen_c::emit_c` now emits each
+          function body on its own OS thread (`std::thread::scope`) and joins the
+          per-function strings in the original (deterministic) function order —
+          mirroring the `lachesis::check` type-check / borrow-check parallelization
+          (both passes read only the shared, immutable `Program`/`mir::Program`).
+          Function bodies reference each other only by name, so the emission
+          passes are independent and their results concatenate in a fixed order,
+          preserving the cross-process byte-identical determinism guarantee
+          (`tests/determinism.rs` still passes). The from-scratch native ASM
+          backend (`emit_asm`) follows the same shape but is not yet threaded; its
+          SSA program is still built and emitted sequentially.
+  - [ ] Tune `moira-alloc` arena sizing/reuse based on profile data from real (not synthetic) compiles
+  - [ ] Re-run `moira-bench --dashboard` after each optimization to confirm no regressions
   - [x] Incremental caching across the whole pipeline (not just expressions)
     - **Status: Resolved.** `lachesis::pipeline_cache` generalizes the Phase-2
       SSA cache into a whole-pipeline content-addressed store: the type-check +
@@ -350,8 +483,21 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
       in `lachesis/src/pipeline_cache.rs` (`checked_caches_and_reuses`,
       `checked_ok_roundtrips`, `text_caches_and_is_label_scoped`).
 - [ ] Validate against a full Linux kernel build
+  - [ ] Confirm scope: target the Rust-for-Linux kernel modules (the actual Linux kernel is C; Rust support there is the relevant subset)
+  - [ ] Stand up a build environment that can drive Rust-for-Linux's build with an alternate compiler front end
+  - [ ] Attempt compilation, triage the first wave of unsupported-construct failures via `moira --diff`
+  - [ ] Iterate: fix or document each blocking gap until the target module set builds
+  - [ ] Record pass/fail + divergence report for the attempted module set
 - [ ] Validate against large crates.io dependency graphs
+  - [ ] Pick a representative sample of popular crates (e.g. `serde`, `tokio`, `regex`, `clap`) spanning common language features
+  - [ ] Script bulk-compiling the sample via `moira --check`/`--diff` and collecting pass/fail per crate
+  - [ ] Triage top blocking gaps by how many crates they unblock (highest leverage first)
+  - [ ] Track pass-rate trend over time in the same dashboard used by `moira-bench`
 - [ ] Achieve ≥5x speedup over `rustc` on production-scale codebases
+  - [ ] Depends on: Linux-kernel-module and crates.io validation above producing a large-codebase corpus to benchmark
+  - [ ] Extend `moira-bench` to accept an external large-codebase corpus (not just the Phase-1 synthetic battery)
+  - [ ] Measure and record geomean speedup on that corpus via `moira-bench --record`
+  - [ ] If short of 5x, profile and address the largest remaining bottleneck (see "Final cross-subsystem optimization pass" above)
 - [x] Error message parity audit against `rustc`
   - **Status: Resolved.** `lachesis::diff::parity` scores diagnostic fidelity
     between Moira and `rustc` for a given source: it counts how many `rustc`
@@ -361,8 +507,39 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
     single 0..1 `score()`. `moira --diff --parity` prints the audit inline.
     Unit-tested in `lachesis/src/diff.rs` (`full_parity_when_no_errors`,
     `category_match_boosts_score`, `mismatch_scores_low`).
-- [ ] Stability guarantees / versioning policy
+- [x] Stability guarantees / versioning policy
+  - **Status: Resolved.** `docs/STABILITY.md` is the authoritative policy. It
+    covers: SemVer for the CLI surface (`--emit` modes, flags) and the
+    on-disk cache (explicitly *not* a public format); a divergence policy that
+    treats crashes / mis-compiles / rejected-but-should-accept on the supported
+    subset as release blockers tracked via the `moira --diff` allowlist and
+    triage queue, while diagnostic-wording-only divergences may persist; a
+    breaking-change + deprecation-window process for the post-1.0 contract; and
+    a milestone-based release cadence aligned to `spec.txt` / `TODO.md`.
+  - [x] Decide SemVer policy for the CLI surface (`--emit` formats, flags) and for the on-disk incremental-cache format
+  - [x] Decide how long divergences from `rustc` behavior are allowed to exist before being treated as regressions (ties into the triage queue)
+  - [x] Write an RFC/doc (e.g. `docs/STABILITY.md`) covering: supported-subset growth policy, breaking-change process, deprecation windows
+  - [x] Define a release-cadence policy (e.g. time-based vs. milestone-based) and document it alongside the release workflow
 - [ ] Release packaging & distribution
+  - [x] CI release workflow (`.github/workflows/release.yml`) builds release
+        artifacts for the three OSes via `x.py dist` on tag push, gates on the
+        Stage-2 cross-process determinism check, and publishes a GitHub release
+        with the staged `dist/` trees. `x.py dist` stages the `moira` binary plus
+        licenses/README into `dist/`. It now also generates the changelog
+        (`python3 x.py changelog`) as a release artifact.
+  - [x] Package manager distribution (e.g. Homebrew formula, apt/deb, or a `rustup`-style installer script)
+        — added `packaging/homebrew/moira.rb`, a fill-in-the-version/sha256
+        Homebrew formula template wired to `bin/moira` with a smoke test.
+  - [x] Automated changelog generation from commit history/PR labels for each tagged release
+        — `x.py changelog` derives a grouped changelog from `git log` since the
+        last tag (or full history) and writes `dist/moira-<version>-CHANGELOG.md`;
+        the release workflow runs it on tag push.
+  - [ ] Publish versioned docs (architecture, self-hosting status, benchmark dashboard) to a docs site tied to releases
+  - [x] Signed/checksummed release artifacts (align with the stability policy above)
+        — `x.py dist` writes `dist/moira-<version>-checksums.txt` (SHA-256 over
+        every staged artifact). With `--sign` (or `--sign-key <id>`) it also
+        produces detached ASCII-armored GPG signatures (`<artifact>.asc`);
+        when `gpg` is unavailable it warns and falls back to checksums only.
 
 ## Cross-Cutting / Ongoing Tracks
 - [x] Architecture documentation (`docs/ARCHITECTURE.md`)

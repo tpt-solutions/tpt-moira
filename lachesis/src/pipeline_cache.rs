@@ -59,15 +59,13 @@ impl PipelineCache {
             return Err(diags);
         }
         let result = f();
-        let payload = match &result {
-            Ok(()) => CHECK_OK.to_string(),
-            Err(diags) => diags
-                .iter()
-                .map(|d| d.message.clone())
-                .collect::<Vec<_>>()
-                .join("\n"),
-        };
-        let _ = self.inner.insert(key, payload.as_bytes());
+        // Only cache a *successful* check. A rejected program must be
+        // re-validated on every run: its diagnostics may depend on transient
+        // state (partial files, available memory) and a cached failure would
+        // otherwise poison the cache and reject valid code permanently.
+        if result.is_ok() {
+            let _ = self.inner.insert(key, CHECK_OK.as_bytes());
+        }
         result
     }
 
@@ -179,12 +177,18 @@ mod tests {
             calls.set(calls.get() + 1);
             Err(vec![Diag::error("boom".to_string(), None)])
         };
-        let _ = cache.checked(src, run);
+        // A failed check is NOT cached: the closure runs on every miss, and the
+        // second call re-runs it (rather than replaying a stale rejection).
+        let _ = cache.checked(src, &run);
         assert_eq!(calls.get(), 1);
-        // Cache hit: the closure must not run again.
-        let res: Result<(), Vec<Diag>> = cache.checked(src, || unreachable!());
-        assert_eq!(calls.get(), 1);
+        let res: Result<(), Vec<Diag>> = cache.checked(src, &run);
+        assert_eq!(calls.get(), 2);
         assert!(res.is_err());
+        // A successful check IS cached: the closure runs once.
+        let ok: Result<(), Vec<Diag>> = cache.checked(src, || Ok(()));
+        assert!(ok.is_ok());
+        let replay: Result<(), Vec<Diag>> = cache.checked(src, || unreachable!());
+        assert!(replay.is_ok());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -49,6 +49,39 @@ fn well_typed_programs_pass() {
 }
 
 #[test]
+fn if_let_and_while_let_identifier_patterns_type_check() {
+    // `if let x = expr` binds `x` to the scrutinee's type inside the then-block.
+    assert!(type_ok(
+        "fn main() { let v = 5; if let x = v { let _ = x; } }"
+    ));
+    // `while let x = expr` binds `x` in the loop body.
+    assert!(type_ok(
+        "fn main() { let v = 5; while let x = v { let _ = x; break; } }"
+    ));
+    // A non-identifier pattern (`Some(x)`) is not yet supported and is rejected
+    // with a precise diagnostic.
+    assert!(type_err(
+        "fn main() { let o = Some(5); if let Some(x) = o { let _ = x; } }"
+    ));
+}
+
+#[test]
+fn for_over_array_is_type_checked() {
+    // `for x in [..]` binds `x` to the array element type.
+    assert!(type_ok(
+        "fn main() { let mut t = 0; for x in [1, 2, 3] { t = t + x; } let _ = t; }"
+    ));
+    // A `let`-bound array is also iterable.
+    assert!(type_ok(
+        "fn main() { let arr = [4, 5, 6]; let mut t = 0; for x in arr { t = t + x; } let _ = t; }"
+    ));
+    // Iterating something that is neither a range nor an array is rejected.
+    assert!(type_err(
+        "fn main() { let x = 1; for y in x { let _ = y; } }"
+    ));
+}
+
+#[test]
 fn type_mismatch_is_rejected() {
     assert!(type_err("fn main() { let x: i32 = true; }"));
     assert!(type_err("fn main() { let x: bool = 1; }"));

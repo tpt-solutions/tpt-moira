@@ -8,5 +8,8 @@ authors.workspace = true
 repository.workspace = true
 description = "Benchmark harness comparing Moira vs rustc compile times on the Phase-1 subset"
 publish = false
+readme = "README.md"
+keywords = ["benchmark", "compiler", "rustc", "performance", "rust"]
+categories = ["development-tools", "command-line-utilities"]
 
 [dependencies]

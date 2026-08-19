@@ -7,6 +7,9 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 description = "Lachesis: Moira's type inference, trait resolution, and borrow checker"
+readme = "README.md"
+keywords = ["compiler", "type-inference", "borrow-checker", "type-system", "rust"]
+categories = ["compilers", "development-tools"]
 
 [dependencies]
 clotho = { path = "../clotho" }

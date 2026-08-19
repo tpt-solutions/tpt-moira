@@ -15,15 +15,19 @@ fn collect(src: &str) -> Vec<TokenKind> {
 
 #[test]
 fn lex_keywords_and_idents() {
-    let kinds = collect("fn let if x_1 while");
+    // `break` must lex as the `Break` keyword, not be swallowed by the `br"…"`
+    // raw-byte-string rule (which collides on the leading `br`).
+    let kinds = collect("fn let if break while continue return");
     assert_eq!(
         kinds,
         vec![
             TokenKind::Fn,
             TokenKind::Let,
             TokenKind::If,
-            TokenKind::Ident("x_1".to_string()),
+            TokenKind::Break,
             TokenKind::While,
+            TokenKind::Continue,
+            TokenKind::Return,
         ]
     );
 }
@@ -194,4 +198,105 @@ fn parse_use_without_as_has_no_alias() {
         ItemKind::Use(tree) => assert!(tree.alias.is_none()),
         other => panic!("expected a use item, got {other:?}"),
     }
+}
+
+#[test]
+fn parse_tuple_literal_value() {
+    // Regression: a tuple literal `(a, b, c)` as an expression previously
+    // double-consumed the closing `)` (parse_delimited already ate it) and
+    // reported "expected ), found ;".
+    let src = "fn f() { let x = (1, 2); let y = (1, 2, 3); let _ = x; let _ = y; }";
+    let prog = parse_source(src).unwrap();
+    assert_eq!(prog.items.len(), 1);
+}
+
+#[test]
+fn parse_trailing_comma_tuple_pattern() {
+    // Regression: `(a,)` single-element tuple patterns (and trailing commas in
+    // general) must parse without "expected pattern, found )".
+    let src = "fn f() { let (a,) = (1,); let _ = a; }";
+    let prog = parse_source(src).unwrap();
+    assert_eq!(prog.items.len(), 1);
+}
+
+#[test]
+fn parse_method_call_turbofish() {
+    // Regression: a turbofish `::<T>` on a method call (e.g.
+    // `.collect::<Vec<_>>()`) must parse. The Phase-1 subset ignores the type
+    // arguments, but real Rust code uses them.
+    let src = "fn f() { let _ = (0..3).collect::<Vec<i32>>(); }";
+    let prog = parse_source(src).unwrap();
+    assert_eq!(prog.items.len(), 1);
+}
+
+#[test]
+fn parse_enum_struct_variants() {
+    // Regression: enum struct variants `Variant { field: Type, .. }` must parse
+    // (the compiler's own `ast.rs` defines several, e.g. `ExprKind::Closure {
+    // params, ret, body }`). Unit, tuple, and struct variants all parse, with or
+    // without a trailing comma.
+    let src = r#"
+        enum E {
+            Unit,
+            Tuple(i32, String),
+            Struct { a: i32, b: String },
+            Trailing { x: i32, },
+        }
+    "#;
+    let prog = parse_source(src).unwrap();
+    assert_eq!(prog.items.len(), 1);
+    match &prog.items[0].kind {
+        ItemKind::Enum(e) => assert_eq!(e.variants.len(), 4),
+        other => panic!("expected enum, got {other:?}"),
+    }
+}
+
+#[test]
+fn parse_if_let_and_while_let() {
+    // Regression: `if let`/`while let` must parse even when the scrutinee RHS is a
+    // bare path or reference (not just a call). Previously the RHS was parsed with
+    // struct-literal allowed, so `if let P = queue { .. }` swallowed the then-block
+    // as a struct literal `queue { .. }`.
+    let src = "fn f() { if let Some(x) = iter { let _ = x; } while let Some(y) = &mut iter { let _ = y; } }";
+    let prog = parse_source(src).unwrap();
+    assert_eq!(prog.items.len(), 1);
+}
+
+#[test]
+fn parse_match_guards() {
+    // Regression: match arms with guards `Pat if cond => body` must parse. The
+    // Phase-1 subset models the guard only nominally (it is parsed and ignored),
+    // but the construct must not break the surrounding `match`.
+    let src = "fn f(x: i32) -> i32 { match x { 0 => 1, n if n > 0 => n, _ => 0 } }";
+    let prog = parse_source(src).unwrap();
+    assert_eq!(prog.items.len(), 1);
+}
+
+#[test]
+fn parse_impl_trait_in_type_position() {
+    // Regression: `impl Trait` parameter/return types must parse. This is the
+    // gating construct for `clotho`/`atropos` self-host; the subset models it as
+    // the trait path opaquely. Both angle-bracket and parenthesized trait args
+    // (`impl FnMut(&str)`) are accepted.
+    let src = "fn error(message: impl Into<String>) {} fn g(v: &mut impl FnMut(&str)) {}";
+    let prog = parse_source(src).unwrap();
+    assert_eq!(prog.items.len(), 2);
+}
+
+#[test]
+fn parse_tuple_types_and_index() {
+    // Regression: tuple *types* `(A, B)` previously double-consumed the closing
+    // `)`, and tuple field access `expr.0` was rejected. Both now parse.
+    let src = "fn f(t: (i32, i32)) { let _ = t.0; let _ = t.1.cmp(t.0); }";
+    let prog = parse_source(src).unwrap();
+    assert_eq!(prog.items.len(), 1);
+}
+
+#[test]
+fn parse_generic_type_alias() {
+    // Regression: generic type aliases `type Pair<T> = (T, T);` must parse. The
+    // `TypeAliasDef` now carries optional `generics`.
+    let src = "type Pair<T> = (T, T); fn f() { let _: Pair<i32> = (1, 2); }";
+    let prog = parse_source(src).unwrap();
+    assert_eq!(prog.items.len(), 2);
 }

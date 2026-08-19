@@ -26,7 +26,9 @@ Subcommands
   check       cargo check of the workspace.
   test        cargo test of the workspace.
   self-host   run the Stage-1 self-host readiness probe (builds stage0 first).
-  dist        build release binaries and stage a distributable tree.
+  dist        build release binaries, write checksums, and (with --sign)
+              produce detached GPG signatures; stage a distributable tree.
+  changelog   generate a changelog from git history since the last tag.
   determinism run the Stage-2 cross-process MIR/SSA/C/ASM parity check.
   all         build + check + test (default).
 
@@ -39,8 +41,10 @@ probe fail on any crate that does not fully self-host.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -244,7 +248,71 @@ def self_host(release: bool, strict: bool) -> int:
     return 1 if (strict and blocked) else 0
 
 
-def dist(release: bool) -> int:
+def workspace_version() -> str:
+    """Best-effort version string: workspace `version` from Cargo.toml, else git
+    describe, else `dev`."""
+    cargo = ROOT / "Cargo.toml"
+    if cargo.exists():
+        text = cargo.read_text(encoding="utf-8")
+        m = re.search(r'^\s*version\s*=\s*"([^"]+)"', text, re.MULTILINE)
+        if m:
+            return m.group(1)
+    res = run(["git", "-C", str(ROOT), "describe", "--tags", "--always"], check=False)
+    if res.returncode == 0 and res.stdout.strip():
+        return res.stdout.strip()
+    return "dev"
+
+
+def sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    h.update(path.read_bytes())
+    return h.hexdigest()
+
+
+def write_checksums(out: Path, version: str) -> Optional[Path]:
+    """Write SHA-256 checksums for every staged artifact into
+    `dist/moira-<version>-checksums.txt` (relative paths, BSD-style)."""
+    artifacts = sorted(p for p in out.rglob("*") if p.is_file())
+    if not artifacts:
+        return None
+    lines = []
+    for p in artifacts:
+        rel = p.relative_to(out).as_posix()
+        lines.append(f"{sha256_file(p)}  {rel}")
+    checksum_file = out / f"moira-{version}-checksums.txt"
+    checksum_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    log(f"checksums -> {checksum_file}")
+    return checksum_file
+
+
+def sign_artifacts(out: Path, key: Optional[str]) -> int:
+    """Produce detached ASCII-armored GPG signatures for every staged artifact.
+
+    Skips silently (with a warning) when `gpg` is unavailable. The signing key is
+    selected with `--sign-key <id>`; otherwise gpg's default key is used. This
+    satisfies the "signed/checksummed release artifacts" deliverable and aligns
+    with `docs/STABILITY.md`.
+    """
+    gpg = shutil.which("gpg")
+    if gpg is None:
+        log("sign: `gpg` not found on PATH; skipping signatures (checksums only)")
+        return 0
+    args = [gpg, "--detach-sign", "--armor"]
+    if key:
+        args += ["--local-user", key]
+    count = 0
+    for p in sorted(x for x in out.rglob("*") if x.is_file()):
+        sig = Path(str(p) + ".asc")
+        res = run([*args, str(p)], check=False)
+        if res.returncode == 0 and sig.exists():
+            count += 1
+        else:
+            log(f"sign: failed to sign {p}")
+    log(f"sign: wrote {count} detached signature(s)")
+    return 0
+
+
+def dist(release: bool, sign: bool, sign_key: Optional[str]) -> int:
     log("Building release binaries")
     res = run(["cargo", "build", "--workspace", "--release"], cwd=ROOT)
     if res.returncode != 0:
@@ -263,7 +331,76 @@ def dist(release: bool) -> int:
     readme = ROOT / "README.md"
     if readme.exists():
         shutil.copy(readme, out / "README.md")
-    log(f"distributable staged at {out}")
+    version = workspace_version()
+    # Stability policy: every release ships checksums (and, optionally, signed
+    # artifacts) so users can verify integrity (see docs/STABILITY.md).
+    write_checksums(out, version)
+    if sign:
+        sign_artifacts(out, sign_key)
+    log(f"distributable staged at {out} (version {version})")
+    return 0
+
+
+def latest_tag() -> Optional[str]:
+    res = run(["git", "-C", str(ROOT), "describe", "--tags", "--abbrev=0"], check=False)
+    if res.returncode == 0:
+        t = res.stdout.strip()
+        return t or None
+    return None
+
+
+# Conventional-commit groups used by the changelog generator.
+CHANGELOG_GROUPS = [
+    ("feat", "Features"),
+    ("fix", "Bug Fixes"),
+    ("perf", "Performance"),
+    ("docs", "Documentation"),
+    ("refactor", "Refactoring"),
+    ("test", "Tests"),
+    ("chore", "Chores"),
+    ("other", "Other"),
+]
+
+
+def changelog(release: bool) -> int:
+    """Generate a changelog from git history since the last tag (or from the
+    beginning if untagged), grouped by conventional-commit type. This backs the
+    "automated changelog generation" deliverable in docs/STABILITY.md.
+    """
+    since = latest_tag()
+    if since:
+        log_cmd = ["git", "-C", str(ROOT), "log", f"{since}..HEAD", "--pretty=format:%s"]
+        scope = f"since {since}"
+    else:
+        log_cmd = ["git", "-C", str(ROOT), "log", "--pretty=format:%s"]
+        scope = "full history"
+    res = run(log_cmd, check=False)
+    if res.returncode != 0:
+        log("changelog: could not read git history")
+        return 1
+    subjects = [l.strip() for l in res.stdout.splitlines() if l.strip()]
+    grouped: dict[str, list[str]] = {k: [] for k, _ in CHANGELOG_GROUPS}
+    for subj in subjects:
+        m = re.match(r"(\w+)(?:\([^)]*\))?!?:\s*(.*)", subj)
+        kind = m.group(1).lower() if m else "other"
+        body = m.group(2) if m else subj
+        grouped.setdefault(kind, grouped["other"]).append(body)
+    version = workspace_version()
+    lines = [f"# Moira {version} changelog", "", f"_Changes {scope}._", ""]
+    for key, title in CHANGELOG_GROUPS:
+        items = grouped.get(key) or []
+        if not items:
+            continue
+        lines += [f"## {title}", ""]
+        for it in items:
+            lines.append(f"- {it}")
+        lines.append("")
+    text = "\n".join(lines).rstrip() + "\n"
+    out_path = ROOT / "dist" / f"moira-{version}-CHANGELOG.md"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(text, encoding="utf-8")
+    log(f"changelog -> {out_path} ({len(subjects)} commit(s) {scope})")
+    print(text)
     return 0
 
 
@@ -380,13 +517,23 @@ def main(argv: list[str]) -> int:
         "command",
         nargs="?",
         default="all",
-        choices=["build", "check", "test", "self-host", "dist", "determinism", "all"],
+        choices=["build", "check", "test", "self-host", "dist", "determinism", "changelog", "all"],
     )
     parser.add_argument("--release", action="store_true", help="use the release profile")
     parser.add_argument(
         "--strict",
         action="store_true",
         help="self-host: fail if any crate is not fully self-hostable",
+    )
+    parser.add_argument(
+        "--sign",
+        action="store_true",
+        help="dist: also produce detached GPG signatures for staged artifacts",
+    )
+    parser.add_argument(
+        "--sign-key",
+        default=None,
+        help="dist: GPG key id to sign with (implies --sign)",
     )
     args = parser.parse_args(argv)
 
@@ -409,8 +556,11 @@ def main(argv: list[str]) -> int:
         return self_host(args.release, args.strict or os.environ.get("MOIRA_SELFHOST_STRICT") == "1")
     if args.command == "determinism":
         return determinism(args.release)
+    if args.command == "changelog":
+        return changelog(args.release)
     if args.command == "dist":
-        return dist(args.release)
+        sign = args.sign or args.sign_key is not None
+        return dist(args.release, sign, args.sign_key)
 
     log("done")
     return 0

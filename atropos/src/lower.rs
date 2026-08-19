@@ -118,6 +118,9 @@ struct Lower {
     /// Names of `async fn`s, so calls to them can target the generated
     /// run-wrapper / future-constructor instead of the (absent) bare body.
     async_fns: std::collections::HashSet<String>,
+    /// Lengths of `let`-bound array literals (e.g. `let xs = [1, 2, 3];`), so a
+    /// later `for x in xs { .. }` can iterate the known-length array.
+    array_lens: HashMap<String, usize>,
     /// When set, the enclosing `async fn` state-machine bookkeeping: the future
     /// struct name, the `self` parameter local name, the output C type, and the
     /// list of `(slot_name, c_type)` that must be round-tripped across a
@@ -157,6 +160,7 @@ impl Lower {
             current: 0,
             types: HashMap::new(),
             loops: Vec::new(),
+            array_lens: HashMap::new(),
             async_fns: std::collections::HashSet::new(),
             async_ctx: None,
             expecting_future: false,
@@ -434,6 +438,24 @@ impl Lower {
         match &s.kind {
             StmtKind::Local(local) => {
                 let name = pat_name(&local.pat)?;
+                // An array-literal initializer binds the local as an array
+                // declaration directly. C cannot assign arrays by value, so we
+                // must not declare `long long name;` and then `name = temp` —
+                // instead emit `long long name[len] = {..};` inline with
+                // `place == name`. The length is recorded so a later
+                // `for x in name` can iterate the array.
+                if let Some(ExprKind::Array(elems)) = local.init.as_ref().map(|i| &i.kind) {
+                    let mut operands = Vec::with_capacity(elems.len());
+                    for e in elems {
+                        operands.push(self.lower_expr(e)?);
+                    }
+                    self.array_lens.insert(name.clone(), elems.len());
+                    self.emit(
+                        name.clone(),
+                        mir::Rvalue::Array("long long".to_string(), operands),
+                    );
+                    return Ok(());
+                }
                 // Infer the declared local type: prefer an explicit annotation,
                 // otherwise fall back to a struct-literal RHS so `let p = Point{..}`
                 // is typed `struct Point` (otherwise it defaults to `long long`
@@ -471,6 +493,61 @@ impl Lower {
         }
     }
 
+    /// Lower `for <name> in <start>..(<end>[, inclusive]) { <body> }` into a
+    /// C-style index loop. `inclusive` selects `<=` (for `..=`) vs `<` (for `..`).
+    fn lower_range_for(
+        &mut self,
+        l: &Expr,
+        r: &Expr,
+        inclusive: bool,
+        name: &str,
+        body: &ast::Block,
+    ) -> Result<mir::Operand> {
+        let a_op = self.lower_expr(l)?;
+        let b_op = self.lower_expr(r)?;
+        self.func
+            .locals
+            .push((name.to_string(), Some("long long".into())));
+        self.emit(name.to_string(), mir::Rvalue::Use(a_op));
+
+        let head = self.new_block();
+        let body_blk = self.new_block();
+        let exit = self.new_block();
+        self.set_term(mir::Terminator::Goto(head));
+
+        self.current = head;
+        let cond = mir::Operand::var(name.to_string());
+        let cmp = self.fresh_temp("long long");
+        self.emit(
+            cmp.clone(),
+            mir::Rvalue::Binary(
+                if inclusive { mir::BinOp::Le } else { mir::BinOp::Lt },
+                cond,
+                b_op,
+            ),
+        );
+        self.set_term(mir::Terminator::If(
+            mir::Operand::var(cmp),
+            body_blk,
+            exit,
+        ));
+
+        self.current = body_blk;
+        self.loops.push((exit, head));
+        self.lower_block_value(body)?;
+        self.loops.pop();
+        // i = i + 1
+        let i = mir::Operand::var(name.to_string());
+        self.emit(
+            name.to_string(),
+            mir::Rvalue::Binary(mir::BinOp::Add, i, mir::Operand::Const(1)),
+        );
+        self.set_term(mir::Terminator::Goto(head));
+
+        self.current = exit;
+        Ok(mir::Operand::Unit)
+    }
+
     fn lower_expr(&mut self, e: &Expr) -> Result<mir::Operand> {
         match &e.kind {
             ExprKind::Lit(ast::Lit::Int(v, _)) => Ok(mir::Operand::Const(*v as i128)),
@@ -496,6 +573,9 @@ impl Lower {
                     .unwrap_or_default();
                 Ok(mir::Operand::var(name))
             }
+            ExprKind::Range(..) => Err(LowerError(
+                "range `..` / `..=` is only supported as a `for` iterator".into(),
+            )),
             ExprKind::Binary(l, abop, r) => {
                 // Assignment / compound assignment mutate the left-hand place.
                 if let Some(arith) = compound_op(*abop) {
@@ -613,6 +693,14 @@ impl Lower {
             }
             ExprKind::Block(b) => self.lower_block_value(b),
             ExprKind::If(cond, then_b, else_b) => {
+                // `if let pat = init { .. }` is parsed as `If(Block{Local}, ..)`.
+                if let ExprKind::Block(cb) = &cond.kind {
+                    if cb.stmts.len() == 1 && cb.tail.is_none() {
+                        if let StmtKind::Local(local) = &cb.stmts[0].kind {
+                            return self.lower_if_let(local, then_b, else_b.as_deref());
+                        }
+                    }
+                }
                 let cond_op = self.lower_expr(cond)?;
                 let result = self.fresh_temp("long long");
                 let then_blk = self.new_block();
@@ -636,47 +724,103 @@ impl Lower {
                 self.current = merge;
                 Ok(mir::Operand::var(result))
             }
-            ExprKind::While(cond, body) => self.lower_loop(Some(&**cond), body),
+            ExprKind::While(cond, body) => {
+                // `while let pat = init { .. }` is parsed as `While(Block{Local}, ..)`.
+                if let ExprKind::Block(cb) = &cond.kind {
+                    if cb.stmts.len() == 1 && cb.tail.is_none() {
+                        if let StmtKind::Local(local) = &cb.stmts[0].kind {
+                            return self.lower_while_let(local, body);
+                        }
+                    }
+                }
+                self.lower_loop(Some(&**cond), body)
+            }
             ExprKind::Loop(body) => self.lower_loop(None, body),
             ExprKind::For(pat, iter, body) => {
-                // Desugar `for i in a..b { ... }` into a while loop over `i`.
+                // Desugar `for pat in iter { ... }`. The iterator is either a
+                // range `a..b` (iterate `i` over `[a, b)`) or an array (iterate
+                // `pat` over `arr[0..len]` via an index variable).
                 let name = pat_name(pat)?;
-                let (a, b) = match &iter.kind {
-                    ExprKind::Binary(l, ABinOp::Range, r) => (l, r),
-                    _ => return Err(LowerError("`for` iterator must be a range `a..b`".into())),
+                let array_len: Option<i128> = match &iter.kind {
+                    ExprKind::Array(elems) => Some(elems.len() as i128),
+                    ExprKind::Path(p) => {
+                        let vname = p
+                            .segments
+                            .last()
+                            .map(|s| s.node.clone())
+                            .unwrap_or_default();
+                        self.array_lens.get(&vname).map(|&n| n as i128)
+                    }
+                    _ => None,
                 };
-                let a_op = self.lower_expr(a)?;
-                let b_op = self.lower_expr(b)?;
-                self.func
-                    .locals
-                    .push((name.clone(), Some("long long".into())));
-                self.emit(name.clone(), mir::Rvalue::Use(a_op));
+                match &iter.kind {
+                    ExprKind::Binary(l, ABinOp::Range, r) => {
+                        self.lower_range_for(l, r, false, &name, body)
+                    }
+                    ExprKind::Range(Some(l), Some(r), inclusive) => {
+                        self.lower_range_for(l, r, *inclusive, &name, body)
+                    }
+                    _ if array_len.is_some() => {
+                        let len = array_len.unwrap();
+                        // Lower the array to its operand (a `let`-bound array
+                        // resolves to the variable; an array literal lowers to an
+                        // inline `long long tN[len] = {..};` temp).
+                        let arr_op = self.lower_expr(iter)?;
+                        self.func
+                            .locals
+                            .push((name.clone(), Some("long long".into())));
+                        let idx = self.fresh_temp("long long");
+                        self.emit(idx.clone(), mir::Rvalue::Use(mir::Operand::Const(0)));
 
-                let head = self.new_block();
-                let body_blk = self.new_block();
-                let exit = self.new_block();
-                self.set_term(mir::Terminator::Goto(head));
+                        let head = self.new_block();
+                        let body_blk = self.new_block();
+                        let exit = self.new_block();
+                        self.set_term(mir::Terminator::Goto(head));
 
-                self.current = head;
-                let cond = mir::Operand::var(name.clone());
-                let cmp = self.fresh_temp("long long");
-                self.emit(cmp.clone(), mir::Rvalue::Binary(mir::BinOp::Lt, cond, b_op));
-                self.set_term(mir::Terminator::If(mir::Operand::var(cmp), body_blk, exit));
+                        self.current = head;
+                        let cmp = self.fresh_temp("long long");
+                        self.emit(
+                            cmp.clone(),
+                            mir::Rvalue::Binary(
+                                mir::BinOp::Lt,
+                                mir::Operand::var(idx.clone()),
+                                mir::Operand::Const(len),
+                            ),
+                        );
+                        self.set_term(mir::Terminator::If(
+                            mir::Operand::var(cmp),
+                            body_blk,
+                            exit,
+                        ));
 
-                self.current = body_blk;
-                self.loops.push((exit, head));
-                self.lower_block_value(body)?;
-                self.loops.pop();
-                // i = i + 1
-                let i = mir::Operand::var(name.clone());
-                self.emit(
-                    name.clone(),
-                    mir::Rvalue::Binary(mir::BinOp::Add, i, mir::Operand::Const(1)),
-                );
-                self.set_term(mir::Terminator::Goto(head));
+                        self.current = body_blk;
+                        self.loops.push((exit, head));
+                        // pat = arr[idx]
+                        self.emit(
+                            name.clone(),
+                            mir::Rvalue::Index(arr_op.clone(), mir::Operand::var(idx.clone())),
+                        );
+                        self.lower_block_value(body)?;
+                        self.loops.pop();
+                        // idx = idx + 1
+                        self.emit(
+                            idx.clone(),
+                            mir::Rvalue::Binary(
+                                mir::BinOp::Add,
+                                mir::Operand::var(idx.clone()),
+                                mir::Operand::Const(1),
+                            ),
+                        );
+                        self.set_term(mir::Terminator::Goto(head));
 
-                self.current = exit;
-                Ok(mir::Operand::Unit)
+                        self.current = exit;
+                        Ok(mir::Operand::Unit)
+                    }
+                    _ => Err(LowerError(
+                        "`for` iterator must be a range `a..b`, an array literal `[..]`, or a `let`-bound array"
+                            .into(),
+                    )),
+                }
             }
             ExprKind::Return(opt) => {
                 let v = match opt {
@@ -759,6 +903,7 @@ impl Lower {
                 Ok(mir::Operand::var(t))
             }
             ExprKind::Macro(..) => Err(LowerError("macros are not in the codegen subset".into())),
+            ExprKind::Tuple(..) => Err(LowerError("tuples are not in the codegen subset".into())),
             ExprKind::Try(..) => Err(LowerError(
                 "the `?` operator is not in the codegen subset".into(),
             )),
@@ -936,6 +1081,103 @@ impl Lower {
         // `None`, `expecting_future` stays false) which already returns the
         // future's output value.
         self.lower_expr(inner)
+    }
+
+    /// Lower `if let pat = init { then } else { else }` (parsed as
+    /// `If(Block{Local}, ..)`). Only identifier patterns are supported; enum
+    /// destructuring is rejected. The binding is emitted as a local and the
+    /// branch is taken unconditionally (the pattern is irrefutable).
+    fn lower_if_let(
+        &mut self,
+        local: &ast::Local,
+        then_b: &ast::Block,
+        else_b: Option<&Expr>,
+    ) -> Result<mir::Operand> {
+        if !matches!(local.pat, ast::Pat::Ident(_)) {
+            return Err(LowerError(
+                "`if let`/`while let` with non-identifier patterns is not yet supported (enum destructuring needs `match`)"
+                    .into(),
+            ));
+        }
+        let name = pat_name(&local.pat)?;
+        let init_op = match &local.init {
+            Some(e) => self.lower_expr(e)?,
+            None => mir::Operand::Unit,
+        };
+        self.func
+            .locals
+            .push((name.clone(), Some("long long".into())));
+        self.emit(name.clone(), mir::Rvalue::Use(init_op));
+
+        // Irrefutable: always taken. Lower as `if (1) { then } else { else }`.
+        let result = self.fresh_temp("long long");
+        let then_blk = self.new_block();
+        let else_blk = self.new_block();
+        let merge = self.new_block();
+        self.set_term(mir::Terminator::If(
+            mir::Operand::Const(1),
+            then_blk,
+            else_blk,
+        ));
+
+        self.current = then_blk;
+        let v_then = self.lower_block_value(then_b)?;
+        self.emit(result.clone(), mir::Rvalue::Use(v_then));
+        self.set_term(mir::Terminator::Goto(merge));
+
+        self.current = else_blk;
+        let v_else = match else_b {
+            Some(eb) => self.lower_expr(eb)?,
+            None => mir::Operand::Unit,
+        };
+        self.emit(result.clone(), mir::Rvalue::Use(v_else));
+        self.set_term(mir::Terminator::Goto(merge));
+
+        self.current = merge;
+        Ok(mir::Operand::var(result))
+    }
+
+    /// Lower `while let pat = init { body }` (parsed as `While(Block{Local}, ..)`).
+    /// The binding is emitted once before the loop (its initializer does not
+    /// change across iterations for an identifier pattern) and the loop runs
+    /// until a `break` inside the body.
+    fn lower_while_let(&mut self, local: &ast::Local, body: &ast::Block) -> Result<mir::Operand> {
+        if !matches!(local.pat, ast::Pat::Ident(_)) {
+            return Err(LowerError(
+                "`if let`/`while let` with non-identifier patterns is not yet supported (enum destructuring needs `match`)"
+                    .into(),
+            ));
+        }
+        let name = pat_name(&local.pat)?;
+        let init_op = match &local.init {
+            Some(e) => self.lower_expr(e)?,
+            None => mir::Operand::Unit,
+        };
+        self.func
+            .locals
+            .push((name.clone(), Some("long long".into())));
+        self.emit(name.clone(), mir::Rvalue::Use(init_op));
+
+        let head = self.new_block();
+        let body_blk = self.new_block();
+        let exit = self.new_block();
+        self.set_term(mir::Terminator::Goto(head));
+
+        self.current = head;
+        self.set_term(mir::Terminator::If(
+            mir::Operand::Const(1),
+            body_blk,
+            exit,
+        ));
+
+        self.current = body_blk;
+        self.loops.push((exit, head));
+        self.lower_block_value(body)?;
+        self.loops.pop();
+        self.set_term(mir::Terminator::Goto(head));
+
+        self.current = exit;
+        Ok(mir::Operand::Unit)
     }
 
     fn lower_loop(&mut self, cond: Option<&Expr>, body: &ast::Block) -> Result<mir::Operand> {

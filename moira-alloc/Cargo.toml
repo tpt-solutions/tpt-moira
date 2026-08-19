@@ -7,5 +7,8 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 description = "Region-based (arena) allocator for Moira's compiler-internal data structures"
+readme = "README.md"
+keywords = ["allocator", "arena", "memory", "region", "no-std"]
+categories = ["memory-management", "data-structures", "no-std"]
 
 [dependencies]

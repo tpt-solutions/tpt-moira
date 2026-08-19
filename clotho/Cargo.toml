@@ -7,5 +7,8 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 description = "Clotho: Moira's streaming lexer, parser, and AST frontend"
+readme = "README.md"
+keywords = ["compiler", "lexer", "parser", "ast", "rust"]
+categories = ["compilers", "parsing", "development-tools"]
 
 [dependencies]

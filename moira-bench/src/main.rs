@@ -102,12 +102,146 @@ fn main() {
 }
 "#;
 
-const BENCHMARKS: &[(&str, &str)] = &[("small", SMALL), ("medium", MEDIUM), ("large", LARGE)];
+/// A larger synthetic program with a 200x200 nested loop, used to see how the
+/// speedup ratio trends as the program grows.
+const XLARGE: &str = r#"
+struct Cell { x: i32, y: i32, z: i32 }
+
+fn mandel(cx: f64, cy: f64) -> i32 {
+    let mut x = 0.0;
+    let mut y = 0.0;
+    let mut i = 0;
+    while i < 64 {
+        let nx = x * x - y * y + cx;
+        let ny = 2.0 * x * y + cy;
+        x = nx;
+        y = ny;
+        if x * x + y * y > 4.0 { return i; }
+        i = i + 1;
+    }
+    i
+}
+
+fn compute() -> i32 {
+    let mut total = 0;
+    for i in 0..200 {
+        for j in 0..200 {
+            let c = Cell { x: i, y: j, z: i + j };
+            total = total + (c.x * c.y) % 7;
+        }
+    }
+    total
+}
+
+fn heat() -> i32 {
+    let mut s = 0;
+    for i in 0..200 {
+        for j in 0..200 {
+            s = s + mandel((i as f64) / 100.0 - 1.5, (j as f64) / 100.0 - 1.5);
+        }
+    }
+    s
+}
+
+fn main() {
+    let r = compute();
+    let h = heat();
+    let _ = r + h;
+}
+"#;
+
+/// A program with deep call nesting and many locals, exercising the front-end
+/// + mid-end on a broader call graph.
+const NESTED: &str = r#"
+fn f1(a: i32) -> i32 { a + 1 }
+fn f2(a: i32) -> i32 { f1(a) + 2 }
+fn f3(a: i32) -> i32 { f2(a) + 3 }
+fn f4(a: i32) -> i32 { f3(a) + 4 }
+fn f5(a: i32) -> i32 { f4(a) + 5 }
+fn f6(a: i32) -> i32 { f5(a) + 6 }
+fn f7(a: i32) -> i32 { f6(a) + 7 }
+fn f8(a: i32) -> i32 { f7(a) + 8 }
+fn f9(a: i32) -> i32 { f8(a) + 9 }
+fn f10(a: i32) -> i32 { f9(a) + 10 }
+
+fn combine(a: i32, b: i32, c: i32, d: i32) -> i32 {
+    let mut acc = 0;
+    let mut i = 0;
+    while i < a {
+        acc = acc + f10(b) + f10(c) + f10(d);
+        let mut j = 0;
+        while j < a {
+            acc = acc + f5(b * c) + f5(d);
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    acc
+}
+
+fn main() {
+    let r = combine(20, 3, 7, 11);
+    let _ = r;
+}
+"#;
+
+const BENCHMARKS: &[(&str, &str)] = &[
+    ("small", SMALL),
+    ("medium", MEDIUM),
+    ("large", LARGE),
+    ("xlarge", XLARGE),
+    ("nested", NESTED),
+];
+
+/// Moira pipeline measured by default: just the front-end + SSA mid-end
+/// (`--emit ssa`). With `--full`, the full semantic pipeline (type-check +
+/// borrow-check + incremental cache via `--emit check`) is timed instead.
+#[derive(Clone, Copy, PartialEq)]
+enum MoiraMode {
+    Ssa,
+    Check,
+}
+
+impl MoiraMode {
+    fn emit(&self) -> &'static str {
+        match self {
+            MoiraMode::Ssa => "ssa",
+            MoiraMode::Check => "check",
+        }
+    }
+    fn label(&self) -> &'static str {
+        match self {
+            MoiraMode::Ssa => "front-end + SSA mid-end",
+            MoiraMode::Check => "front-end + type-check + borrow-check + cache",
+        }
+    }
+}
+
+/// `rustc` baseline measured by default: `rustc --emit=metadata` (parse +
+/// full inference + borrow-check + codegen-to-metadata, no link). With `full`,
+/// a complete `rustc` build (`rustc -o <tmp>`) is run so the baseline includes
+/// native codegen + linking — the real "compile this file" cost.
+#[derive(Clone, Copy, PartialEq)]
+enum RustcMode {
+    Metadata,
+    Full,
+}
+
+impl RustcMode {
+    fn label(&self) -> &'static str {
+        match self {
+            RustcMode::Metadata => "rustc --emit=metadata",
+            RustcMode::Full => "rustc (full build + link)",
+        }
+    }
+}
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let mut record = false;
     let mut dashboard = false;
+    let mut moira_mode = MoiraMode::Ssa;
+    let mut rustc_mode = RustcMode::Metadata;
     let mut results_dir = PathBuf::from(DEFAULT_RESULTS_DIR);
 
     let mut i = 1;
@@ -115,6 +249,26 @@ fn main() {
         match args[i].as_str() {
             "--record" => record = true,
             "--dashboard" => dashboard = true,
+            "--full" => moira_mode = MoiraMode::Check,
+            "--rustc-mode" => match args.get(i + 1) {
+                Some(m) => {
+                    match m.as_str() {
+                        "metadata" => rustc_mode = RustcMode::Metadata,
+                        "full" => rustc_mode = RustcMode::Full,
+                        other => {
+                            eprintln!(
+                                "error: --rustc-mode expects `metadata` or `full`, found `{other}`"
+                            );
+                            std::process::exit(2);
+                        }
+                    }
+                    i += 1;
+                }
+                None => {
+                    eprintln!("error: --rustc-mode requires an argument (`metadata`|`full`)");
+                    std::process::exit(2);
+                }
+            },
             "--results" => match args.get(i + 1) {
                 Some(d) => {
                     results_dir = PathBuf::from(d);
@@ -138,7 +292,7 @@ fn main() {
         return;
     }
 
-    run_benchmark(record, &results_dir);
+    run_benchmark(record, &results_dir, moira_mode, rustc_mode);
 
     if moira_is_missing() {
         eprintln!("\nwarning: `moira` binary not found; run `cargo build` first.");
@@ -150,12 +304,23 @@ fn main() {
 
 /// Run the benchmark battery, print the table, and (when `record`) persist the
 /// run and report any regressions versus the previous recorded run.
-fn run_benchmark(record: bool, results_dir: &Path) {
+fn run_benchmark(record: bool, results_dir: &Path, moira_mode: MoiraMode, rustc_mode: RustcMode) {
     let moira = find_moira();
     let rustc = find_rustc();
 
     println!("Moira vs rustc — Phase-1 subset compile-time benchmark");
-    println!("({ITERS} iterations, median reported; Moira = front-end + SSA mid-end)\n");
+    println!(
+        "({ITERS} iterations, median reported; Moira = {}; baseline = {})",
+        moira_mode.label(),
+        rustc_mode.label()
+    );
+    if moira_mode == MoiraMode::Check {
+        println!(
+            "note: `--full` measures Moira's complete semantic pipeline; the rustc
+baseline may still include native codegen/link unless `--rustc-mode full` is set."
+        );
+    }
+    println!();
     println!(
         "{:<8} {:>12} {:>12} {:>10}",
         "program", "moira(ms)", "rustc(ms)", "speedup"
@@ -167,12 +332,15 @@ fn run_benchmark(record: bool, results_dir: &Path) {
     for (name, src) in BENCHMARKS {
         let file = write_temp("rs", src);
 
+        let m_args = moira_args(&file, moira_mode);
+        let r_args = rustc_args(&file, rustc_mode);
+
         let moira_ms = moira
             .as_ref()
-            .and_then(|bin| time_cmd(bin, &moira_args(&file), ITERS));
+            .and_then(|bin| time_cmd(bin, &m_args, ITERS));
         let rustc_ms = rustc
             .as_ref()
-            .and_then(|bin| time_cmd(bin, &rustc_args(&file), ITERS));
+            .and_then(|bin| time_cmd(bin, &r_args, ITERS));
 
         let (moira_s, rustc_s, ratio_s, speedup) = match (moira_ms, rustc_ms) {
             (Some(m), Some(r)) => {
@@ -201,7 +369,12 @@ fn run_benchmark(record: bool, results_dir: &Path) {
             speedup,
         });
 
+        // Remove the temp source and the emitted artifact(s) so repeated runs
+        // and different crates don't leak temp files.
         let _ = std::fs::remove_file(&file);
+        for a in m_args.iter().chain(r_args.iter()) {
+            let _ = std::fs::remove_file(a);
+        }
     }
 
     let geomean = if ratios.is_empty() {
@@ -345,37 +518,60 @@ fn find_rustc() -> Option<PathBuf> {
     None
 }
 
-fn moira_args(file: &Path) -> Vec<String> {
-    let out = temp_path("ssa");
+fn moira_args(file: &Path, mode: MoiraMode) -> Vec<String> {
+    let out = temp_path(mode.emit());
     vec![
         "--emit".into(),
-        "ssa".into(),
+        mode.emit().into(),
         "-o".into(),
         out.to_string_lossy().into_owned(),
         file.to_string_lossy().into_owned(),
     ]
 }
 
-fn rustc_args(file: &Path) -> Vec<String> {
-    let out = temp_path("rmeta");
-    vec![
-        "--emit=metadata".into(),
-        "-o".into(),
-        out.to_string_lossy().into_owned(),
-        file.to_string_lossy().into_owned(),
-    ]
+fn rustc_args(file: &Path, mode: RustcMode) -> Vec<String> {
+    match mode {
+        RustcMode::Metadata => {
+            let out = temp_path("rmeta");
+            vec![
+                "--emit=metadata".into(),
+                "-o".into(),
+                out.to_string_lossy().into_owned(),
+                file.to_string_lossy().into_owned(),
+            ]
+        }
+        RustcMode::Full => {
+            let dir = temp_path("rustc_full");
+            vec![
+                "-o".into(),
+                dir.to_string_lossy().into_owned(),
+                file.to_string_lossy().into_owned(),
+            ]
+        }
+    }
 }
 
 /// Time `program args`, returning the median wall-clock milliseconds over
-/// `iters` successful runs, or `None` if any invocation fails.
+/// `iters` successful runs, or `None` if any invocation fails. Subprocess
+/// stdout/stderr are discarded so compiler diagnostics don't pollute the table.
 fn time_cmd(program: &Path, args: &[String], iters: usize) -> Option<f64> {
+    use std::process::Stdio;
     for _ in 0..WARMUP {
-        let _ = Command::new(program).args(args).status();
+        let _ = Command::new(program)
+            .args(args)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
     }
     let mut samples: Vec<Duration> = Vec::with_capacity(iters);
     for _ in 0..iters {
         let start = Instant::now();
-        match Command::new(program).args(args).status() {
+        match Command::new(program)
+            .args(args)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+        {
             Ok(status) if status.success() => samples.push(start.elapsed()),
             _ => return None,
         }

@@ -11,8 +11,8 @@
 use crate::traits::{BuiltinTrait, TraitDb};
 use crate::ty::Ty;
 use clotho::ast::{
-    BinOp, Block, Expr, ExprKind, Generics, Lit, Pat, Path, StmtKind, Type, TypeBound, TypeKind,
-    UnOp,
+    BinOp, Block, Expr, ExprKind, Generics, Lit, Local, Pat, Path, StmtKind, Type, TypeBound,
+    TypeKind, UnOp,
 };
 use clotho::error::Diag;
 use clotho::token::Span;
@@ -305,10 +305,77 @@ impl TypeChecker {
         ty
     }
 
+    /// Type-check `if let pat = init { then } else { else }` (and its `while let`
+    /// analogue). The binding is scoped to the then-block (if) or loop body
+    /// (while). Only identifier patterns are supported in the type-checked
+    /// subset; enum destructuring (`if let Some(x) = opt`) needs full `match` /
+    /// enum-variant support and is rejected with a precise diagnostic.
+    fn infer_if_let(
+        &mut self,
+        local: &Local,
+        then_b: &Block,
+        else_b: Option<&Expr>,
+        span: Span,
+    ) -> Ty {
+        if !matches!(local.pat, Pat::Ident(_)) {
+            self.err(
+                span,
+                "`if let`/`while let` with non-identifier patterns is not yet supported (enum destructuring needs `match`)",
+            );
+            let tt = self.infer_block(then_b);
+            let _ = else_b;
+            return tt;
+        }
+        let init_ty = match &local.init {
+            Some(e) => self.infer_expr(e),
+            None => Ty::Unit,
+        };
+        let name = pat_name(&local.pat);
+        self.env.push(HashMap::new());
+        self.env.last_mut().unwrap().insert(name, init_ty);
+        let tt = self.infer_block(then_b);
+        self.env.pop();
+        match else_b {
+            Some(eb) => {
+                let et = match &eb.kind {
+                    ExprKind::Block(b) => self.infer_block(b),
+                    _ => self.infer_expr(eb),
+                };
+                self.expect(&tt, &et, span);
+                tt
+            }
+            None => Ty::Unit,
+        }
+    }
+
+    /// Type-check `while let pat = init { body }`. See [`Self::infer_if_let`] for
+    /// the pattern-support restriction.
+    fn infer_while_let(&mut self, local: &Local, body: &Block, span: Span) -> Ty {
+        if !matches!(local.pat, Pat::Ident(_)) {
+            self.err(
+                span,
+                "`if let`/`while let` with non-identifier patterns is not yet supported (enum destructuring needs `match`)",
+            );
+            self.infer_block(body);
+            return Ty::Unit;
+        }
+        let init_ty = match &local.init {
+            Some(e) => self.infer_expr(e),
+            None => Ty::Unit,
+        };
+        let name = pat_name(&local.pat);
+        self.env.push(HashMap::new());
+        self.env.last_mut().unwrap().insert(name, init_ty);
+        self.infer_block(body);
+        self.env.pop();
+        Ty::Unit
+    }
+
     fn infer_expr(&mut self, e: &Expr) -> Ty {
         let span = e.span;
         let ty = match &e.kind {
             ExprKind::Lit(l) => lit_ty(l),
+            ExprKind::Range(..) => Ty::Unit,
             ExprKind::Path(p) => {
                 let name = p
                     .segments
@@ -364,6 +431,15 @@ impl TypeChecker {
             }
             ExprKind::Block(b) => self.infer_block(b),
             ExprKind::If(cond, then_b, else_b) => {
+                // `if let pat = init { .. }` is parsed as `If(Block{Local(pat=init)}, ..)`.
+                // Handle it as a binding scoped to the then-block.
+                if let ExprKind::Block(ref cb) = cond.kind {
+                    if cb.stmts.len() == 1 && cb.tail.is_none() {
+                        if let StmtKind::Local(ref local) = cb.stmts[0].kind {
+                            return self.infer_if_let(local, then_b, else_b.as_deref(), span);
+                        }
+                    }
+                }
                 let ct = self.infer_expr(cond);
                 self.expect(&ct, &Ty::Bool, cond.span);
                 let tt = self.infer_block(then_b);
@@ -385,6 +461,14 @@ impl TypeChecker {
                 }
             }
             ExprKind::While(cond, body) => {
+                // `while let pat = init { .. }` is parsed as `While(Block{Local}, ..)`.
+                if let ExprKind::Block(ref cb) = cond.kind {
+                    if cb.stmts.len() == 1 && cb.tail.is_none() {
+                        if let StmtKind::Local(ref local) = cb.stmts[0].kind {
+                            return self.infer_while_let(local, body, span);
+                        }
+                    }
+                }
                 let ct = self.infer_expr(cond);
                 self.expect(&ct, &Ty::Bool, cond.span);
                 self.infer_block(body);
@@ -395,9 +479,26 @@ impl TypeChecker {
                 Ty::Unit
             }
             ExprKind::For(pat, iter, body) => {
-                self.infer_expr(iter);
+                let iter_ty = self.infer_expr(iter);
+                // The loop variable binds to the iterator's element type: an
+                // array iterator binds its element type; a range binds `i32`.
+                // Anything else (e.g. a bare `i32`) is not iterable.
+                let elem_ty = match &iter_ty {
+                    Ty::Array(elem, _) => (**elem).clone(),
+                    Ty::Range => Ty::Int,
+                    other => {
+                        self.err(
+                            span,
+                            format!(
+                                "`for` iterator must be a range or array, found {}",
+                                other
+                            ),
+                        );
+                        Ty::Unknown
+                    }
+                };
                 let name = pat_name(pat);
-                self.env.last_mut().unwrap().insert(name, Ty::Int);
+                self.env.last_mut().unwrap().insert(name, elem_ty);
                 self.infer_block(body);
                 Ty::Unit
             }
@@ -440,6 +541,14 @@ impl TypeChecker {
                 }
                 Ty::Array(Box::new(elem_ty), elems.len() as u128)
             }
+            ExprKind::Tuple(elems) => {
+                // Each element is inferred independently; the tuple's type is the
+                // product of the element types. This is the type-checked half of
+                // tuple support — MIR lowering / codegen of tuple values is the
+                // documented codegen follow-up.
+                let tys = elems.iter().map(|e| self.infer_expr(e)).collect();
+                Ty::Tuple(tys)
+            }
             ExprKind::Index(base, idx) => {
                 let base_ty = self.infer_expr(base);
                 let idx_ty = self.infer_expr(idx);
@@ -480,7 +589,6 @@ impl TypeChecker {
                 );
                 Ty::Unknown
             }
-            ExprKind::Cast(e2, _) => self.infer_expr(e2),
             ExprKind::Macro(..) => {
                 self.err(
                     span,

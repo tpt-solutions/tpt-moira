@@ -69,6 +69,9 @@ pub enum TokenKind {
     Unsafe,
     As,
     In,
+    /// `impl` (keyword). Used for `impl` blocks (detected by name today) and for
+    /// `impl Trait` in type position (e.g. `fn f(x: impl Into<String>)`).
+    Impl,
     /// Primitive type keywords.
     I8,
     I16,
@@ -205,6 +208,7 @@ impl fmt::Display for TokenKind {
             Unsafe => "unsafe",
             As => "as",
             In => "in",
+            Impl => "impl",
             I8 => "i8",
             I16 => "i16",
             I32 => "i32",

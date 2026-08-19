@@ -70,7 +70,10 @@ impl<'src> Lexer<'src> {
                 Some(b' ' | b'\t' | b'\r' | b'\n') => {
                     self.bump();
                 }
-                Some(b'/') if self.peek_byte_at(1) == Some(b'/') => {
+                // Line comments: `//`, `///` (outer doc), and `//!` (inner doc)
+                // all start a comment that runs to end of line.
+                Some(b'/') if self.peek_byte_at(1) == Some(b'/')
+                    || self.peek_byte_at(1) == Some(b'!') => {
                     // line comment
                     while let Some(b) = self.peek_byte() {
                         if b == b'\n' {
@@ -110,19 +113,20 @@ impl<'src> Lexer<'src> {
 
     /// Produce the next token, or [`TokenKind::Eof`] at end of input.
     pub fn next_token(&mut self) -> Token {
-        self.skip_trivia();
-        let start = self.pos;
-        let start_line = self.line;
-        let start_col = self.col;
+        loop {
+            self.skip_trivia();
+            let start = self.pos;
+            let start_line = self.line;
+            let start_col = self.col;
 
-        let Some(b) = self.peek_byte() else {
-            return Token {
-                kind: TokenKind::Eof,
-                span: Span::new(start, start),
+            let Some(b) = self.peek_byte() else {
+                return Token {
+                    kind: TokenKind::Eof,
+                    span: Span::new(start, start),
+                };
             };
-        };
 
-        let kind = match b {
+            let kind = match b {
             b'0'..=b'9' => self.lex_number(),
             b'a'..=b'z' | b'A'..=b'Z' | b'_' | b'@'
                 if b == b'@' || b.is_ascii_alphanumeric() || b == b'_' =>
@@ -130,7 +134,12 @@ impl<'src> Lexer<'src> {
                 self.lex_ident_or_keyword()
             }
             b'"' => self.lex_string(),
-            b'\'' => self.lex_char(),
+            b'\'' => match self.lex_quote() {
+                Some(k) => k,
+                // A lifetime (`'a`, `'src`, `'_`, …) was consumed and dropped;
+                // re-lex the following token.
+                None => continue,
+            },
             _ => self.lex_punct(),
         };
 
@@ -141,22 +150,177 @@ impl<'src> Lexer<'src> {
 
         let end = self.pos;
         let _ = (start_line, start_col);
-        Token {
+        return Token {
             kind,
             span: Span::new(start, end),
+        };
         }
     }
 
     fn lex_ident_or_keyword(&mut self) -> TokenKind {
-        // Raw identifier: r#ident
-        if self.peek_byte() == Some(b'r') && self.peek_byte_at(1) == Some(b'#') {
-            self.bump(); // r
-            self.bump(); // #
-            let name = self.lex_ident_body();
-            return TokenKind::Ident(name);
+        // Byte string `b"…"` / byte char `b'…'` / raw byte string `br"…"` or
+        // `br#"…"#`. The Phase-1 subset does not distinguish `str` from `[u8]` at
+        // the lexer level, so a byte string is surfaced as a regular `Str`
+        // literal (its UTF-8 content) and a byte char as a `Char` literal.
+        if self.peek_byte() == Some(b'b') {
+            match self.peek_byte_at(1) {
+                Some(b'"') => {
+                    self.bump(); // b
+                    self.bump(); // opening quote
+                    return self.lex_byte_string();
+                }
+                Some(b'\'') => {
+                    self.bump(); // b
+                    self.bump(); // opening quote
+                    let c = self.lex_byte_char();
+                    return TokenKind::Char(c);
+                }
+                Some(b'r') if matches!(self.peek_byte_at(2), Some(b'"') | Some(b'#')) => {
+                    // `br"…"` raw byte string, or `br#"…"#` / `br##"…"##`. The
+                    // third character must be a quote (or `#` introducing a
+                    // raw-string hash run); otherwise this is an ordinary
+                    // identifier that merely starts with `br` (e.g. `break`),
+                    // which must fall through to `lex_ident_body`.
+                    self.bump(); // b
+                    self.bump(); // r
+                    let mut hashes = 0;
+                    while self.peek_byte() == Some(b'#') {
+                        self.bump();
+                        hashes += 1;
+                    }
+                    return self.lex_raw_string(hashes);
+                }
+                _ => {}
+            }
         }
+
+        // Raw string `r"…"` or `r#"…"#` (handled before the `r#ident`
+        // raw-identifier rule, since the latter's body must start with an
+        // identifier character, not a quote).
+        if self.peek_byte() == Some(b'r') {
+            match self.peek_byte_at(1) {
+                Some(b'"') => {
+                    return self.lex_opt_hashed_raw_string(0);
+                }
+                Some(b'#') => {
+                    // Count the whole `#` run; if it is followed by `"` this is a
+                    // raw string `r#"…"#` / `r##"…"##`, otherwise a raw
+                    // identifier `r#ident`.
+                    let mut n = 1;
+                    while self.peek_byte_at(1 + n) == Some(b'#') {
+                        n += 1;
+                    }
+                    if self.peek_byte_at(1 + n) == Some(b'"') {
+                        return self.lex_opt_hashed_raw_string(n);
+                    }
+                    // Raw identifier: r#ident
+                    self.bump(); // r
+                    self.bump(); // #
+                    let name = self.lex_ident_body();
+                    return TokenKind::Ident(name);
+                }
+                _ => {}
+            }
+        }
+
         let name = self.lex_ident_body();
         keyword(&name).unwrap_or(TokenKind::Ident(name))
+    }
+
+    /// If the lexer is positioned just after an `r` (or `br`) prefix, consume
+    /// the `r` plus the `hashes`-long `#` run, then delegate to
+    /// [`lex_raw_string`]. `hashes` is the total number of `#` in the delimiter
+    /// (`r"`/`br"` → 0, `r#"`/`br#"` → 1, `r##"` → 2, …).
+    fn lex_opt_hashed_raw_string(&mut self, hashes: usize) -> TokenKind {
+        self.bump(); // r (or the `r` of `br`)
+        for _ in 0..hashes {
+            self.bump();
+        }
+        self.lex_raw_string(hashes)
+    }
+
+    /// Lex a raw string whose delimiter is `"` followed by exactly `hashes`
+    /// `#` signs. No escape processing occurs.
+    fn lex_raw_string(&mut self, hashes: usize) -> TokenKind {
+        self.bump(); // opening quote
+        let mut s = String::new();
+        loop {
+            match self.bump() {
+                None => return TokenKind::Str(s),
+                Some(b'"') => {
+                    if hashes == 0 {
+                        return TokenKind::Str(s);
+                    }
+                    // Does the following run of `#` exactly match `hashes`?
+                    let mut matched = true;
+                    for i in 0..hashes {
+                        if self.peek_byte_at(i) != Some(b'#') {
+                            matched = false;
+                            break;
+                        }
+                    }
+                    if matched {
+                        for _ in 0..hashes {
+                            self.bump();
+                        }
+                        return TokenKind::Str(s);
+                    }
+                    // Not a terminator: the quote is content; the following
+                    // `#` run will be consumed as plain content next.
+                    s.push('"');
+                }
+                Some(other) => s.push(other as char),
+            }
+        }
+    }
+
+    /// Lex a (non-raw) byte string literal `b"…"`, content surfaced as `Str`.
+    fn lex_byte_string(&mut self) -> TokenKind {
+        let mut s = String::new();
+        loop {
+            match self.bump() {
+                None => return TokenKind::Str(s),
+                Some(b'"') => return TokenKind::Str(s),
+                Some(b'\\') => match self.bump() {
+                    Some(b'n') => s.push('\n'),
+                    Some(b't') => s.push('\t'),
+                    Some(b'r') => s.push('\r'),
+                    Some(b'\\') => s.push('\\'),
+                    Some(b'\'') => s.push('\''),
+                    Some(b'"') => s.push('"'),
+                    Some(b'0') => s.push('\0'),
+                    Some(other) => s.push(other as char),
+                    None => return TokenKind::Str(s),
+                },
+                Some(other) => s.push(other as char),
+            }
+        }
+    }
+
+    /// Lex a byte char literal `b'…'`, surfaced as `Char`.
+    fn lex_byte_char(&mut self) -> char {
+        let c = match self.bump() {
+            None => '\0',
+            Some(b'\\') => match self.bump() {
+                Some(b'n') => '\n',
+                Some(b't') => '\t',
+                Some(b'r') => '\r',
+                Some(b'\\') => '\\',
+                Some(b'\'') => '\'',
+                Some(b'"') => '"',
+                Some(b'0') => '\0',
+                Some(b'x') => char::from_u32(self.read_hex_escape(2)).unwrap_or('\u{FFFD}'),
+                Some(other) => other as char,
+                None => '\0',
+            },
+            Some(other) => other as char,
+        };
+        // Consume the closing quote so the following token isn't swallowed
+        // (previously left the `'` in the stream, corrupting the next token).
+        if self.peek_byte() == Some(b'\'') {
+            self.bump();
+        }
+        c
     }
 
     fn lex_ident_body(&mut self) -> String {
@@ -289,8 +453,32 @@ impl<'src> Lexer<'src> {
         TokenKind::Str(s)
     }
 
-    fn lex_char(&mut self) -> TokenKind {
+    /// Lex a `'…'` token. This is either a character literal (`'a'`, `'\n'`,
+    /// `'('`) or a lifetime (`'a`, `'src`, `'_`, `'static`). Lifetimes are an
+    /// artifact of the borrow checker, which the Phase-1 subset models
+    /// structurally, so they are dropped (return `None`) and the following token
+    /// is re-lexed. Real character literals are returned as `Some(Char(..))`.
+    fn lex_quote(&mut self) -> Option<TokenKind> {
         self.bump(); // opening quote
+        let Some(nb) = self.peek_byte() else {
+            return None;
+        };
+        if nb.is_ascii_alphabetic() || nb == b'_' {
+            // Either a single-char literal `'c'` or a lifetime `'name`.
+            let name = self.lex_ident_body();
+            if name.len() == 1 && self.peek_byte() == Some(b'\'') {
+                self.bump(); // closing quote
+                return Some(TokenKind::Char(name.chars().next().unwrap()));
+            }
+            // Lifetime: consume the whole `'name` and drop it. If it is a loop
+            // label (`'name:`), also drop the following `:` so the parser
+            // doesn't choke on a dangling colon (e.g. `'outer: for …`).
+            if self.peek_byte() == Some(b':') {
+                self.bump();
+            }
+            return None;
+        }
+        // Character literal whose body is an escape or a non-identifier char.
         let c = match self.bump() {
             None => '\0',
             Some(b'\\') => match self.bump() {
@@ -308,11 +496,10 @@ impl<'src> Lexer<'src> {
             },
             Some(other) => other as char,
         };
-        // consume closing quote if present
         if self.peek_byte() == Some(b'\'') {
             self.bump();
         }
-        TokenKind::Char(c)
+        Some(TokenKind::Char(c))
     }
 
     fn read_hex_escape(&mut self, count: usize) -> u32 {
@@ -480,6 +667,7 @@ fn keyword(name: &str) -> Option<TokenKind> {
         "unsafe" => Unsafe,
         "as" => As,
         "in" => In,
+        "impl" => Impl,
         "i8" => I8,
         "i16" => I16,
         "i32" => I32,

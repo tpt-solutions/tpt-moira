@@ -41,3 +41,7 @@ Thumbs.db
 
 # moira-diff AI triage queue (auto-generated local state)
 .moira-triage.jsonl
+
+# Release staging tree (python3 x.py dist) and recorded bench history
+/dist
+/moira-bench-results

@@ -60,6 +60,9 @@ pub enum Ty {
     /// A fixed-length array `[T; N]` (or an unsized slice `[T]` modelled with
     /// `N == 0`). Carries the element type and the (compile-time) length.
     Array(Box<Ty>, u128),
+    /// A tuple type `(T1, T2, …, Tn)`, produced by tuple literals and used in
+    /// patterns / return types across the compiler's own code.
+    Tuple(Vec<Ty>),
     /// Error sentinel.
     Unknown,
 }
@@ -171,6 +174,16 @@ impl fmt::Display for Ty {
                 write!(f, ">")
             }
             Ty::Array(t, n) => write!(f, "[{}; {}]", t, n),
+            Ty::Tuple(tys) => {
+                write!(f, "(")?;
+                for (i, t) in tys.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", t)?;
+                }
+                write!(f, ")")
+            }
             Ty::Unknown => write!(f, "<unknown>"),
         }
     }
