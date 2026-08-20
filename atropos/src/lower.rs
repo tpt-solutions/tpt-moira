@@ -9,7 +9,8 @@
 
 use crate::mir;
 use clotho::ast::{
-    self, BinOp as ABinOp, Expr, ExprKind, ItemKind, Pat, Program, Stmt, StmtKind, UnOp as AUnOp,
+    self, BinOp as ABinOp, Expr, ExprKind, ItemKind, Pat, Program, Stmt, StmtKind, TypeKind,
+    UnOp as AUnOp,
 };
 use std::collections::HashMap;
 use std::fmt;
@@ -74,7 +75,10 @@ pub fn lower_program(prog: &Program) -> Result<mir::Program> {
                     let mut l = Lower::new(&out.structs);
                     l.async_fns = async_names.clone();
                     let func = l.lower_function(f)?;
+                    let tuple_structs: Vec<mir::StructDef> =
+                        l.tuple_structs.values().cloned().collect();
                     out.functions.push(func);
+                    out.structs.extend(tuple_structs);
                 }
             }
             other => {
@@ -130,6 +134,22 @@ struct Lower {
     /// fns yield their future struct (`__ctor`) rather than running to
     /// completion (`__run`).
     expecting_future: bool,
+    /// Generated anonymous struct types backing tuple values, keyed by a
+    /// deterministic name derived from the component C types. Emitted into the
+    /// program's `structs` at the end of lowering.
+    tuple_structs: HashMap<String, mir::StructDef>,
+}
+
+/// Build a deterministic struct name for a tuple with the given component C
+/// types, e.g. `__tuple_i32_i64`. Empty component list (the unit value) is not
+/// modeled as a struct.
+fn tuple_struct_name(elem_c_tys: &[String]) -> String {
+    let mut name = String::from("__tuple");
+    for t in elem_c_tys {
+        name.push('_');
+        name.push_str(t.replace(' ', "_").replace('*', "p").as_str());
+    }
+    name
 }
 
 /// Bookkeeping for lowering an `async fn` into a suspending state machine.
@@ -164,10 +184,11 @@ impl Lower {
             async_fns: std::collections::HashSet::new(),
             async_ctx: None,
             expecting_future: false,
+            tuple_structs: HashMap::new(),
         }
     }
 
-    fn lower_function(mut self, f: &ast::Function) -> Result<mir::Function> {
+    fn lower_function(&mut self, f: &ast::Function) -> Result<mir::Function> {
         self.func.name = f.name.node.clone();
         self.func.ret = f.ret.as_ref().map(type_to_c);
         for p in &f.params {
@@ -192,7 +213,7 @@ impl Lower {
         // `tN`). Without this the map stays empty and temporaries are neither
         // typed nor declared in the C output.
         self.func.temp_types = self.types.clone();
-        Ok(self.func)
+        Ok(self.func.clone())
     }
 
     /// Lower an `async fn` into its state-machine MIR: a future struct, a `poll`
@@ -422,6 +443,26 @@ impl Lower {
             .unwrap_or_else(|| "long long".to_string())
     }
 
+    /// Return (creating if necessary) the generated struct type name for a tuple
+    /// whose components have the given C types. The struct definition (field
+    /// `f0`, `f1`, … of each component type) is recorded for emission into the
+    /// program's struct list.
+    fn tuple_type(&mut self, elem_c_tys: Vec<String>) -> String {
+        let name = tuple_struct_name(&elem_c_tys);
+        self.tuple_structs.entry(name.clone()).or_insert_with(|| {
+            let fields = elem_c_tys
+                .iter()
+                .enumerate()
+                .map(|(i, t)| (format!("f{}", i), t.clone()))
+                .collect();
+            mir::StructDef {
+                name: name.clone(),
+                fields,
+            }
+        });
+        name
+    }
+
     /// Lower a block, returning the operand holding its value (tail expression
     /// or `()` when there is none).
     fn lower_block_value(&mut self, b: &ast::Block) -> Result<mir::Operand> {
@@ -437,6 +478,11 @@ impl Lower {
     fn lower_stmt(&mut self, s: &Stmt) -> Result<()> {
         match &s.kind {
             StmtKind::Local(local) => {
+                // Tuple destructuring `let (a, b, ..) = init;` binds each
+                // identifier in the pattern to the matching tuple component.
+                if matches!(local.pat, Pat::Tuple(_)) {
+                    return self.lower_tuple_destructure(local);
+                }
                 let name = pat_name(&local.pat)?;
                 // An array-literal initializer binds the local as an array
                 // declaration directly. C cannot assign arrays by value, so we
@@ -466,6 +512,23 @@ impl Lower {
                         ExprKind::Struct(path, _, _) => {
                             path.segments.last().map(|s| s.node.clone())
                         }
+                        ExprKind::Tuple(elems) => {
+                            // Infer the generated struct type for the tuple shape
+                            // so field access (`p.0`) resolves to the right type.
+                            let c_tys: Vec<String> = elems
+                                .iter()
+                                .map(|e| {
+                                    // Best-effort element C type from the
+                                    // initializer; constants default to i64.
+                                    match &e.kind {
+                                        ExprKind::Lit(ast::Lit::Int(..)) => "long long".to_string(),
+                                        ExprKind::Lit(ast::Lit::Bool(_)) => "int".to_string(),
+                                        _ => "long long".to_string(),
+                                    }
+                                })
+                                .collect();
+                            Some(self.tuple_type(c_tys))
+                        }
                         _ => None,
                     },
                     (None, None) => None,
@@ -476,6 +539,11 @@ impl Lower {
                 // paper over the redeclaration.
                 if !self.func.locals.iter().any(|(n, _)| n == &name) {
                     self.func.locals.push((name.clone(), ty.clone()));
+                }
+                // Record the local's type so `temp_type_of`/`p.0` resolution works
+                // for locals as well as temporaries.
+                if let Some(t) = &ty {
+                    self.types.insert(name.clone(), t.clone());
                 }
                 if let Some(init) = &local.init {
                     let v = self.lower_expr(init)?;
@@ -491,6 +559,140 @@ impl Lower {
                 "nested items are not supported in the codegen subset".into(),
             )),
         }
+    }
+
+    /// Lower `let (a, b, ..) = init;` — bind each identifier in the tuple pattern
+    /// to the matching component of the initializer. Tuple-literal RHSs are
+    /// decomposed element-wise (each component lowered directly into its binding);
+    /// any other RHS is lowered once into a tuple value and each binding reads its
+    /// generated `.fN` field. An optional explicit tuple-type annotation supplies
+    /// the per-element C types.
+    fn lower_tuple_destructure(&mut self, local: &ast::Local) -> Result<()> {
+        let elems = match &local.pat {
+            Pat::Tuple(e) => e,
+            _ => unreachable!("lower_tuple_destructure called on a non-tuple pattern"),
+        };
+        let ann_elems: Option<Vec<String>> = match &local.ty {
+            Some(t) if matches!(t.kind, TypeKind::Tuple(_)) => {
+                if let TypeKind::Tuple(ts) = &t.kind {
+                    Some(ts.iter().map(type_to_c).collect())
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+        // Tuple-literal RHS: lower each component directly into its binding.
+        if let Some(ExprKind::Tuple(inits)) = local.init.as_ref().map(|e| &e.kind) {
+            if inits.len() != elems.len() {
+                return Err(LowerError(
+                    "tuple pattern / initializer arity mismatch".into(),
+                ));
+            }
+            for (i, pat) in elems.iter().enumerate() {
+                let name = match pat {
+                    Pat::Ident(n) => n.node.clone(),
+                    Pat::Wild => continue,
+                    _ => {
+                        return Err(LowerError(
+                            "only identifier/wildcard elements are supported in `let` tuple patterns"
+                                .into(),
+                        ))
+                    }
+                };
+                let v = self.lower_expr(&inits[i])?;
+                let ct = ann_elems
+                    .as_ref()
+                    .and_then(|a| a.get(i).cloned())
+                    .unwrap_or_else(|| self.temp_type_of(&name_of(&v)));
+                if !self.func.locals.iter().any(|(n, _)| n == &name) {
+                    self.func.locals.push((name.clone(), Some(ct.clone())));
+                }
+                self.types.insert(name.clone(), ct);
+                self.emit(name.clone(), mir::Rvalue::Use(v));
+            }
+            return Ok(());
+        }
+        // Otherwise lower the whole RHS once into a tuple value `o`.
+        let o = match &local.init {
+            Some(e) => self.lower_expr(e)?,
+            None => {
+                return Err(LowerError(
+                    "`let` tuple pattern requires an initializer".into(),
+                ))
+            }
+        };
+        let base_ty = self.temp_type_of(&name_of(&o));
+        for (i, pat) in elems.iter().enumerate() {
+            let name = match pat {
+                Pat::Ident(n) => n.node.clone(),
+                Pat::Wild => continue,
+                _ => {
+                    return Err(LowerError(
+                        "only identifier/wildcard elements are supported in `let` tuple patterns"
+                            .into(),
+                    ))
+                }
+            };
+            let ct = ann_elems
+                .as_ref()
+                .and_then(|a| a.get(i).cloned())
+                .or_else(|| {
+                    self.tuple_structs
+                        .get(&base_ty)
+                        .and_then(|s| s.fields.get(i))
+                        .map(|(_, t)| t.clone())
+                })
+                .unwrap_or_else(|| "long long".to_string());
+            if !self.func.locals.iter().any(|(n, _)| n == &name) {
+                self.func.locals.push((name.clone(), Some(ct.clone())));
+            }
+            self.types.insert(name.clone(), ct);
+            self.emit(
+                name.clone(),
+                mir::Rvalue::Field(o.clone(), format!("f{i}"), false),
+            );
+        }
+        Ok(())
+    }
+
+    /// Bind a `for`/loop pattern to a per-iteration element value. A single
+    /// identifier binds directly; a tuple pattern `for (a, b) in arr` reads each
+    /// element's `.fN` field from the tuple-typed `elem`.
+    fn lower_bind_pattern(&mut self, pat: &ast::Pat, elem: mir::Operand, elem_ct: &str) -> Result<()> {
+        if let ast::Pat::Tuple(elems) = pat {
+            for (i, e) in elems.iter().enumerate() {
+                let name = match e {
+                    ast::Pat::Ident(n) => n.node.clone(),
+                    ast::Pat::Wild => continue,
+                    _ => {
+                        return Err(LowerError(
+                            "only identifier/wildcard elements are supported in `for` tuple patterns"
+                                .into(),
+                        ))
+                    }
+                };
+                let ct = self
+                    .tuple_structs
+                    .get(elem_ct)
+                    .and_then(|s| s.fields.get(i))
+                    .map(|(_, t)| t.clone())
+                    .unwrap_or_else(|| "long long".to_string());
+                if !self.func.locals.iter().any(|(n, _)| n == &name) {
+                    self.func.locals.push((name.clone(), Some(ct.clone())));
+                }
+                self.types.insert(name.clone(), ct);
+                self.emit(name, mir::Rvalue::Field(elem.clone(), format!("f{i}"), false));
+            }
+            return Ok(());
+        }
+        let name = pat_name(pat)?;
+        if !self.func.locals.iter().any(|(n, _)| n == &name) {
+            self.func.locals.push((name.clone(), Some(elem_ct.to_string())));
+        }
+        self.types.insert(name.clone(), elem_ct.to_string());
+        self.emit(name, mir::Rvalue::Use(elem));
+        Ok(())
     }
 
     /// Lower `for <name> in <start>..(<end>[, inclusive]) { <body> }` into a
@@ -664,6 +866,21 @@ impl Lower {
             ExprKind::Field(base, field) => {
                 let o = self.lower_expr(base)?;
                 let base_ty = self.temp_type_of(&name_of(&o));
+                // Tuple-index access `t.0`: the base type is a generated
+                // `__tuple_*` struct and the field name is a numeric index; map
+                // it to the corresponding `fN` field and look up its C type.
+                if base_ty.starts_with("__tuple") && field.node.parse::<usize>().is_ok() {
+                    let idx: usize = field.node.parse().unwrap();
+                    let field_ty = self
+                        .tuple_structs
+                        .get(&base_ty)
+                        .and_then(|s| s.fields.get(idx))
+                        .map(|(_, t)| t.clone())
+                        .unwrap_or_else(|| "long long".to_string());
+                    let t = self.fresh_temp(field_ty);
+                    self.emit(t.clone(), mir::Rvalue::Field(o, format!("f{idx}"), false));
+                    return Ok(mir::Operand::var(t));
+                }
                 let field_ty = lookup_field_type(&self.structs, base_ty.as_str(), &field.node)
                     .unwrap_or_else(|| "long long".to_string());
                 let t = self.fresh_temp(field_ty);
@@ -739,8 +956,9 @@ impl Lower {
             ExprKind::For(pat, iter, body) => {
                 // Desugar `for pat in iter { ... }`. The iterator is either a
                 // range `a..b` (iterate `i` over `[a, b)`) or an array (iterate
-                // `pat` over `arr[0..len]` via an index variable).
-                let name = pat_name(pat)?;
+                // `pat` over `arr[0..len]` via an index variable). `pat` may be a
+                // tuple pattern (`for (a, b) in arr_of_tuples`), in which case each
+                // element is destructured into its components.
                 let array_len: Option<i128> = match &iter.kind {
                     ExprKind::Array(elems) => Some(elems.len() as i128),
                     ExprKind::Path(p) => {
@@ -755,9 +973,11 @@ impl Lower {
                 };
                 match &iter.kind {
                     ExprKind::Binary(l, ABinOp::Range, r) => {
+                        let name = pat_name(pat)?;
                         self.lower_range_for(l, r, false, &name, body)
                     }
                     ExprKind::Range(Some(l), Some(r), inclusive) => {
+                        let name = pat_name(pat)?;
                         self.lower_range_for(l, r, *inclusive, &name, body)
                     }
                     _ if array_len.is_some() => {
@@ -766,9 +986,19 @@ impl Lower {
                         // resolves to the variable; an array literal lowers to an
                         // inline `long long tN[len] = {..};` temp).
                         let arr_op = self.lower_expr(iter)?;
-                        self.func
-                            .locals
-                            .push((name.clone(), Some("long long".into())));
+                        // Element C type: for an array literal, infer it from the
+                        // first element (so tuple-element arrays bind to the right
+                        // component types); otherwise default to `long long`.
+                        let elem_ct = if let ExprKind::Array(elems) = &iter.kind {
+                            if !elems.is_empty() {
+                                let e0 = self.lower_expr(&elems[0])?;
+                                self.temp_type_of(&name_of(&e0))
+                            } else {
+                                "long long".into()
+                            }
+                        } else {
+                            "long long".into()
+                        };
                         let idx = self.fresh_temp("long long");
                         self.emit(idx.clone(), mir::Rvalue::Use(mir::Operand::Const(0)));
 
@@ -795,11 +1025,13 @@ impl Lower {
 
                         self.current = body_blk;
                         self.loops.push((exit, head));
-                        // pat = arr[idx]
+                        // Bind `pat` to `arr[idx]` (single name or tuple destructure).
+                        let elem = self.fresh_temp(elem_ct.clone());
                         self.emit(
-                            name.clone(),
+                            elem.clone(),
                             mir::Rvalue::Index(arr_op.clone(), mir::Operand::var(idx.clone())),
                         );
+                        self.lower_bind_pattern(pat, mir::Operand::var(elem), &elem_ct)?;
                         self.lower_block_value(body)?;
                         self.loops.pop();
                         // idx = idx + 1
@@ -852,7 +1084,7 @@ impl Lower {
                 self.current = self.new_block();
                 Ok(mir::Operand::Unit)
             }
-            ExprKind::Match(..) => Err(LowerError("`match` is not in the codegen subset".into())),
+            ExprKind::Match(scrutinee, arms) => self.lower_match(scrutinee, arms),
             ExprKind::MethodCall(recv, method, args) => {
                 // Lower `recv.method(args)` to a plain call `method(recv, args)`;
                 // the receiver becomes the first operand. This lets type-checked
@@ -903,7 +1135,26 @@ impl Lower {
                 Ok(mir::Operand::var(t))
             }
             ExprKind::Macro(..) => Err(LowerError("macros are not in the codegen subset".into())),
-            ExprKind::Tuple(..) => Err(LowerError("tuples are not in the codegen subset".into())),
+            ExprKind::Tuple(elems) => {
+                // Build a tuple value: lower each element, derive its C type
+                // (constants fall back to `long long`), register the generated
+                // struct type for this shape, and emit a `Tuple` rvalue.
+                let mut operands = Vec::with_capacity(elems.len());
+                let mut c_tys = Vec::with_capacity(elems.len());
+                for e in elems {
+                    let o = self.lower_expr(e)?;
+                    let ct = match &o {
+                        mir::Operand::Var(n) => self.temp_type_of(n),
+                        _ => "long long".to_string(),
+                    };
+                    c_tys.push(ct);
+                    operands.push(o);
+                }
+                let tuple_ty = self.tuple_type(c_tys);
+                let t = self.fresh_temp(tuple_ty.clone());
+                self.emit(t.clone(), mir::Rvalue::Tuple(tuple_ty, operands));
+                Ok(mir::Operand::var(t))
+            }
             ExprKind::Try(..) => Err(LowerError(
                 "the `?` operator is not in the codegen subset".into(),
             )),
@@ -1178,6 +1429,215 @@ impl Lower {
 
         self.current = exit;
         Ok(mir::Operand::Unit)
+    }
+
+    /// Lower `match scrutinee { pat => body, .. }` into a chain of conditional
+    /// blocks. Each arm's pattern guards entry into its body: identifier / wild /
+    /// path / ref / or-patterns are irrefutable (always taken), and literal
+    /// patterns lower to an equality comparison against the scrutinee. Pattern
+    /// bindings (identifier in `Ident`/`Tuple`) are assigned the scrutinee (or
+    /// the matching tuple element) before the body runs. The match value is the
+    /// aggregated arm-body value, like `if`/`else`.
+    fn lower_match(
+        &mut self,
+        scrutinee: &Expr,
+        arms: &[(ast::Pat, Expr)],
+    ) -> Result<mir::Operand> {
+        let scrut_op = self.lower_expr(scrutinee)?;
+        let result = self.fresh_temp("long long");
+        let merge = self.new_block();
+
+        let mut next_test = self.new_block();
+        self.set_term(mir::Terminator::Goto(next_test));
+
+        for (pat, body) in arms {
+            let test_blk = next_test;
+            self.current = test_blk;
+            let (cond, binds): (Option<mir::Operand>, Vec<(String, mir::Operand)>) =
+                self.pattern_guard(&scrut_op, pat)?;
+            match cond {
+                Some(c) => {
+                    let body_blk = self.new_block();
+                    next_test = self.new_block();
+                    self.set_term(mir::Terminator::If(c, body_blk, next_test));
+                    self.current = body_blk;
+                }
+                None => {
+                    // Irrefutable (ident / `_` / path / or) — fall straight through.
+                    next_test = self.new_block();
+                    self.set_term(mir::Terminator::Goto(next_test));
+                    // `next_test` is the *following* arm's test; the body runs in a
+                    // block we create now and then jumps to `next_test`.
+                    let body_blk = self.new_block();
+                    self.set_term(mir::Terminator::Goto(body_blk));
+                    self.current = body_blk;
+                }
+            }
+            // Emit bound pattern names (assigned the scrutinee / element value).
+            for (name, val) in binds {
+                if !self.func.locals.iter().any(|(n, _)| n == &name) {
+                    self.func.locals.push((name.clone(), Some("long long".into())));
+                }
+                self.emit(name, mir::Rvalue::Use(val));
+            }
+            let v = self.lower_expr(body)?;
+            self.emit(result.clone(), mir::Rvalue::Use(v));
+            self.set_term(mir::Terminator::Goto(merge));
+        }
+
+        // The final fall-through block (no arm matched): yield unit.
+        self.current = next_test;
+        self.emit(result.clone(), mir::Rvalue::Use(mir::Operand::Unit));
+        self.set_term(mir::Terminator::Goto(merge));
+
+        self.current = merge;
+        Ok(mir::Operand::var(result))
+    }
+
+    /// Build the guard condition and binding assignments for a pattern against the
+    /// scrutinee operand. Returns `(None, binds)` for irrefutable patterns (the
+    /// arm is always taken) or `(Some(cond), binds)` for a literal comparison.
+    fn pattern_guard(
+        &mut self,
+        scrut: &mir::Operand,
+        pat: &ast::Pat,
+    ) -> Result<(Option<mir::Operand>, Vec<(String, mir::Operand)>)> {
+        match pat {
+            ast::Pat::Ident(n) => Ok((
+                None,
+                vec![(n.node.clone(), scrut.clone())],
+            )),
+            ast::Pat::Wild => Ok((None, Vec::new())),
+            ast::Pat::Ref(inner) => self.pattern_guard(scrut, inner),
+            ast::Pat::Or(a, b) => {
+                // `a | b`: take arm if either sub-pattern matches. We lower this to
+                // `(a matches) || (b matches)` by computing each guard; bindings
+                // from either side are assigned the scrutinee (names must be
+                // identical across the or-pattern for this to be sound).
+                let (ca, ba) = self.pattern_guard(scrut, a)?;
+                let (cb, bb) = self.pattern_guard(scrut, b)?;
+                let cond = match (ca, cb) {
+                    (Some(x), Some(y)) => {
+                        let t = self.fresh_temp("long long");
+                        self.emit(
+                            t.clone(),
+                            mir::Rvalue::Binary(mir::BinOp::Or, x, y),
+                        );
+                        Some(mir::Operand::var(t))
+                    }
+                    (Some(x), None) | (None, Some(x)) => Some(x),
+                    (None, None) => None,
+                };
+                let mut binds = ba;
+                binds.extend(bb);
+                Ok((cond, binds))
+            }
+            ast::Pat::Lit(lit) => {
+                let lit_op = self.lower_lit_operand(lit);
+                let t = self.fresh_temp("long long");
+                self.emit(
+                    t.clone(),
+                    mir::Rvalue::Binary(mir::BinOp::Eq, scrut.clone(), lit_op),
+                );
+                Ok((Some(mir::Operand::var(t)), Vec::new()))
+            }
+            ast::Pat::Range(lo, hi, inclusive) => {
+                // `lo..hi` / `lo..=hi` / `..hi` / `lo..` / `..`. Lower to the
+                // conjunction `scrut >= lo && scrut <= hi` (with the upper bound
+                // `<` for the exclusive `..` form). Each bound must be a literal.
+                let mut conds: Vec<mir::Operand> = Vec::new();
+                if let Some(lo_pat) = lo {
+                    if let ast::Pat::Lit(l) = &**lo_pat {
+                        let lo_op = self.lower_lit_operand(l);
+                        let t = self.fresh_temp("long long");
+                        self.emit(
+                            t.clone(),
+                            mir::Rvalue::Binary(mir::BinOp::Ge, scrut.clone(), lo_op),
+                        );
+                        conds.push(mir::Operand::var(t));
+                    } else {
+                        return Err(LowerError(
+                            "range pattern lower bound must be a literal".into(),
+                        ));
+                    }
+                }
+                if let Some(hi_pat) = hi {
+                    if let ast::Pat::Lit(l) = &**hi_pat {
+                        let hi_op = self.lower_lit_operand(l);
+                        let op = if *inclusive {
+                            mir::BinOp::Le
+                        } else {
+                            mir::BinOp::Lt
+                        };
+                        let t = self.fresh_temp("long long");
+                        self.emit(
+                            t.clone(),
+                            mir::Rvalue::Binary(op, scrut.clone(), hi_op),
+                        );
+                        conds.push(mir::Operand::var(t));
+                    } else {
+                        return Err(LowerError(
+                            "range pattern upper bound must be a literal".into(),
+                        ));
+                    }
+                }
+                let cond = match conds.len() {
+                    0 => None,
+                    1 => Some(conds.pop().unwrap()),
+                    _ => {
+                        let mut acc = conds[0].clone();
+                        for c in &conds[1..] {
+                            let t = self.fresh_temp("long long");
+                            self.emit(
+                                t.clone(),
+                                mir::Rvalue::Binary(mir::BinOp::And, acc, c.clone()),
+                            );
+                            acc = mir::Operand::var(t);
+                        }
+                        Some(acc)
+                    }
+                };
+                Ok((cond, Vec::new()))
+            }
+            ast::Pat::Tuple(elems) => {
+                // Bind each identifier element to a field projection of the
+                // scrutinee tuple. The pattern is irrefutable (always taken).
+                let mut binds = Vec::new();
+                for (i, e) in elems.iter().enumerate() {
+                    if let ast::Pat::Ident(n) = e {
+                        let t = self.fresh_temp("long long");
+                        self.emit(
+                            t.clone(),
+                            mir::Rvalue::Field(scrut.clone(), format!("f{i}"), false),
+                        );
+                        binds.push((n.node.clone(), mir::Operand::var(t)));
+                    }
+                }
+                Ok((None, binds))
+            }
+            ast::Pat::Path(_) | ast::Pat::Struct(_, _) => Err(LowerError(
+                "this match pattern is not supported in the codegen subset".into(),
+            )),
+            ast::Pat::Bind(name, sub) => {
+                // `name @ subpat`: build the guard from the sub-pattern and also
+                // bind `name` to the whole scrutinee (irrefutably).
+                let (sub_cond, mut sub_binds) = self.pattern_guard(scrut, sub)?;
+                sub_binds.push((name.clone(), scrut.clone()));
+                Ok((sub_cond, sub_binds))
+            }
+        }
+    }
+
+    /// Lower a literal pattern to a constant operand.
+    fn lower_lit_operand(&mut self, lit: &ast::Lit) -> mir::Operand {
+        match lit {
+            ast::Lit::Int(v, _) => mir::Operand::Const(*v as i128),
+            ast::Lit::Bool(b) => mir::Operand::Const(if *b { 1 } else { 0 }),
+            ast::Lit::Char(c) => mir::Operand::Const(*c as i128),
+            // Strings/other literals are not yet backed by data in the codegen
+            // subset; lower to zero (type-checked programs still lower).
+            _ => mir::Operand::Const(0),
+        }
     }
 
     fn lower_loop(&mut self, cond: Option<&Expr>, body: &ast::Block) -> Result<mir::Operand> {
@@ -1462,6 +1922,7 @@ fn pat_name(p: &Pat) -> Result<String> {
     match p {
         Pat::Ident(n) => Ok(n.node.clone()),
         Pat::Wild => Ok("_".to_string()),
+        Pat::Bind(n, _) => Ok(n.clone()),
         Pat::Path(path) => Ok(path
             .segments
             .last()

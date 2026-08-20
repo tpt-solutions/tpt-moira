@@ -340,3 +340,185 @@ fn for_over_array_lowers_to_index_loop() {
     });
     assert!(has_index, "for-over-array should lower to an Index rvalue");
 }
+
+#[test]
+fn tuple_lowers_to_generated_struct() {
+    // `(a, b)` must lower to a generated `__tuple_*` struct literal, and `t.0`
+    // / `t.1` to `.f0` / `.f1` field access on that struct.
+    let mir = lower_src("fn main() { let p = (3, 4); let s = p.0 + p.1; print_i64(s); }");
+    let c = atropos::codegen_c::emit_c(&mir);
+    assert!(c.contains("struct __tuple_"), "tuple should lower to a struct:\n{c}");
+    assert!(c.contains(".f0 = 3"), "tuple element 0 should map to .f0:\n{c}");
+    assert!(c.contains(".f1 = 4"), "tuple element 1 should map to .f1:\n{c}");
+    assert!(c.contains("p.f0"), "tuple index 0 should lower to p.f0:\n{c}");
+    assert!(c.contains("p.f1"), "tuple index 1 should lower to p.f1:\n{c}");
+}
+
+#[test]
+fn tuple_destructure_lowers_and_runs() {
+    // `let (a, b) = (x, y)` must bind each element to a local, then the body can
+    // use them. Compiles + runs via a real C compiler.
+    let out = match run_src(
+        "fn main() {
+            let (a, b) = (3, 4);
+            let s = a + b;
+            print_i64(s);
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping tuple-destructure run");
+            return;
+        }
+    };
+    assert_eq!(out, "7", "expected 3+4 = 7 from destructured tuple");
+}
+
+#[test]
+fn tuple_destructure_from_call_lowers_and_runs() {
+    // Destructure a tuple returned by a call (RHS is not a literal).
+    let out = match run_src(
+        "fn pair() -> (i64, i64) { (10, 20) }
+         fn main() {
+            let (x, y) = pair();
+            print_i64(x + y);
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping tuple-destructure-call run");
+            return;
+        }
+    };
+    assert_eq!(out, "30", "expected 10+20 = 30 from destructured call result");
+}
+
+#[test]
+fn tuple_destructure_literal_lowers_to_direct_assignments() {
+    // A tuple-literal RHS is decomposed element-wise: each binding is declared and
+    // assigned its component directly (no intermediate struct value).
+    let mir = lower_src("fn main() { let (a, b) = (1, 2); let _ = a + b; }");
+    let c = atropos::codegen_c::emit_c(&mir);
+    assert!(c.contains("a = 1"), "first binding should be assigned directly:\n{c}");
+    assert!(c.contains("b = 2"), "second binding should be assigned directly:\n{c}");
+}
+
+#[test]
+fn range_pattern_lowers_to_comparison_and_runs() {
+    // `match x { 0..=9 => 1, _ => 0 }` must lower the inclusive range arm to a
+    // bounded comparison and run correctly for in-range and out-of-range values.
+    let in_range = match run_src(
+        "fn main() {
+            let x = 5;
+            let r = match x { 0..=9 => 1, _ => 0 };
+            print_i64(r);
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping range-pattern run");
+            return;
+        }
+    };
+    assert_eq!(in_range, "1", "5 is within 0..=9");
+    let out_of_range = match run_src(
+        "fn main() {
+            let x = 20;
+            let r = match x { 0..=9 => 1, _ => 0 };
+            print_i64(r);
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping range-pattern run");
+            return;
+        }
+    };
+    assert_eq!(out_of_range, "0", "20 is outside 0..=9");
+}
+
+#[test]
+fn exclusive_and_open_range_patterns_run() {
+    // Exclusive upper bound (`0..3`) and open lower bound (`2..`) behave correctly.
+    let out = match run_src(
+        "fn classify(n: i64) -> i64 {
+            match n {
+                0..3 => 1,
+                3.. => 2,
+                _ => 0,
+            }
+        }
+        fn main() { print_i64(classify(2)); print_i64(classify(7)); }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping open-range run");
+            return;
+        }
+    };
+    assert_eq!(out, "1\n2", "2 in [0,3) -> 1; 7 in [3,) -> 2");
+}
+
+#[test]
+fn for_over_tuple_array_destructures_and_runs() {
+    // `for (a, b) in [(1, 2), (3, 4)]` must bind each tuple element per iteration.
+    let out = match run_src(
+        "fn main() {
+            let mut total = 0;
+            for (a, b) in [(1, 2), (3, 4)] {
+                total = total + a + b;
+            }
+            print_i64(total);
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping for-tuple-destructure run");
+            return;
+        }
+    };
+    assert_eq!(out, "10", "expected (1+2)+(3+4) = 10");
+}
+
+#[test]
+fn for_over_tuple_array_lowers_to_field_reads() {
+    // The array-of-tuples element binds each component from its `.fN` field.
+    let mir = lower_src(
+        "fn f() { for (a, b) in [(1, 2), (3, 4)] { let _ = a + b; } }",
+    );
+    let c = atropos::codegen_c::emit_c(&mir);
+    assert!(c.contains("struct __tuple_"), "tuple array element needs a struct type:\n{c}");
+    assert!(c.contains(".f0"), "first component must be read via .f0:\n{c}");
+}
+
+#[test]
+fn match_lowers_to_conditional_chain() {
+    // `match x { 1 => 10, 2 => 20, _ => 99 }` must lower to an equality-test
+    // chain (`Eq x, 1` / `Eq x, 2`) driving `if`/`else` blocks, with the `_`
+    // arm taken unconditionally.
+    let mir = lower_src(
+        "fn main() {
+            let x = 2;
+            let r = match x {
+                1 => 10,
+                2 => 20,
+                _ => 99,
+            };
+            print_i64(r);
+        }",
+    );
+    let main = mir.functions.iter().find(|f| f.name == "main").unwrap();
+    let has_eq = main.blocks.iter().any(|b| {
+        b.stmts
+            .iter()
+            .any(|s| matches!(s.rvalue, atropos::mir::Rvalue::Binary(atropos::mir::BinOp::Eq, _, _)))
+    });
+    assert!(has_eq, "match literal arms should lower to Eq comparisons");
+    // The wildcard arm is irrefutable — at least one `goto` (not an `if`) into an
+    // arm body.
+    let has_if = main
+        .blocks
+        .iter()
+        .any(|b| matches!(b.term, atropos::mir::Terminator::If(..)));
+    assert!(has_if, "match should contain If terminators");
+}

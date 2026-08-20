@@ -11,8 +11,8 @@
 use crate::traits::{BuiltinTrait, TraitDb};
 use crate::ty::Ty;
 use clotho::ast::{
-    BinOp, Block, Expr, ExprKind, Generics, Lit, Local, Pat, Path, StmtKind, Type, TypeBound,
-    TypeKind, UnOp,
+    BinOp, Block, Expr, ExprKind, Generics, Lit, Local, Param, Pat, Path, StmtKind, Type,
+    TypeBound, TypeKind, UnOp,
 };
 use clotho::error::Diag;
 use clotho::token::Span;
@@ -286,8 +286,19 @@ impl TypeChecker {
                     } else {
                         Ty::Unit
                     };
-                    let name = pat_name(&l.pat);
-                    self.env.last_mut().unwrap().insert(name, ty);
+                    // Bind the pattern (identifier, tuple-of-identifiers, wild,
+                    // ref) into the block scope. `bind_pattern` handles tuple
+                    // destructuring (`let (a, b) = t`) by binding each element to
+                    // the matching `Ty::Tuple` component.
+                    if let Err(msg) = self.check_pattern(&l.pat) {
+                        let span = l
+                            .init
+                            .as_ref()
+                            .map(|i| i.span)
+                            .unwrap_or_else(Span::default);
+                        self.err(span, msg);
+                    }
+                    self.bind_pattern(&l.pat, &ty);
                 }
                 StmtKind::Semi(e) | StmtKind::Expr(e) => {
                     self.infer_expr(e);
@@ -303,6 +314,153 @@ impl TypeChecker {
         };
         self.env.pop();
         ty
+    }
+
+    /// Type-check a `match` expression. The scrutinee's type is inferred, then
+    /// each arm binds its pattern into the arm-body scope and type-checks the
+    /// body. The match's result type is the first arm body's type; every other
+    /// arm must be compatible with it (mirroring `if`/`else` aggregation).
+    ///
+    /// Supported patterns in the type-checked subset: identifier (`x` — binds the
+    /// whole scrutinee), wildcard (`_`), literal (`42`, `"s"`, `'c'`, `true`),
+    /// path/unit-variant (`None`, `Foo`), or-patterns (`A | B`), and tuple
+    /// patterns of identifiers (`(a, b)` — binds each element). Unsupported
+    /// patterns (enum tuple/struct variant destructuring) are rejected with a
+    /// precise diagnostic.
+    fn infer_match(
+        &mut self,
+        span: Span,
+        scrutinee: &Expr,
+        arms: &[(Pat, Expr)],
+    ) -> Ty {
+        let _scrut_ty = self.infer_expr(scrutinee);
+        let mut result_ty = Ty::Unknown;
+        let mut first = true;
+        for (pat, body) in arms {
+            if let Err(msg) = self.check_pattern(pat) {
+                self.err(span, msg);
+            }
+            // Bind pattern names into a fresh arm scope.
+            self.env.push(HashMap::new());
+            self.bind_pattern(pat, &_scrut_ty);
+            let arm_ty = self.infer_expr(body);
+            self.env.pop();
+            if first {
+                result_ty = arm_ty.clone();
+                first = false;
+            } else if !self.compatible(&result_ty, &arm_ty) {
+                self.err(
+                    span,
+                    format!(
+                        "match arm type mismatch: expected {}, found {}",
+                        result_ty, arm_ty
+                    ),
+                );
+            }
+        }
+        if first {
+            // No arms — degenerate; treat as unit.
+            Ty::Unit
+        } else {
+            result_ty
+        }
+    }
+
+    /// Validate that a pattern's shape is supported by the type-checked subset,
+    /// returning an error message for unsupported patterns.
+    fn check_pattern(&self, pat: &Pat) -> Result<(), String> {
+        match pat {
+            Pat::Ident(_) | Pat::Wild | Pat::Lit(_) | Pat::Path(_) | Pat::Ref(_) => Ok(()),
+            Pat::Or(a, b) => {
+                self.check_pattern(a)?;
+                self.check_pattern(b)
+            }
+            Pat::Tuple(elems) => {
+                for e in elems {
+                    if !matches!(e, Pat::Ident(_) | Pat::Wild) {
+                        return Err(
+                            "tuple patterns with non-identifier elements are not yet supported"
+                                .to_string(),
+                        );
+                    }
+                }
+                Ok(())
+            }
+            Pat::Struct(_, _) => Err(
+                "struct/variant patterns are not yet supported in the type-checked subset"
+                    .to_string(),
+            ),
+            Pat::Range(..) => Ok(()),
+            Pat::Bind(_, sub) => self.check_pattern(sub),
+        }
+    }
+
+    /// Bind the names introduced by a pattern into the current scope. The bound
+    /// type is the scrutinee's type for identifier/wildcard patterns, the element
+    /// type for each element of a tuple pattern, and `Ty::Unit` for unit-variant
+    /// / literal / ref patterns (which do not introduce usable bindings).
+    fn bind_pattern(&mut self, pat: &Pat, scrut_ty: &Ty) {
+        match pat {
+            Pat::Ident(n) => {
+                self.env.last_mut().unwrap().insert(n.node.clone(), scrut_ty.clone());
+            }
+            Pat::Wild => {}
+            Pat::Ref(inner) => self.bind_pattern(inner, scrut_ty),
+            Pat::Or(a, b) => {
+                self.bind_pattern(a, scrut_ty);
+                self.bind_pattern(b, scrut_ty);
+            }
+            Pat::Tuple(elems) => {
+                if let Ty::Tuple(tys) = scrut_ty {
+                    for (e, t) in elems.iter().zip(tys.iter()) {
+                        if let Pat::Ident(n) = e {
+                            self.env.last_mut().unwrap().insert(n.node.clone(), t.clone());
+                        }
+                    }
+                }
+            }
+            Pat::Lit(_) | Pat::Path(_) | Pat::Struct(_, _) | Pat::Range(..) => {}
+            Pat::Bind(name, sub) => {
+                self.env
+                    .last_mut()
+                    .unwrap()
+                    .insert(name.clone(), scrut_ty.clone());
+                self.bind_pattern(sub, scrut_ty);
+            }
+        }
+    }
+
+    /// Type-check a closure `|params| body` (or `|params| -> Ret body`).
+    ///
+    /// Parameters are typed from their annotations (falling back to the `i32`
+    /// default for inference), the body is checked in a scope binding each
+    /// parameter, and the closure's type is the function type
+    /// `(param_tys) -> ret_ty`. Capture analysis and MIR/codegen of closures
+    /// remain a later Phase-4 deliverable; this accepts closures at the
+    /// type-check level so the compiler builds and the subset can grow toward
+    /// them.
+    fn check_closure(
+        &mut self,
+        _span: Span,
+        params: &[Param],
+        ret: &Option<Type>,
+        body: &Expr,
+    ) -> Ty {
+        let mut param_tys = Vec::with_capacity(params.len());
+        self.env.push(HashMap::new());
+        for p in params {
+            let pt = self.type_to_ty(&p.ty);
+            param_tys.push(pt.clone());
+            let name = pat_name(&p.pat);
+            self.env.last_mut().unwrap().insert(name, pt);
+        }
+        let body_ty = self.infer_expr(body);
+        let ret_ty: Ty = match ret {
+            Some(r) => self.type_to_ty(r),
+            None => body_ty.clone(),
+        };
+        self.env.pop();
+        Ty::Fn(param_tys, Box::new(ret_ty))
     }
 
     /// Type-check `if let pat = init { then } else { else }` (and its `while let`
@@ -497,8 +655,13 @@ impl TypeChecker {
                         Ty::Unknown
                     }
                 };
-                let name = pat_name(pat);
-                self.env.last_mut().unwrap().insert(name, elem_ty);
+                // Bind the pattern (`x`, or `(a, b)` for iterating an array of
+                // tuples) into the loop body scope. `bind_pattern` handles the
+                // tuple case by binding each element to the array's element type.
+                if let Err(msg) = self.check_pattern(pat) {
+                    self.err(span, msg);
+                }
+                self.bind_pattern(pat, &elem_ty);
                 self.infer_block(body);
                 Ty::Unit
             }
@@ -512,12 +675,8 @@ impl TypeChecker {
                 Ty::Unit
             }
             ExprKind::Break | ExprKind::Continue => Ty::Unit,
-            ExprKind::Match(..) => {
-                self.err(
-                    span,
-                    "`match` is not in the type-checked subset".to_string(),
-                );
-                Ty::Unknown
+            ExprKind::Match(scrutinee, arms) => {
+                self.infer_match(span, scrutinee, arms)
             }
             ExprKind::MethodCall(recv, method, args) => self.check_method(span, recv, method, args),
             ExprKind::Array(elems) => {
@@ -582,12 +741,8 @@ impl TypeChecker {
                 }
             }
             ExprKind::Unsafe(b) => self.infer_block(b),
-            ExprKind::Closure { .. } => {
-                self.err(
-                    span,
-                    "closures are not in the type-checked subset".to_string(),
-                );
-                Ty::Unknown
+            ExprKind::Closure { params, ret, body } => {
+                self.check_closure(span, params, ret, body)
             }
             ExprKind::Macro(..) => {
                 self.err(
@@ -851,6 +1006,16 @@ impl TypeChecker {
                 },
                 None => {
                     self.err(span, format!("unknown struct `{}`", s));
+                    Ty::Unknown
+                }
+            },
+            Ty::Tuple(elems) => match field.node.parse::<usize>() {
+                Ok(idx) if idx < elems.len() => elems[idx].clone(),
+                _ => {
+                    self.err(
+                        span,
+                        format!("no field `{}` on tuple type `{}`", field.node, bt),
+                    );
                     Ty::Unknown
                 }
             },
@@ -1335,8 +1500,10 @@ impl TypeChecker {
                 Ty::Array(Box::new(self.type_to_ty(inner)), *n)
             }
             TypeKind::Slice(inner) => Ty::Array(Box::new(self.type_to_ty(inner)), 0),
+            TypeKind::Tuple(elems) => {
+                Ty::Tuple(elems.iter().map(|e| self.type_to_ty(e)).collect())
+            }
             TypeKind::Infer => Ty::Int,
-            _ => Ty::Unknown,
         }
     }
 
@@ -1388,6 +1555,10 @@ impl TypeChecker {
             | (Ty::RefMut(x), Ty::Ref(y))
             | (Ty::RefMut(x), Ty::RefMut(y)) => self.compatible(x, y),
             (Ty::Array(a, _), Ty::Array(b, _)) => self.compatible(a, b),
+            (Ty::Tuple(a), Ty::Tuple(b)) => {
+                a.len() == b.len()
+                    && a.iter().zip(b).all(|(x, y)| self.compatible(x, y))
+            }
             (Ty::Ref(_), _) | (Ty::RefMut(_), _) => false,
             (Ty::Struct(x), Ty::Struct(y)) => x == y,
             (Ty::Apply(x, _), Ty::Apply(y, _)) => x == y,
@@ -1404,7 +1575,6 @@ impl TypeChecker {
 
     fn expect(&mut self, a: &Ty, b: &Ty, span: Span) {
         if !self.compatible(a, b) {
-            eprintln!("DBG expect mismatch a={:?} b={:?}", a, b);
             self.err(span, format!("type mismatch: expected {}, found {}", b, a));
         }
     }
@@ -1479,6 +1649,7 @@ fn pat_name(pat: &Pat) -> String {
     match pat {
         Pat::Ident(n) => n.node.clone(),
         Pat::Wild => "_".to_string(),
+        Pat::Bind(n, _) => n.clone(),
         Pat::Path(path) => path
             .segments
             .last()

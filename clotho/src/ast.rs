@@ -271,6 +271,9 @@ pub enum Pat {
     /// A range pattern: `a..b`, `a..=b`, `..b`, `a..`, or a `..` rest pattern.
     /// Operands are `None` when elided; the `bool` is `true` for inclusive.
     Range(Option<Box<Pat>>, Option<Box<Pat>>, bool),
+    /// A binding pattern `name @ subpat`: binds `name` to the matched value while
+    /// also matching `subpat` (e.g. `x @ 1..=9`, `p @ Point { .. }`).
+    Bind(String, Box<Pat>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

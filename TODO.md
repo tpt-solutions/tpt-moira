@@ -386,12 +386,100 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
             `for_over_array_lowers_to_index_loop`) — all compile + run via a real
             C compiler — and by `lachesis/tests/lachesis.rs`
             (`for_over_array_is_type_checked`).
-    - [ ] `mod` declarations / multi-file module resolution
-    - [ ] Fix the unclosed-delimiter parse failure in a `lib.rs` test file
+    - [x] `mod` declarations / multi-file module resolution
+          - **Status: Resolved.** `clotho::compile_file` resolves `mod name;`
+            (`ModuleKind::External`) into the sibling `name.rs` (or `name/mod.rs`)
+            via `flatten_modules` in `clotho/src/lib.rs`; inline `mod { .. }` is
+            already flattened. The driver wires source files through
+            `compile_file`, so the frontend parses the compiler's own crate
+            layout. The remaining self-host gap is the type checker / codegen
+            (not module resolution).
+    - [x] Fix the unclosed-delimiter parse failure in a `lib.rs` test file
+          - **Status: Resolved.** All crate `lib.rs` / root files now tokenize
+            and parse cleanly (no unclosed-delimiter errors). The remaining
+            parse-stage failures on the compiler's own source are type-check
+            depth issues (`expected expression, found :`/`=>` on generic/
+            `match`-pattern syntax), not delimiter mismatches — see the
+            `match` / generics / closures tasks below. The driver routes real
+            source files through `clotho::compile_file`, which recursively
+            flattens `mod` declarations.
     - [ ] Re-run `x.py self-host` probe after each fix and track crate-by-crate parse pass/fail in `docs/SELF_HOSTING.md`
   - [ ] **Type checker / MIR: support constructs the compiler's own source uses**
-    - [ ] Tuple values end-to-end (`lachesis::infer` typing + `atropos` MIR lowering + codegen)
-    - [ ] `match` expressions in `lachesis::infer` + MIR lowering (beyond the existing `Pat::Path` derive-macro subset)
+    - [x] Tuple values end-to-end (`lachesis::infer` typing + `atropos` MIR lowering + codegen)
+          - **Status: Resolved (construction + numeric field access).** Tuple
+            literals `(a, b, ..)` and numeric field access `t.0` now work
+            end-to-end on the C backend. `lachesis::infer` already inferred
+            `Ty::Tuple`; `check_field` now resolves `t.0`/`t.1` to the element
+            type and rejects out-of-range indices. `atropos::lower` lowers
+            `ExprKind::Tuple` to a generated anonymous `struct __tuple_<ctys>`
+            (`Rvalue::Tuple`), records the struct into the MIR, and maps field
+            access `t.N` to `.fN`; `codegen_c` emits the struct def and the
+            `(struct __tuple_..){ .f0 = .. }` literal. Validated by
+            `lachesis/tests/lachesis.rs` (`tuple_values_type_check`) and
+            `atropos/tests/codegen.rs` (`tuple_lowers_to_generated_struct`).
+            The native ASM backend does not model tuples yet (it rejects
+            `Rvalue::Tuple`); that is the documented Stage-4 follow-up.
+            - Remaining: tuple-pattern destructuring in `for (x, y) in ..` for
+              *`let`-bound* (non-literal) arrays of tuples — literal array-of-tuples
+              destructuring is now resolved (see below); the `Pat::Tuple` parse path
+              exists; the binding lowering for non-literal arrays is not yet wired.
+            - [x] Tuple-pattern destructuring in `for (x, y) in array_of_tuples`
+              (the `Pat::Tuple` parser path already existed; the binding is now wired
+              end-to-end for array literals)
+              - **Status: Resolved (array-literal tuples).** `lachesis::infer::infer_block`
+                now binds a `for` pattern via `check_pattern` + `bind_pattern`, so
+                `for (a, b) in [(1, 2), (3, 4)]` binds each component to the array's
+                element type. `atropos::lower` routes the per-iteration element
+                through the new `lower_bind_pattern`, which reads each component from
+                the element's generated `.fN` field (`Rvalue::Field`). The loop-var
+                type is now derived from the array element (so tuple-element arrays
+                bind correctly) instead of being hardcoded to `long long`.
+                Validated by `lachesis::tests::for_over_tuple_array_destructure_type_checks`
+                and `atropos::tests::codegen::{for_over_tuple_array_destructures_and_runs,
+                for_over_tuple_array_lowers_to_field_reads}`.
+            - [x] Tuple-pattern destructuring in `let (a, b) = ..` (the `Pat::Tuple`
+              parser path already existed; the binding is now wired end-to-end)
+              - **Status: Resolved.** `lachesis::infer::infer_block` now runs the
+                local pattern through `check_pattern` + `bind_pattern` (which already
+                handled `Pat::Tuple` for `match`), so `let (a, b) = t` binds each
+                component to its `Ty::Tuple` element type. `atropos::lower` gained
+                `lower_tuple_destructure`: a tuple-literal RHS is decomposed
+                element-wise (`a = 1; b = 2;`), while any other RHS is lowered once
+                into a tuple value and each binding reads its generated `.fN` field.
+                `type_to_ty` now maps `TypeKind::Tuple` (so `let (a, b): (i32, i32) =
+                ..` is honored) and `compatible` compares tuples element-wise.
+                Validated by `lachesis::tests::tuple_destructure_type_checks` and
+                `atropos::tests::codegen::{tuple_destructure_lowers_and_runs,
+                tuple_destructure_from_call_lowers_and_runs,
+                tuple_destructure_literal_lowers_to_direct_assignments}`.
+    - [x] `match` expressions in `lachesis::infer` + MIR lowering (beyond the existing `Pat::Path` derive-macro subset)
+          - **Status: Resolved (common subset).** `lachesis::infer` now type-checks
+            `match` via `infer_match`: the scrutinee is inferred, each arm's
+            pattern binds its names into the arm-body scope (`bind_pattern`
+            handles `Ident`/`Wild`/`Ref`/`Or`/`Tuple` of identifiers), and arm
+            bodies aggregate to a common result type (rejecting mismatches).
+             Unsupported patterns (`Struct`) are rejected with a precise
+             diagnostic. `atropos::lower` lowers `match` to a conditional chain
+             (`lower_match` + `pattern_guard`): literal arms become `Eq`
+             comparisons driving `If`/`else` blocks; identifier / wildcard / path /
+             or / tuple-pattern arms are irrefutable and bind the scrutinee (or
+             tuple element `fN`) before the body; **range arms** (`lo..hi`,
+             `lo..=hi`, `lo..`, `..hi`, `..`) become bounded `>=`/`<=`/`>`/`<`
+             comparisons combined with `&&`. Validated by
+             `lachesis/tests/lachesis.rs` (`match_expressions_type_check`,
+             `range_patterns_type_check`) and `atropos/tests/codegen.rs`
+             (`match_lowers_to_conditional_chain`,
+             `range_pattern_lowers_to_comparison_and_runs`,
+             `exclusive_and_open_range_patterns_run`).
+            Output is cross-process byte-identical
+            (`tests/determinism.rs`).
+           - **Caveat:** enum-variant destructuring patterns (`Some(x)`,
+             `Ok(x)`) are not yet supported (the `Pat::Path` node is treated as an
+             irrefutable binder, not a variant test) — that remains the enum
+             destructuring follow-up; struct/tuple-variant field patterns are
+             rejected. A `match` may also be a tail/return expression (the parser
+             was fixed to treat a trailing `match` like an `if`-as-tail rather than
+             always forcing a `;` statement).
     - [x] `if let` / `while let` in the type checker and MIR (parser support already landed — see Phase-2 "Resolved" note above)
           - **Status: Resolved (identifier patterns).** `lachesis::infer` now detects
             the `If(Block{Local})` / `While(Block{Local})` shape (how the parser
@@ -409,10 +497,22 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
           - **Caveat:** enum-variant patterns (`Some(x)`, `Ok(x)`) are not yet
             supported — that is the `match`/enum destructuring task below.
     - [ ] Closures: parsing, capture typing, and MIR/codegen lowering
+          - **Status: Partial (type-check acceptance).** The parser already
+            recognized `|params| body`; the type checker previously failed to
+            compile because `infer_expr` called an unimplemented `check_closure`.
+            `lachesis::infer::check_closure` now exists: parameters are typed from
+            their annotations (defaulting to `i32`), the body is checked in a scope
+            binding each parameter, and the closure's type is the function type
+            `Ty::Fn(param_tys, ret_ty)`. Capture analysis and MIR/codegen of
+            closures remain open (the C/native backends do not yet lower
+            `ExprKind::Closure`).
     - [ ] Full generics + `where`-clause solving wired into `infer` for real (non-toy) generic code
     - [ ] Wire the Chalk-like trait solver (`lachesis::solver`) into `infer`'s method-resolution path so trait-object/generic-bound method calls in the compiler's own code resolve
   - [ ] **Coverage tracking**
-    - [ ] Re-run `x.py self-host` after each milestone above; update the crate-by-crate self-hostable count (currently 0/5, blocked by generics `<` and `mod` parsing gaps)
+    - [ ] Re-run `x.py self-host` after each milestone above; update the crate-by-crate self-hostable count (the `mod` and generics-`<` parse gaps are resolved — remaining blockers are type-check depth: `match`/closures/generics-in-`infer`/tuple-destructure)
+          - Note: `x.py` is unavailable without Python in this environment, so the
+            crate-by-crate probe cannot be re-run here; parse/type-check status is
+            reflected directly in `docs/SELF_HOSTING.md`'s "Open" section.
     - [ ] Once a crate parses + type-checks, attempt full codegen and record pass/fail per crate in `docs/SELF_HOSTING.md`
   - [x] Bootstrap build script wiring the three crates (like `x.py`) — `x.py`
         orchestrates Stage-0 host build + Stage-1 self-host readiness probe

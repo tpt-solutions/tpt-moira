@@ -888,6 +888,19 @@ impl Parser {
     }
 
     fn parse_stmt(&mut self) -> ParseResult<Stmt> {
+        // A label `'label:` is lexed as a dropped lifetime followed by a
+        // standalone `:`; skip that `:` so a labeled loop/block parses.
+        if self.peek_kind() == &TokenKind::Colon
+            && matches!(
+                self.tokens.get(self.pos + 1).map(|t| &t.kind),
+                Some(TokenKind::Loop)
+                    | Some(TokenKind::While)
+                    | Some(TokenKind::For)
+                    | Some(TokenKind::LBrace)
+            )
+        {
+            self.bump();
+        }
         match self.peek_kind() {
             TokenKind::Let => {
                 let local = self.parse_local(true)?;
@@ -911,8 +924,7 @@ impl Parser {
             | TokenKind::Continue
             | TokenKind::While
             | TokenKind::Loop
-            | TokenKind::For
-            | TokenKind::Match => {
+            | TokenKind::For => {
                 let e = self.parse_expr()?;
                 self.eat(&TokenKind::Semicolon);
                 Ok(Stmt {
@@ -1058,6 +1070,12 @@ impl Parser {
                     }
                 }
                 let path = Path { segments };
+                // Binding pattern `name @ subpat` (e.g. `x @ 1..=9`): bind `name`
+                // to the matched value while also matching `subpat`.
+                if self.eat(&TokenKind::At) {
+                    let sub = self.parse_pat()?;
+                    return Ok(Pat::Bind(name.node.clone(), Box::new(sub)));
+                }
                 // Consume an optional tuple/struct payload so variant patterns
                 // with fields parse, whether qualified (`Foo::Bar(x)`) or not
                 // (`Some(a)`, `Ok(v)`, `Err(e)`, `Point { x, y }`).
@@ -1388,6 +1406,14 @@ impl Parser {
 
     fn parse_atom(&mut self, allow_struct: bool) -> ParseResult<Expr> {
         let start = self.peek().span.start;
+        // Skip a label marker (see `parse_stmt`): `'label:` lexes to a dropped
+        // lifetime plus a standalone `:`, and a labeled block (`'a: { .. }`) is
+        // parsed here as an expression.
+        if self.peek_kind() == &TokenKind::Colon
+            && self.tokens.get(self.pos + 1).map(|t| &t.kind) == Some(&TokenKind::LBrace)
+        {
+            self.bump();
+        }
         let expr = match self.peek_kind().clone() {
             TokenKind::Unsafe => {
                 return self.parse_unsafe_block();

@@ -118,6 +118,10 @@ pub enum Rvalue {
     Array(String, Vec<Operand>),
     /// Array indexing `base[idx]` — reads `base[idx]` into the destination.
     Index(Operand, Operand),
+    /// Tuple literal `(e0, e1, …)` of the named tuple-struct type `tuple_ty`.
+    /// Each tuple shape (arity + component C types) maps to one generated
+    /// `struct` definition in [`Program::structs`]; see [`crate::lower`].
+    Tuple(String, Vec<Operand>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -297,6 +301,10 @@ impl fmt::Display for Rvalue {
                 write!(f, "[{}; {}]", ty, es.join(", "))
             }
             Rvalue::Index(b, i) => write!(f, "{}[{}]", b, i),
+            Rvalue::Tuple(ty, elems) => {
+                let es: Vec<String> = elems.iter().map(|e| e.to_string()).collect();
+                write!(f, "tuple {} {{ {} }}", ty, es.join(", "))
+            }
         }
     }
 }

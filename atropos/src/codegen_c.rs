@@ -261,6 +261,14 @@ fn emit_rvalue(rv: &mir::Rvalue) -> String {
         }
         mir::Rvalue::Ref(o, _) => format!("&{}", emit_operand(o)),
         mir::Rvalue::Index(b, i) => format!("{}[{}]", emit_operand(b), emit_operand(i)),
+        mir::Rvalue::Tuple(ty, elems) => {
+            let inits: Vec<String> = elems
+                .iter()
+                .enumerate()
+                .map(|(i, e)| format!(".f{} = {}", i, emit_operand(e)))
+                .collect();
+            format!("(struct {}){{ {} }}", ty, inits.join(", "))
+        }
         mir::Rvalue::Cast(o, ty) => format!("({}){}", ty, emit_operand(o)),
         mir::Rvalue::StoreField(s, f, v, deref) => {
             if *deref {

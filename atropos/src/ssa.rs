@@ -174,10 +174,10 @@ fn build_function(f: &mir::Function) -> Result<SsaFunction, String> {
                 }
                 // Arrays and indexing are emitted only by the C backend; the
                 // from-scratch native backend does not model array layout.
-                mir::Rvalue::Array(..) | mir::Rvalue::Index(..) => {
+                mir::Rvalue::Array(..) | mir::Rvalue::Index(..) | mir::Rvalue::Tuple(..) => {
                     return Err(
-                        "the native backend does not support arrays/indexing (use the C backend, \
-                         `--emit c`)"
+                        "the native backend does not support arrays/indexing/tuples (use the C \
+                          backend, `--emit c`)"
                             .to_string(),
                     )
                 }

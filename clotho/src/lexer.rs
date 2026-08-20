@@ -128,11 +128,7 @@ impl<'src> Lexer<'src> {
 
             let kind = match b {
             b'0'..=b'9' => self.lex_number(),
-            b'a'..=b'z' | b'A'..=b'Z' | b'_' | b'@'
-                if b == b'@' || b.is_ascii_alphanumeric() || b == b'_' =>
-            {
-                self.lex_ident_or_keyword()
-            }
+            b'a'..=b'z' | b'A'..=b'Z' | b'_' => self.lex_ident_or_keyword(),
             b'"' => self.lex_string(),
             b'\'' => match self.lex_quote() {
                 Some(k) => k,

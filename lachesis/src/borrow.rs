@@ -328,6 +328,7 @@ fn operands_of(rv: &Rvalue) -> Vec<String> {
         }
         Rvalue::Call(_, args) => args.iter().flat_map(names).collect(),
         Rvalue::StructLit(_, fields) => fields.iter().flat_map(|(_, o)| names(o)).collect(),
+        Rvalue::Tuple(_, elems) => elems.iter().flat_map(names).collect(),
         // `StoreField` only appears in the `async fn` state-machine MIR, which is
         // generated for the C backend; the borrow checker still runs over the
         // whole MIR, so it must be exhaustive here (it never reads a stored

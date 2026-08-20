@@ -157,8 +157,10 @@ cascade into the type-checker / MIR lowers (the documented full-self-host wall).
 - **moira-alloc**: **parses fully** — type-check still reports borrow/type errors
   (subset does not model the allocator's raw-pointer patterns yet).
 - **clotho**: `lexer.rs` ~byte 4217 `expected =>, found ..` — an inclusive range
-  **pattern** `b'0'..=b'9'` in a `match` arm; `..`/`..=` patterns and range
-  expressions (`tts[..idx]`, `&sig.params[1..]`) are not yet modeled.
+   **pattern** `b'0'..=b'9'` in a `match` arm; **range patterns are now modeled**
+   (see `Pat::Range` support in `lachesis::infer` + `atropos::lower::pattern_guard`),
+   so this blocker is resolved at the type-check + codegen level. Still open: range
+   **expressions** (`tts[..idx]`, `&sig.params[1..]` slice indexing) are not yet modeled.
 - **atropos**: `lower.rs` ~byte 6652 `expected :, found ,` — a struct/enum field
   list the parser diverges on (likely a tuple/enum-variant field or a
   type-ascription `:` edge case).
@@ -171,11 +173,30 @@ cascade into the type-checker / MIR lowers (the documented full-self-host wall).
 ### Broader remaining gaps (the real self-host wall)
 Parsing is now the *easy* part; the remaining gate is the **type checker and
 code generator**, which still reject most of the compiler's own code:
-- [ ] Tuple **values** end-to-end: `ExprKind::Tuple` + inference (`Ty::Tuple`) +
-      MIR construction/destructure + C/native codegen (`(a, b)`, `for (x, y) in`,
-      returning tuples)
-- [ ] `match` / `if let` / closures accepted by `lachesis::infer` + lowered to MIR
-      (today `Match` is rejected with "not in the type-checked subset")
+- [x] Tuple **values** end-to-end (construction + numeric field access):
+      `ExprKind::Tuple` + inference (`Ty::Tuple`) + MIR construction
+      (`Rvalue::Tuple` → generated `struct __tuple_*`) + C codegen
+      (`(a, b)`, `t.0`/`t.1`). Validated by `lachesis`/`infer.rs` and
+      `atropos`/`codegen_c.rs` tests. The native ASM backend does not model
+      tuples yet.
+- [x] Tuple **destructure** in `let (a, b) = ..` (the `Pat::Tuple` parser path
+       existed; `lachesis::infer` + `atropos::lower` now bind each component —
+       validated by `tuple_destructure_*` tests). `for (x, y) in ..` destructuring
+       is now also resolved for array-of-tuples (each component is read from the
+       element's `.fN` field — validated by `for_over_tuple_array_*` tests); only
+       `let`-bound (non-literal) array-of-tuples destructuring remains.
+- [x] Closures type-check acceptance — `lachesis::infer::check_closure` now
+       exists (the type checker previously failed to compile because it referenced
+       the unimplemented method); closures are accepted at the type level. Capture
+       analysis and MIR/codegen of closures remain open.
+- [x] `match` accepted by `lachesis::infer` + lowered to MIR (common subset:
+       literal / wildcard / identifier / ref / or / tuple-of-identifiers patterns;
+       enum-variant destructuring `Some(x)` is still treated as an irrefutable
+       binder, not a variant test). `if let` / `while let` were already resolved
+       (identifier patterns); **closures remain unimplemented**.
+       A `match` can also be a tail/return expression (the parser now treats it
+       like `if`/`while`-as-tail rather than always forcing a `;` statement).
+- [ ] Closures: parsing, capture typing, and MIR/codegen lowering
 - [ ] Generics in the type checker (the subset parses them but does not solve
       them), plus `where`-clause lowering
 - [ ] `Vec` / `Option` / `Result` + `?` propagation as real, checked types

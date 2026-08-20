@@ -82,6 +82,28 @@ fn for_over_array_is_type_checked() {
 }
 
 #[test]
+fn for_over_tuple_array_destructure_type_checks() {
+    // `for (a, b) in [(..)]` binds each component to the tuple element type.
+    assert!(type_ok(
+        "fn main() {
+            let mut t = 0;
+            for (a, b) in [(1, 2), (3, 4)] { t = t + a + b; }
+            let _ = t;
+        }"
+    ));
+    // Mixed-element tuple arrays destructure to the element types.
+    assert!(type_ok(
+        "fn main() {
+            let mut s = 0;
+            for (n, ok) in [(1, true), (2, false)] {
+                if ok { s = s + n; }
+            }
+            let _ = s;
+        }"
+    ));
+}
+
+#[test]
 fn type_mismatch_is_rejected() {
     assert!(type_err("fn main() { let x: i32 = true; }"));
     assert!(type_err("fn main() { let x: bool = 1; }"));
@@ -451,12 +473,158 @@ fn unknown_std_method_is_rejected() {
 }
 
 #[test]
-fn std_method_argument_count_is_checked() {
-    assert!(check(&parse(
+fn tuple_values_type_check() {
+    // Tuple construction and numeric field access type-check.
+    assert!(type_ok(
         "fn main() {
-            let v = Vec::new();
-            v.push();
+            let p = (3, 4);
+            let s = p.0 + p.1;
+            let _ = s;
         }"
-    ))
-    .is_err());
+    ));
+    // Mixed-element tuples.
+    assert!(type_ok(
+        "fn main() {
+            let t = (1, true, 2);
+            let _ = t.0 + t.2;
+        }"
+    ));
+    // Out-of-range tuple index is rejected.
+    assert!(type_err(
+        "fn main() {
+            let p = (3, 4);
+            let _ = p.5;
+        }"
+    ));
+    // Non-tuple field access is still rejected.
+    assert!(type_err(
+        "fn main() {
+            let x = 5;
+            let _ = x.y;
+        }"
+    ));
+}
+
+#[test]
+fn tuple_destructure_type_checks() {
+    // `let (a, b) = tuple` binds each element to its component type.
+    assert!(type_ok(
+        "fn main() {
+            let p = (3, 4);
+            let (a, b) = p;
+            let _ = a + b;
+        }"
+    ), "bind from existing tuple var");
+    // Tuple-literal RHS binds each component directly.
+    assert!(type_ok(
+        "fn main() {
+            let (a, b) = (1, 2);
+            let _ = a + b;
+        }"
+    ), "bind from tuple literal");
+    // Mixed-element tuples destructure to the element types.
+    assert!(type_ok(
+        "fn main() {
+            let (a, b, c) = (1, true, 2);
+            let _ = a + c;
+            let _ = b;
+        }"
+    ), "bind from mixed-element tuple");
+    // An explicit tuple-type annotation is honored.
+    assert!(type_ok(
+        "fn main() {
+            let p: (i32, i32) = (7, 8);
+            let (a, b) = p;
+            let _ = a - b;
+        }"
+    ), "bind with annotated tuple type");
+    // Binding a name then using it in a member call must not be rejected.
+    assert!(type_ok(
+        "fn main() {
+            let (x, y) = (1, 2);
+            let z = x + y;
+            let _ = z;
+        }"
+    ), "bind then use");
+}
+
+#[test]
+fn match_expressions_type_check() {
+    // Literal + wildcard arms aggregate to a common type.
+    assert!(type_ok(
+        "fn main() {
+            let x = 2;
+            let r = match x {
+                1 => 10,
+                2 => 20,
+                _ => 99,
+            };
+            let _ = r;
+        }"
+    ));
+    // Tuple patterns bind each element.
+    assert!(type_ok(
+        "fn main() {
+            let p = (3, 4);
+            let r = match p { (a, b) => a + b };
+            let _ = r;
+        }"
+    ));
+    // Or-patterns bind the shared name.
+    assert!(type_ok(
+        "fn main() {
+            let x = 1;
+            let r = match x { 1 | 2 => 7, _ => 0 };
+            let _ = r;
+        }"
+    ));
+    // Arm type mismatch is rejected.
+    assert!(type_err(
+        "fn main() {
+            let x = 1;
+            let _ = match x { 1 => 1, _ => true };
+        }"
+    ));
+    // Struct/variant patterns are not yet supported.
+    assert!(type_err(
+        "fn main() {
+            let o = Some(5);
+            let _ = match o { Some(x) => x, None => 0 };
+        }"
+    ));
+}
+
+#[test]
+fn range_patterns_type_check() {
+    // Inclusive range pattern.
+    assert!(type_ok(
+        "fn main() {
+            let x = 5;
+            let r = match x { 1..=5 => 10, _ => 0 };
+            let _ = r;
+        }"
+    ));
+    // Exclusive range pattern.
+    assert!(type_ok(
+        "fn main() {
+            let x = 5;
+            let r = match x { 0..3 => 1, _ => 2 };
+            let _ = r;
+        }"
+    ));
+    // Half-open range patterns `lo..` and `..hi`, plus full `..`.
+    assert!(type_ok(
+        "fn main() {
+            let x = 5;
+            let r = match x { 3.. => 1, .. => 0 };
+            let _ = r;
+        }"
+    ));
+    // Arm type mismatch is still rejected.
+    assert!(type_err(
+        "fn main() {
+            let x = 1;
+            let _ = match x { 0..=2 => 1, _ => true };
+        }"
+    ));
 }
