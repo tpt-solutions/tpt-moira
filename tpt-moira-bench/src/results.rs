@@ -16,7 +16,13 @@ pub const DEFAULT_RESULTS_DIR: &str = "moira-bench-results";
 pub struct Entry {
     pub program: String,
     pub moira_ms: Option<f64>,
+    /// The C-compiler baseline time (compiling Moira's generated C), if requested.
+    pub cc_ms: Option<f64>,
     pub rustc_ms: Option<f64>,
+    /// Geometric-mean helper: speedup of the C compiler over Moira
+    /// (`cc_ms / moira_ms`), if both are present.
+    pub cc_speedup: Option<f64>,
+    /// Speedup of `rustc` over Moira (`rustc_ms / moira_ms`), if both present.
     pub speedup: Option<f64>,
 }
 
@@ -133,9 +139,14 @@ pub fn serialize_run(run: &RunRecord) -> String {
     }
     for e in &run.entries {
         let m = opt(e.moira_ms);
+        let c = opt(e.cc_ms);
         let r = opt(e.rustc_ms);
+        let csp = opt(e.cc_speedup);
         let sp = opt(e.speedup);
-        s.push_str(&format!("e={},{},{},{}\n", e.program, m, r, sp));
+        s.push_str(&format!(
+            "e={},{},{},{},{},{}\n",
+            e.program, m, c, r, csp, sp
+        ));
     }
     s.push('\n');
     s
@@ -186,12 +197,14 @@ pub fn parse_history(text: &str) -> Vec<RunRecord> {
             "geomean" => rec.geomean = val.parse().ok(),
             "e" => {
                 let parts: Vec<&str> = val.split(',').collect();
-                if parts.len() == 4 {
+                if parts.len() == 6 {
                     rec.entries.push(Entry {
                         program: parts[0].to_string(),
                         moira_ms: parse_f64(parts[1]),
-                        rustc_ms: parse_f64(parts[2]),
-                        speedup: parse_f64(parts[3]),
+                        cc_ms: parse_f64(parts[2]),
+                        rustc_ms: parse_f64(parts[3]),
+                        cc_speedup: parse_f64(parts[4]),
+                        speedup: parse_f64(parts[5]),
                     });
                 }
             }
@@ -306,7 +319,9 @@ mod tests {
         Entry {
             program: program.to_string(),
             moira_ms: Some(moira),
+            cc_ms: Some(moira * 3.0),
             rustc_ms: Some(moira * 2.0),
+            cc_speedup: Some(3.0),
             speedup: Some(2.0),
         }
     }

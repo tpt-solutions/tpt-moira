@@ -259,10 +259,14 @@ pub enum Pat {
     /// A literal pattern, e.g. `"--emit"`, `42`, `'c'`, or `true`.
     Lit(Lit),
     Tuple(Vec<Pat>),
-    /// A path/variant pattern, e.g. `Foo`, `Self::Bar`, or `ns::Baz`. Tuple and
-    /// struct variant payloads are parsed but (per the Phase-1 approximation)
-    /// represented here only by the path.
+    /// A path/variant pattern, e.g. `Foo`, `Self::Bar`, or `ns::Baz` (no payload).
     Path(Path),
+    /// A tuple-variant pattern with a payload, e.g. `Some(x)`, `Ok(v)`,
+    /// `Err(e)`, or `Foo::Bar(a, b)`. The `Vec<Pat>` is the payload; a bare
+    /// unit-variant pattern like `None` uses `Path` instead. Struct-variant
+    /// patterns (`Foo::Bar { x }`) are still approximated by `Path` (payload
+    /// discarded) until struct-variant patterns land.
+    Variant(Path, Vec<Pat>),
     /// A reference pattern `&pat` (binds by reference).
     Ref(Box<Pat>),
     /// An or-pattern `pat | pat` (multiple patterns for one match arm).

@@ -501,33 +501,53 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
             compiler).
           - **Caveat:** enum-variant patterns (`Some(x)`, `Ok(x)`) are not yet
             supported — that is the `match`/enum destructuring task below.
-    - [ ] Closures: parsing, capture typing, and MIR/codegen lowering
-           - **Status: Partial (type-check acceptance + capture analysis).** The
-             parser already recognized `|params| body`; `tpt_moira_lachesis::infer::check_closure`
-             now exists: parameters are typed from their annotations (defaulting to
-             `i32`), the body is checked in a scope binding each parameter, and the
-             closure's type is the function type `Ty::Fn(param_tys, ret_ty)`.
-             **Capture analysis is now implemented** (`closure_free_vars` /
-             `bind_pat_names` in `tpt_moira_lachesis::infer`): the free variables the body
-             references from the enclosing environment are computed and, because the
-             C/native backends do not yet lower `ExprKind::Closure` with captures, a
-             closure that captures variables is rejected at type-check with a precise
-             diagnostic naming exactly the captured variables (e.g.
-             `closures that capture variables are not yet supported in the codegen
-             subset (captured: a, b)`). Non-capturing closures continue to be
-             accepted. Validated by the `infer` unit tests `non_capturing_closure_is_accepted`,
-             `closure_capturing_variable_is_rejected_with_precise_message`,
-             `closure_referencing_function_name_is_accepted`,
-             `closure_capturing_multiple_variables_lists_all`,
-             `nested_closure_capture_is_detected`. MIR/codegen lowering of closures
+     - [ ] Closures: parsing, capture typing, and MIR/codegen lowering
+            - **Parsing resolved (2026-08-21).** The parser did *not* actually
+              recognize closure bodies: `parse_pat` folded the closure's closing `|`
+              into a top-level OR-pattern (`|a| body` was read as the single pattern
+              `a | body`), so any closure with a body failed with "expected
+              expression". Fixed by splitting `parse_pat` into `parse_pat_single` (no
+              OR-pattern continuation) used for closure parameters, while `parse_pat`
+              keeps the OR-pattern loop for `match` arms. Closures with block bodies,
+              expression bodies, multiple params, trailing `-> Ret`, and closures
+              nested in call args (`map(|e| e + 1)`) now parse. Regression-covered by
+              `clotho::tests::frontend::parse_closures`.
+            - **Status: Partial (parsing + type-check acceptance + capture analysis).**
+              `tpt_moira_lachesis::infer::check_closure` exists: parameters are typed from their
+              annotations (defaulting to `i32`), the body is checked in a scope binding
+              each parameter, and the closure's type is the function type
+              `Ty::Fn(param_tys, ret_ty)`.
+              **Capture analysis is now implemented** (`closure_free_vars` /
+              `bind_pat_names` in `tpt_moira_lachesis::infer`): the free variables the body
+              references from the enclosing environment are computed and, because the
+              C/native backends do not yet lower `ExprKind::Closure` with captures, a
+              closure that captures variables is rejected at type-check with a precise
+              diagnostic naming exactly the captured variables (e.g.
+              `closures that capture variables are not yet supported in the codegen
+              subset (captured: a, b)`). Non-capturing closures continue to be
+              accepted. Validated by the `infer` unit tests `non_capturing_closure_is_accepted`,
+              `closure_capturing_variable_is_rejected_with_precise_message`,
+              `closure_referencing_function_name_is_accepted`,
+              `closure_capturing_multiple_variables_lists_all`,
+              `nested_closure_capture_is_detected`. MIR/codegen lowering of closures
              remains open.
     - [ ] Full generics + `where`-clause solving wired into `infer` for real (non-toy) generic code
     - [ ] Wire the Chalk-like trait solver (`tpt_moira_lachesis::solver`) into `infer`'s method-resolution path so trait-object/generic-bound method calls in the compiler's own code resolve
   - [ ] **Coverage tracking**
     - [ ] Re-run `x.py self-host` after each milestone above; update the crate-by-crate self-hostable count (the `mod` and generics-`<` parse gaps are resolved — remaining blockers are type-check depth: `match`/closures/generics-in-`infer`/tuple-destructure)
-          - Note: `x.py` is unavailable without Python in this environment, so the
-            crate-by-crate probe cannot be re-run here; parse/type-check status is
-            reflected directly in `docs/SELF_HOSTING.md`'s "Open" section.
+          - Status (2026-08-21): the `x.py self-host` probe was previously dead —
+            commit `4a55ae5` renamed the crates to `tpt-moira-*` but left the
+            driver binary as `tpt-moira` while `x.py`/`ci.yml`/`dist`/Homebrew still
+            referenced the old `moira` name and old crate dirs. Fixed: the
+            `[[bin]]` is named `moira` again and `x.py`'s `CRATES` paths point at
+            `tpt-moira-{alloc,clotho,atropos,lachesis}`. The probe now runs and
+            reports a *real* per-crate parse/check/codegen matrix (`0/5`
+            self-hostable, but **all five crates parse cleanly** — the two last
+            parse blockers, `impl FnMut(...) -> Ret` in type position and
+            block-bodied `match` arms followed by `(pat) =>` arms, were fixed this
+            session). Remaining gate is the type checker + code generator. Run with
+            `python x.py self-host` (use the `python` launcher; `python3` is the
+            Windows Store alias and is unavailable).
     - [ ] Once a crate parses + type-checks, attempt full codegen and record pass/fail per crate in `docs/SELF_HOSTING.md`
   - [x] Bootstrap build script wiring the three crates (like `x.py`) — `x.py`
         orchestrates Stage-0 host build + Stage-1 self-host readiness probe

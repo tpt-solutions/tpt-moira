@@ -273,6 +273,30 @@ fn parse_match_guards() {
 }
 
 #[test]
+fn parse_block_body_match_arm_followed_by_tuple_arm() {
+    // Regression: a `match` arm whose body is a block `{ .. }` must not treat the
+    // next arm's `(pat) =>` pattern as a function call (`block(args)`). A block is
+    // not callable in Rust, so the trailing `(` belongs to the following arm.
+    let src = "fn f() -> i32 {\n    let r = match (1, 1) {\n        (x, y) => { 1 }\n        (a, b) => 2,\n        _ => 0,\n    };\n    r\n}";
+    let prog = parse_source(src).unwrap();
+    assert_eq!(prog.items.len(), 1);
+    // The same shape with an OR-of-tuples arm (as in atropos/lower.rs).
+    let src2 = "fn g() -> i32 {\n    let r = match (1, 1) {\n        (Some(x), Some(y)) => { 1 }\n        (Some(x), None) | (None, Some(x)) => 2,\n        _ => 0,\n    };\n    r\n}";
+    let prog2 = parse_source(src2).unwrap();
+    assert_eq!(prog2.items.len(), 1);
+}
+
+#[test]
+fn parse_variant_pattern_with_payload() {
+    // Regression: tuple-variant patterns `Some(x)` / `Ok(v)` / `Err(e)` must
+    // parse with their payload retained (Previously the payload was discarded,
+    // so the bound name `x` was never produced). `Pat::Variant` now carries it.
+    let src = "fn f(o: i32) -> i32 {\n    match o {\n        Some(x) => x,\n        None => 0,\n    }\n}";
+    let prog = parse_source(src).unwrap();
+    assert_eq!(prog.items.len(), 1);
+}
+
+#[test]
 fn parse_impl_trait_in_type_position() {
     // Regression: `impl Trait` parameter/return types must parse. This is the
     // gating construct for `clotho`/`atropos` self-host; the subset models it as
@@ -324,4 +348,29 @@ fn parse_generic_type_alias() {
     let src = "type Pair<T> = (T, T); fn f() { let _: Pair<i32> = (1, 2); }";
     let prog = parse_source(src).unwrap();
     assert_eq!(prog.items.len(), 2);
+}
+
+#[test]
+fn parse_closures() {
+    // Regression: closure bodies (block or expression) must parse. The closure
+    // parameter list used to consume its own closing `|` as an OR-pattern
+    // separator (`|a| body` was read as the single pattern `a | body`), so any
+    // closure with a body failed with "expected expression". All of these now
+    // parse; the codegen subset still rejects closures at the MIR-lowering stage.
+    let cases = [
+        // Block body.
+        "fn f() { let g = |e| { let x = e + 1; x }; }",
+        // Expression body with a binary operator (the `|` must not swallow `+`).
+        "fn f() { let g = |e| e + 1; }",
+        // Multiple parameters.
+        "fn f() { let g = |a, b| a + b; }",
+        // Closure nested as a call argument.
+        "fn f() { let _ = (0..3).map(|e| e + 1); }",
+        // Explicit return type.
+        "fn f() { let g = |e| -> i32 { e }; }",
+    ];
+    for src in cases {
+        let prog = parse_source(src).expect("closure should parse");
+        assert_eq!(prog.items.len(), 1);
+    }
 }

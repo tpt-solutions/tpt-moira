@@ -16,15 +16,72 @@ failing the build.
 
 ## Current status
 
-Run `python3 x.py self-host` and read `build/self_host_report.md`. The probe
-reports, per crate: parse/check acceptance and C-backend codegen acceptance.
+Run `python x.py self-host` (the `python3` Store-alias is unavailable on
+Windows; use the `python` launcher) and read `build/self_host_report.md`. The
+probe reports, per crate: parse/check acceptance and C-backend codegen
+acceptance.
+
+**Probe health (2026-08-21):** the self-host probe was previously *dead* — commit
+`4a55ae5` renamed the workspace crates to `tpt-moira-*` but left the driver
+binary as `tpt-moira` while `x.py`/`ci.yml`/`dist`/Homebrew still referenced the
+old `moira` name and the old crate directory names. Both were fixed this
+session: the `[[bin]]` is once again named `moira` (matching every reference),
+and `x.py`'s `CRATES` entry points point at `tpt-moira-{alloc,clotho,atropos,lachesis}`.
+The probe now runs and produces a *real* per-crate parse/check/codegen report
+instead of "entry point not found".
+
+**Parse gate is closed for `clotho` and the driver; `lachesis`/`atropos` are
+parse-blocked on deeper constructs.** As of this session `clotho` and the driver
+parse cleanly (they now reach the type/borrow checker); `lachesis` and `atropos`
+advanced past their earlier parse errors but still hit a parse blocker further
+into their own source (a `)` and an `as`, respectively). Three parse blockers
+were fixed:
+
+- `impl FnMut(&mut Self) -> ParseResult<T>`-style closure trait types in type
+  position: the `impl Trait` parser consumed the `(args)` but not the `-> Ret`
+  return type, so the `->` leaked into the surrounding field/param. It now
+  consumes the optional `-> Ret` and trailing `+ Bound` (mirroring
+  `consume_fn_trait`).
+- A `match` arm whose body is a block `{ .. }` immediately followed by the next
+  arm's `(pat) =>` pattern was mis-parsed as a function call `block(args)`,
+  because `parse_postfix` treats a `(` after *any* primary as a call and a block
+  is not callable in Rust. `parse_postfix` now breaks out of the call loop when
+  the callee is a `Block`, so the `(` belongs to the following arm.
+- **Closure bodies did not parse.** `parse_pat` folded the closure parameter
+  list's closing `|` into a top-level OR-pattern (`|a| body` was read as the
+  single pattern `a | body`), so any closure with a body failed with "expected
+  expression". Split `parse_pat` into `parse_pat_single` (no OR-pattern
+  continuation, used for closure params) while `parse_pat` keeps the OR-pattern
+  loop for `match` arms. This unblocked `clotho`/driver parsing (both use
+  `map_err(|e| { .. })`-style closures) and advanced `lachesis`/`atropos`.
+
+The remaining gate is the **type checker + code generator** (the documented
+"real self-host wall"). The latest probe reads `0/5` self-hostable; all five
+crates reach type-check and report type/borrow errors. Two type-check blockers
+were closed this session:
+
+- **`?` operator** — `infer::check_try` now type-checks `Result`/`Option`/`ParseResult`
+  (any `Apply`/`Struct`/`Generic` `Try` type) and yields the opaque payload; only
+  genuinely non-`Try` operands (`5?`) are rejected. Codegen of `?` (early-return
+  lowering + a `Result`/`Option` backend representation) is still a follow-up.
+- **Diverging expressions** — `return`/`break`/`continue`/`loop` now type as
+  `Ty::Never`, `infer_block` propagates a diverging final statement, and
+  `infer_match` skips `Never` arms when aggregating the result type. This clears
+  the `match`-arm "expected (), found str" errors.
+
+Latest per-crate type/borrow error counts (after these fixes): `clotho` 2061,
+`lachesis` 2253, `atropos` 1857, `moira` (driver) 203, `moira-alloc` 25. The
+dominant remaining classes are macros (`vec!`/`format!`/`write!`), enum-variant
+destructuring patterns (`Some(x)`/`Ok(x)`), `X::new` associated-function
+resolution on user types, `Self` in type position, real generics in `infer`, and
+slice indexing. These are the Phase-4 features tracked below and in `TODO.md`.
 
 | Crate | Role | Blocks self-host until |
 |-------|------|------------------------|
-| `moira-alloc` | region allocator | subset covers it |
-| `clotho` | lexer / parser / AST | subset covers it |
-| `atropos` | MIR / SSA / codegen | subset covers it |
-| `lachesis` | type + borrow + traits | subset covers it |
+| `moira-alloc` | region allocator | type/borrow checker covers raw-pointer allocator patterns |
+| `clotho` | lexer / parser / AST | full type-check (generics, `?`, macros, enum patterns) |
+| `atropos` | MIR / SSA / codegen | full type-check + codegen of its own constructs |
+| `lachesis` | type + borrow + traits | full type-check + codegen of its own constructs |
 | `moira` (driver) | CLI wiring | all of the above |
 
 ## Dependency order (must compile in this sequence)
@@ -161,28 +218,47 @@ running `moira --emit mir <file>` per leaf module and by a clean `cargo test
 - **`where`-clause termination** — the where-clause loop now stops at the body
   `{` rather than parsing it as a type.
 
-### Open — surfaced by `python3 x.py self-host` (current first-parse blockers)
-Offsets below are byte offsets **into the leaf `.rs` module file** (measured with
-`moira --emit mir <file>`, which parses the module without lowering). These are
-the deepest remaining gating constructs; most require new AST nodes that then
-cascade into the type-checker / MIR lowers (the documented full-self-host wall).
-- **moira (driver)**: **parses fully** — reaches type-check (the type-checker
-  wall: `match`/closures/generics/`std`).
-- **moira-alloc**: **parses fully** — type-check still reports borrow/type errors
-  (subset does not model the allocator's raw-pointer patterns yet).
-- **clotho**: `lexer.rs` ~byte 4217 `expected =>, found ..` — an inclusive range
-   **pattern** `b'0'..=b'9'` in a `match` arm; **range patterns are now modeled**
-   (see `Pat::Range` support in `tpt_moira_lachesis::infer` + `tpt_moira_atropos::lower::pattern_guard`),
-   so this blocker is resolved at the type-check + codegen level. Still open: range
-   **expressions** (`tts[..idx]`, `&sig.params[1..]` slice indexing) are not yet modeled.
-- **atropos**: `lower.rs` ~byte 6652 `expected :, found ,` — a struct/enum field
-  list the parser diverges on (likely a tuple/enum-variant field or a
-  type-ascription `:` edge case).
-- **lachesis**: `borrow.rs` ~byte 9056 `expected expression, found =` — a `let`
-   binding (enum/tuple destructuring or `let … = …` with a pattern the subset
-   does not yet lower); plus `solver.rs` tuple patterns in `match`, and
-   `infer.rs` slice indexing. (The `diff.rs` float-literal suffix `0.0f64` is now
-   parsed by `lex_number`, so it is no longer a parse blocker.)
+### Open — the type-check / codegen wall (all five crates parse)
+
+Parse is **closed** for every crate (last two parse blockers fixed this
+session: `impl FnMut(...) -> Ret` in type position, and block-bodied `match`
+arms followed by `(pat) =>` arms). The probe's remaining `0/5` is purely the
+type checker + code generator rejecting the compiler's own code. The dominant
+error classes (from `moira --check` on each crate) are:
+
+- **`?`-operator propagation** — **resolved at the type-check level (this
+  session).** `ExprKind::Try` is now handled by `infer::check_try`: it is accepted
+  when the operand is `Result`/`Option`/`ParseResult`/any applied or `Try` struct
+  (the Phase-1 subset cannot verify the `Try` impl, so any `Apply`/`Struct`/`Generic`
+  is accepted) and yields the opaque payload `<unknown>` (matching how `Some`/`Ok`
+  constructors are already modelled); a genuinely non-`Try` operand (`5?`, `&x?`)
+  is still rejected. With this, the `?` errors in `clotho` dropped from 196 to ~0.
+  Remaining: **codegen of `?`** (early-return lowering + a `Result`/`Option`
+  representation in the C/native backends) is still a follow-up, so `?` does not
+  yet lower end-to-end. *(TODO: `?` / `Result` codegen.)*
+- **`match` arm type aggregation** — **resolved (this session).** Diverging
+  expressions (`return` / `break` / `continue` / `loop` and a block whose final
+  statement diverges) now type as `Ty::Never`; `infer_match` skips `Never` arms when
+  aggregating the result type, so a `match` arm like `true => { return 1; }` no
+  longer forces the result to `()` and clashes with value arms. This cleared the
+  ~94 "expected (), found str" errors in `clotho`.
+- **macros** (e.g. 92 in `clotho` — `vec!`/`format!`/`write!`/`println!`) —
+  `ExprKind::Macro` is parsed but rejected. Requires macro expansion to real
+  constructs.
+- **`X::new` associated-function resolution on user types** (e.g. 70 in `clotho`)
+  — `new`/`default`/etc. on user structs/enums need `assoc_fns` registration
+  from `impl` blocks, not just the `std` prelude.
+- **enum-variant destructuring patterns** (`Some(x)`, `Ok(x)`) — `Pat::Path` is
+  treated as an irrefutable binder, not a variant test; `if let Some(x) = …` is
+  rejected ("non-identifier patterns"). *(TODO: match/enum destructuring.)*
+- **`Self` in type position** — `Ty::Struct("Self")` leaks into diagnostics
+  because some `Self` resolutions are not yet substituted.
+- **generics in `infer` for real compiler code, slice indexing, closures codegen**
+  — see the remaining TODO items below.
+
+These are the Phase-4 features enumerated in the "Broader remaining gaps" list
+and in `TODO.md` (generics + `where`-clause solving, closures MIR/codegen, full
+trait solving wired into `infer`, `?`/`Result`, library codegen).
 
 
 ### Broader remaining gaps (the real self-host wall)

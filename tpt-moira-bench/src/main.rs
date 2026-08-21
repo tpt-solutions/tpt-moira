@@ -1,16 +1,20 @@
 //! Moira benchmark harness — Phase-1 "10x faster than `rustc`" validation.
 //!
 //! Compiles a fixed battery of Phase-1-subset programs (which are also valid
-//! stock Rust) two ways and reports median end-to-end compile time:
+//! stock Rust) several ways and reports median end-to-end compile time:
 //!
 //! * **Moira** — the full Clotho front-end + Atropos mid-end (`--emit ssa`, which
 //!   runs lex → parse → macro-expand → MIR lower → SSA build → optimize). No
 //!   external assembler/linker is involved, so this isolates Moira's own work.
+//! * **C compiler** (`gcc`/`clang`) — Moira's Stage-0 C backend emits C
+//!   (`--emit c`), then an external C compiler builds it (`cc -O2`). This is a
+//!   genuine cross-compiler comparison: same source, Moira's front-end+mid-end
+//!   vs. a production C compiler doing the final codegen.
 //! * **`rustc`** — `rustc --emit=metadata`, i.e. parse + full type inference +
 //!   borrow check + codegen to metadata, the closest apples-to-apples "compile
 //!   this file" invocation that does not require a system linker.
 //!
-//! The reported *speedup* is `rustc_ms / moira_ms`. Because Moira deliberately
+//! The reported *speedup* is `baseline_ms / moira_ms`. Because Moira deliberately
 //! defers type inference and borrow checking to Phase 2, this is not yet a
 //! like-for-like comparison of *semantic* compilation — it measures the cost of
 //! the front-end + mid-end pipeline Moira ships today. The harness exists to
@@ -236,12 +240,41 @@ impl RustcMode {
     }
 }
 
+/// Optional C-compiler baseline: Moira's Stage-0 C backend (`--emit c`) produces
+/// a C translation unit, which is then built by an external C compiler
+/// (`cc -O2`). This is a real cross-compiler comparison — same source, Moira's
+/// front-end+mid-end vs. a production C compiler doing the final codegen.
+#[derive(Clone, Copy, PartialEq)]
+enum CcMode {
+    None,
+    Gcc,
+    Clang,
+}
+
+impl CcMode {
+    fn binary(&self) -> Option<&'static str> {
+        match self {
+            CcMode::None => None,
+            CcMode::Gcc => Some("gcc"),
+            CcMode::Clang => Some("clang"),
+        }
+    }
+    fn label(&self) -> &'static str {
+        match self {
+            CcMode::None => "disabled",
+            CcMode::Gcc => "gcc -O2",
+            CcMode::Clang => "clang -O2",
+        }
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let mut record = false;
     let mut dashboard = false;
     let mut moira_mode = MoiraMode::Ssa;
     let mut rustc_mode = RustcMode::Metadata;
+    let mut cc_mode = CcMode::None;
     let mut results_dir = PathBuf::from(DEFAULT_RESULTS_DIR);
 
     let mut i = 1;
@@ -250,6 +283,26 @@ fn main() {
             "--record" => record = true,
             "--dashboard" => dashboard = true,
             "--full" => moira_mode = MoiraMode::Check,
+            "--cc" => match args.get(i + 1) {
+                Some(m) => {
+                    match m.as_str() {
+                        "none" => cc_mode = CcMode::None,
+                        "gcc" => cc_mode = CcMode::Gcc,
+                        "clang" => cc_mode = CcMode::Clang,
+                        other => {
+                            eprintln!(
+                                "error: --cc expects `gcc`, `clang`, or `none`, found `{other}`"
+                            );
+                            std::process::exit(2);
+                        }
+                    }
+                    i += 1;
+                }
+                None => {
+                    eprintln!("error: --cc requires an argument (`gcc`|`clang`|`none`)");
+                    std::process::exit(2);
+                }
+            },
             "--rustc-mode" => match args.get(i + 1) {
                 Some(m) => {
                     match m.as_str() {
@@ -292,7 +345,7 @@ fn main() {
         return;
     }
 
-    run_benchmark(record, &results_dir, moira_mode, rustc_mode);
+    run_benchmark(record, &results_dir, moira_mode, rustc_mode, cc_mode);
 
     if moira_is_missing() {
         eprintln!("\nwarning: `moira` binary not found; run `cargo build` first.");
@@ -300,40 +353,76 @@ fn main() {
     if rustc_is_missing() {
         eprintln!("\nwarning: `rustc` not found; skipping rustc column.");
     }
+    if cc_is_missing(cc_mode) {
+        eprintln!("\nwarning: C compiler not found; skipping C-compiler column.");
+    }
 }
 
 /// Run the benchmark battery, print the table, and (when `record`) persist the
 /// run and report any regressions versus the previous recorded run.
-fn run_benchmark(record: bool, results_dir: &Path, moira_mode: MoiraMode, rustc_mode: RustcMode) {
+fn run_benchmark(
+    record: bool,
+    results_dir: &Path,
+    moira_mode: MoiraMode,
+    rustc_mode: RustcMode,
+    cc_mode: CcMode,
+) {
     let moira = find_moira();
     let rustc = find_rustc();
+    let cc = cc_mode.binary().and_then(find_cc);
 
-    println!("Moira vs rustc — Phase-1 subset compile-time benchmark");
+    let cc_label = cc_mode.label();
+
+    println!("╭──────────────────────────────────────────────────────────────────────────╮");
+    println!("│  Moira compile-time benchmark — Phase-1 subset                             │");
+    println!("╰──────────────────────────────────────────────────────────────────────────╯");
     println!(
-        "({ITERS} iterations, median reported; Moira = {}; baseline = {})",
-        moira_mode.label(),
-        rustc_mode.label()
+        "  {} iterations per program (median reported). Moira = {}.",
+        ITERS,
+        moira_mode.label()
+    );
+    println!(
+        "  baselines: rustc = {}   |   C compiler = {}",
+        rustc_mode.label(),
+        cc_label
     );
     if moira_mode == MoiraMode::Check {
-        println!(
-            "note: `--full` measures Moira's complete semantic pipeline; the rustc
-baseline may still include native codegen/link unless `--rustc-mode full` is set."
-        );
+        println!("  note: `--full` measures Moira's complete semantic pipeline; the rustc");
+        println!("        baseline may still include native codegen/link unless `--rustc-mode full`.");
     }
     println!();
-    println!(
-        "{:<8} {:>12} {:>12} {:>10}",
-        "program", "moira(ms)", "rustc(ms)", "speedup"
-    );
-    println!("{}", "-".repeat(46));
 
-    let mut ratios: Vec<f64> = Vec::new();
+    // Column headers
+    let has_cc = cc.is_some();
+    if has_cc {
+        println!(
+            "  {:<8} {:>11} {:>11} {:>10} {:>11} {:>10}",
+            "program", "moira", cc_label, "cc×", "rustc", "rustc×"
+        );
+        println!("  {}", "─".repeat(73));
+    } else {
+        println!(
+            "  {:<8} {:>11} {:>11} {:>10}",
+            "program", "moira", "rustc", "rustc×"
+        );
+        println!("  {}", "─".repeat(45));
+    }
+
+    let mut rustc_ratios: Vec<f64> = Vec::new();
+    let mut cc_ratios: Vec<f64> = Vec::new();
+    let mut cc_attempted = false;
+    let mut cc_succeeded = false;
     let mut entries: Vec<Entry> = Vec::new();
     for (name, src) in BENCHMARKS {
         let file = write_temp("rs", src);
 
         let m_args = moira_args(&file, moira_mode);
         let r_args = rustc_args(&file, rustc_mode);
+        // For the C-compiler baseline we need Moira to emit C first.
+        let (c_src_file, cc_args) = cc
+            .as_ref()
+            .map(|bin| cc_pipeline(bin, &file))
+            .unwrap_or((PathBuf::new(), Vec::new()));
 
         let moira_ms = moira
             .as_ref()
@@ -341,75 +430,144 @@ baseline may still include native codegen/link unless `--rustc-mode full` is set
         let rustc_ms = rustc
             .as_ref()
             .and_then(|bin| time_cmd(bin, &r_args, ITERS));
-
-        let (moira_s, rustc_s, ratio_s, speedup) = match (moira_ms, rustc_ms) {
-            (Some(m), Some(r)) => {
-                let ratio = r / m;
-                ratios.push(ratio);
-                (fmt(m), fmt(r), format!("{ratio:>9.2}x"), Some(ratio))
+        let cc_ms = if cc_args.is_empty() {
+            None
+        } else {
+            cc_attempted = true;
+            let t = cc.as_ref().and_then(|bin| time_cmd(bin, &cc_args, ITERS));
+            if t.is_some() {
+                cc_succeeded = true;
             }
-            (Some(m), None) => (fmt(m), "  n/a".to_string(), "  n/a".to_string(), None),
-            (None, Some(r)) => ("  n/a".to_string(), fmt(r), "  n/a".to_string(), None),
-            (None, None) => (
-                "  n/a".to_string(),
-                "  n/a".to_string(),
-                "  n/a".to_string(),
-                None,
-            ),
+            t
         };
-        println!(
-            "{:<8} {:>12} {:>12} {:>10}",
-            name, moira_s, rustc_s, ratio_s
-        );
+
+        let moira_s = fmt(moira_ms);
+        let rustc_s = fmt(rustc_ms);
+        let rustc_speedup = rustc_ms.and_then(|r| moira_ms.map(|m| r / m));
+        let cc_s = fmt(cc_ms);
+        let cc_speedup = cc_ms.and_then(|c| moira_ms.map(|m| c / m));
+
+        if let Some(r) = rustc_speedup {
+            rustc_ratios.push(r);
+        }
+        if let Some(c) = cc_speedup {
+            cc_ratios.push(c);
+        }
+
+        if has_cc {
+            println!(
+                "  {:<8} {:>11} {:>11} {:>10} {:>11} {:>10}",
+                name,
+                moira_s,
+                cc_s,
+                cc_speedup.map(|x| format!("{x:>8.2}x")).unwrap_or_else(|| "   n/a".into()),
+                rustc_s,
+                rustc_speedup.map(|x| format!("{x:>8.2}x")).unwrap_or_else(|| "   n/a".into()),
+            );
+        } else {
+            println!(
+                "  {:<8} {:>11} {:>11} {:>10}",
+                name,
+                moira_s,
+                rustc_s,
+                rustc_speedup.map(|x| format!("{x:>8.2}x")).unwrap_or_else(|| "   n/a".into()),
+            );
+        }
 
         entries.push(Entry {
             program: (*name).to_string(),
             moira_ms,
+            cc_ms,
             rustc_ms,
-            speedup,
+            cc_speedup,
+            speedup: rustc_speedup,
         });
 
         // Remove the temp source and the emitted artifact(s) so repeated runs
         // and different crates don't leak temp files.
         let _ = std::fs::remove_file(&file);
-        for a in m_args.iter().chain(r_args.iter()) {
+        for a in m_args
+            .iter()
+            .chain(r_args.iter())
+            .chain(cc_args.iter())
+        {
             let _ = std::fs::remove_file(a);
         }
+        let _ = std::fs::remove_file(&c_src_file);
     }
 
-    let geomean = if ratios.is_empty() {
-        None
-    } else {
-        let log_sum: f64 = ratios.iter().map(|r| r.ln()).sum();
-        Some((log_sum / ratios.len() as f64).exp())
-    };
+    println!("  {}", "─".repeat(if has_cc { 73 } else { 45 }));
 
-    println!("{}", "-".repeat(46));
-    if let Some(geo) = geomean {
-        println!("geometric-mean speedup (rustc / moira): {geo:.2}x");
+    let cc_geo = geomean(&cc_ratios);
+    let rustc_geo = geomean(&rustc_ratios);
+
+    if has_cc {
+        println!(
+            "  {:<8} {:>11} {:>11} {:>10} {:>11} {:>10}",
+            "geomean",
+            "",
+            "",
+            cc_geo.map(|x| format!("{x:>8.2}x")).unwrap_or_else(|| "   n/a".into()),
+            "",
+            rustc_geo.map(|x| format!("{x:>8.2}x")).unwrap_or_else(|| "   n/a".into()),
+        );
+    } else {
+        println!(
+            "  {:<8} {:>11} {:>11} {:>10}",
+            "geomean",
+            "",
+            "",
+            rustc_geo.map(|x| format!("{x:>8.2}x")).unwrap_or_else(|| "   n/a".into()),
+        );
+    }
+
+    if let (Some(c), Some(r)) = (cc_geo, rustc_geo) {
+        println!();
+        println!("  summary: Moira is {:.2}x faster than {} and {:.2}x faster than {}", c, cc_label, r, rustc_mode.label());
+    } else if let Some(r) = rustc_geo {
+        println!();
+        println!("  summary: Moira is {:.2}x faster than {}", r, rustc_mode.label());
+    }
+
+    if cc_attempted && !cc_succeeded {
+        println!();
+        println!(
+            "  note: `{}` is installed but failed to compile Moira's emitted C (missing",
+            cc_label
+        );
+        println!("        system headers is common on Windows). The C-compiler column is n/a.");
     }
 
     if record {
         let run = RunRecord {
             timestamp: now_timestamp(),
             commit: current_commit(),
-            geomean,
+            geomean: rustc_geo,
             entries,
         };
         match append_run(results_dir, &run) {
             Ok(()) => {
-                println!("\nrecorded run -> {}", history_path(results_dir).display());
+                println!("\n  recorded run -> {}", history_path(results_dir).display());
                 let hist = load_history(results_dir);
                 if hist.len() >= 2 {
                     let prev = &hist[hist.len() - 2];
                     report_regressions(prev, &run);
                 } else {
-                    println!("no previous run to compare against");
+                    println!("  no previous run to compare against");
                 }
             }
             Err(e) => eprintln!("\nerror: failed to record run: {e}"),
         }
     }
+}
+
+/// Geometric mean of a slice of ratios (`baseline / moira`), or `None` if empty.
+fn geomean(ratios: &[f64]) -> Option<f64> {
+    if ratios.is_empty() {
+        return None;
+    }
+    let log_sum: f64 = ratios.iter().map(|r| r.ln()).sum();
+    Some((log_sum / ratios.len() as f64).exp())
 }
 
 /// Print a textual dashboard of all recorded runs plus the latest regression
@@ -445,7 +603,15 @@ fn print_dashboard(results_dir: &Path) {
                     .moira_ms
                     .map(|v| format!("{v:.2}ms"))
                     .unwrap_or_else(|| "n/a".to_string());
-                format!("{}={}", e.program, m)
+                let sp = e
+                    .speedup
+                    .map(|v| format!("{v:.2}x"))
+                    .unwrap_or_else(|| "n/a".to_string());
+                let cc = e
+                    .cc_speedup
+                    .map(|v| format!("cc={v:.2}x"))
+                    .unwrap_or_else(|| "cc=n/a".to_string());
+                format!("{}={}({}; {})", e.program, m, sp, cc)
             })
             .collect();
         println!("        {}", parts.join("  "));
@@ -494,6 +660,21 @@ fn moira_is_missing() -> bool {
 
 fn rustc_is_missing() -> bool {
     find_rustc().is_none()
+}
+
+fn cc_is_missing(mode: CcMode) -> bool {
+    match mode.binary() {
+        Some(bin) => find_cc(bin).is_none(),
+        None => false,
+    }
+}
+
+/// Locate a C compiler binary by name (e.g. `gcc`, `clang`), verifying it runs.
+fn find_cc(binary: &str) -> Option<PathBuf> {
+    if Command::new(binary).arg("--version").output().is_ok() {
+        return Some(PathBuf::from(binary));
+    }
+    None
 }
 
 /// Locate the sibling `moira` binary produced by the workspace build.
@@ -551,6 +732,39 @@ fn rustc_args(file: &Path, mode: RustcMode) -> Vec<String> {
     }
 }
 
+/// Build the C-compiler baseline. First, Moira's Stage-0 C backend emits a C
+/// translation unit from the Rust source (`moira --emit c -o <tmp>.c`); this
+/// emission is *not* timed — the returned `cc_args` are what we measure, so the
+/// comparison is "Moira front-end+mid-end" vs. "external C compiler codegen".
+/// Returns `(c_source_path, cc_invocation_args)`.
+fn cc_pipeline(cc_binary: &Path, rust_file: &Path) -> (PathBuf, Vec<String>) {
+    let c_src = temp_path("c");
+    let emit = vec![
+        "moira".to_string(),
+        "--emit".to_string(),
+        "c".to_string(),
+        "-o".to_string(),
+        c_src.to_string_lossy().into_owned(),
+        rust_file.to_string_lossy().into_owned(),
+    ];
+    // Run the emit step up-front (outside the timed region).
+    let _ = Command::new(find_moira().unwrap_or_else(|| PathBuf::from("moira")))
+        .args(&emit)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+
+    let out = temp_path("cc_out");
+    let cc_args = vec![
+        cc_binary.to_string_lossy().into_owned(),
+        "-O2".to_string(),
+        c_src.to_string_lossy().into_owned(),
+        "-o".to_string(),
+        out.to_string_lossy().into_owned(),
+    ];
+    (c_src, cc_args)
+}
+
 /// Time `program args`, returning the median wall-clock milliseconds over
 /// `iters` successful runs, or `None` if any invocation fails. Subprocess
 /// stdout/stderr are discarded so compiler diagnostics don't pollute the table.
@@ -597,6 +811,9 @@ fn temp_path(ext: &str) -> PathBuf {
     p
 }
 
-fn fmt(ms: f64) -> String {
-    format!("{ms:>11.2} ")
+fn fmt(ms: Option<f64>) -> String {
+    match ms {
+        Some(m) => format!("{m:>10.2}ms"),
+        None => "      n/a".to_string(),
+    }
 }

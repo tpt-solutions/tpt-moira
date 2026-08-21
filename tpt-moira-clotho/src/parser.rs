@@ -984,7 +984,7 @@ impl Parser {
         })
     }
 
-    fn parse_pat(&mut self) -> ParseResult<Pat> {
+    fn parse_pat_single(&mut self) -> ParseResult<Pat> {
         // Leading range / rest pattern: `..`, `..=b`, `..b`.
         if matches!(self.peek_kind(), TokenKind::DotDot) {
             let inclusive = self.consume_range_op();
@@ -1009,7 +1009,9 @@ impl Parser {
             TokenKind::Amp => {
                 // Reference pattern `&pat` (binds the matched value by reference).
                 self.bump();
-                let inner = self.parse_pat()?;
+                // `parse_pat_single` (no top-level OR-loop) so a closure parameter
+                // like `|&u|` does not swallow the closing `|` as an OR-pattern.
+                let inner = self.parse_pat_single()?;
                 Ok(Pat::Ref(Box::new(inner)))
             }
             TokenKind::LParen => {
@@ -1061,6 +1063,13 @@ impl Parser {
             }
             TokenKind::Ident(_) => {
                 let name = self.expect_ident()?;
+                // `ref x` / `ref mut x` binding-by-reference pattern. The `ref`
+                // keyword is lexed as an identifier; model it as `&x` so the rest
+                // of the pattern (and `bind_pattern`) handle it uniformly.
+                if name.node == "ref" {
+                    let inner = self.parse_pat_single()?;
+                    return Ok(Pat::Ref(Box::new(inner)));
+                }
                 let mut segments = vec![name.clone()];
                 if self.eat(&TokenKind::ColonColon) {
                     // A qualified variant pattern: `Foo::Bar`, `ns::Baz`.
@@ -1079,24 +1088,27 @@ impl Parser {
                 // Consume an optional tuple/struct payload so variant patterns
                 // with fields parse, whether qualified (`Foo::Bar(x)`) or not
                 // (`Some(a)`, `Ok(v)`, `Err(e)`, `Point { x, y }`).
-                if self.peek_kind() == &TokenKind::LParen
-                    || self.peek_kind() == &TokenKind::LBrace
-                {
-                    let open = self.peek_kind().clone();
-                    let close = match open {
-                        TokenKind::LParen => TokenKind::RParen,
-                        _ => TokenKind::RBrace,
-                    };
+                if self.peek_kind() == &TokenKind::LParen {
+                    // Tuple-variant pattern `Some(x)` / `Ok(v)` / `Err(e)` /
+                    // `Foo::Bar(a, b)`: parse the payload as a list of patterns so
+                    // the bound names survive into `Pat::Variant` (previously the
+                    // payload was discarded, so `x` was never bound).
+                    self.bump();
+                    let args = self.parse_delimited(TokenKind::RParen, |s| s.parse_pat())?;
+                    Ok(Pat::Variant(path, args))
+                } else if self.peek_kind() == &TokenKind::LBrace {
+                    // Struct-variant pattern `Foo::Bar { x }`: consume and discard
+                    // the payload for now (struct-variant patterns are a follow-up).
                     self.bump();
                     let mut depth = 0i32;
                     loop {
                         match self.peek_kind() {
                             TokenKind::Eof => break,
-                            k if *k == open => {
+                            k if *k == TokenKind::LBrace => {
                                 depth += 1;
                                 self.bump();
                             }
-                            k if *k == close => {
+                            k if *k == TokenKind::RBrace => {
                                 if depth == 0 {
                                     self.bump();
                                     break;
@@ -1129,6 +1141,21 @@ impl Parser {
                 Some(Box::new(self.parse_pat()?))
             };
             return Ok(Pat::Range(Some(Box::new(pat)), rhs, inclusive));
+        }
+        Ok(pat)
+    }
+
+    /// Parse a pattern, including top-level OR-patterns (`a | b`). OR-patterns
+    /// are *not* allowed as a closure parameter (the `|` would be read as the
+    /// parameter-list delimiter), so [`Self::parse_closure_param`] uses
+    /// [`Self::parse_pat_single`] instead.
+    fn parse_pat(&mut self) -> ParseResult<Pat> {
+        let mut pat = self.parse_pat_single()?;
+        // Or-patterns: `a | b`. Valid at the top level of a `match` arm and
+        // *inside* a tuple/struct variant payload (`Some(x | y)`).
+        while self.eat(&TokenKind::Pipe) {
+            let rhs = self.parse_pat()?;
+            pat = Pat::Or(Box::new(pat), Box::new(rhs));
         }
         Ok(pat)
     }
@@ -1586,6 +1613,16 @@ impl Parser {
             let start = expr.span.start;
             match self.peek_kind() {
                 TokenKind::LParen => {
+                    // A block expression is not callable in Rust, so a `(` that
+                    // immediately follows a block (e.g. a `match` arm body
+                    // `{ .. }` followed by the next arm's `(pat) =>` pattern, or a
+                    // trailing block statement) must NOT be parsed as a call. Leave
+                    // the `(` for the caller so match arms / statements terminate
+                    // correctly; without this, `body { .. } (args)` is misread as a
+                    // function call whose argument list swallows the following arm.
+                    if matches!(expr.kind, ExprKind::Block(_)) {
+                        break;
+                    }
                     self.bump();
                     let args = self.parse_delimited(TokenKind::RParen, |s| s.parse_expr())?;
                     let end = self.peek().span.start;
@@ -1875,11 +1912,8 @@ impl Parser {
         self.expect(TokenKind::LBrace)?;
         let mut arms = Vec::new();
         while !self.eat(&TokenKind::RBrace) {
-            let mut pat = self.parse_pat()?;
-            while self.eat(&TokenKind::Pipe) {
-                let rhs = self.parse_pat()?;
-                pat = Pat::Or(Box::new(pat), Box::new(rhs));
-            }
+            // `parse_pat` already folds `|` into `Pat::Or`, so no extra loop here.
+        let pat = self.parse_pat()?;
             // Match guard `Pattern if <cond> => body`. The Phase-1 subset does not
             // model guards, so the condition is parsed and discarded; this keeps
             // real-world code (and the compiler's own source) parseable.
@@ -1976,7 +2010,9 @@ impl Parser {
     /// optional `: Type` annotation (unlike fn params, the type is optional).
     fn parse_closure_param(&mut self) -> ParseResult<Param> {
         let _mutable = self.eat(&TokenKind::Mut);
-        let pat = self.parse_pat()?;
+        // Single pattern only: a top-level OR-pattern (`a | b`) would swallow the
+        // parameter-list's closing `|` (see `parse_pat_single`).
+        let pat = self.parse_pat_single()?;
         let ty = if self.eat(&TokenKind::Colon) {
             self.parse_type()?
         } else {
@@ -2113,8 +2149,11 @@ impl Parser {
                 self.bump();
                 let path = self.parse_path(true)?;
                 if self.eat(&TokenKind::LParen) {
-                    // `impl FnMut(&str)`-style parenthesized trait args: consume a
-                    // balanced paren list (parse-only; ignored).
+                    // `impl FnMut(&str) -> Ret (+ Bound)*`-style closure/trait
+                    // types: consume the balanced paren list, the optional return
+                    // type, and any trailing `+ Bound` so the closure/trait-object
+                    // types in the compiler's own source parse (represented
+                    // opaquely as the leading path). Parse-only; ignored.
                     let mut depth = 1;
                     while depth > 0 {
                         match self.peek_kind() {
@@ -2131,6 +2170,24 @@ impl Parser {
                                 self.bump();
                             }
                         }
+                    }
+                    if self.eat(&TokenKind::Arrow) {
+                        self.parse_type()?;
+                    }
+                    while self.eat(&TokenKind::Plus) {
+                        // A dropped lifetime bound (`+ 'static`) leaves a dangling
+                        // `+` before the enclosing delimiter; stop instead of
+                        // parsing it as a path.
+                        if matches!(
+                            self.peek_kind(),
+                            TokenKind::Comma
+                                | TokenKind::LBrace
+                                | TokenKind::Gt
+                                | TokenKind::GtGt
+                        ) {
+                            break;
+                        }
+                        self.parse_path(true)?;
                     }
                 }
                 TypeKind::Path(path, Vec::new())

@@ -30,5 +30,5 @@ tpt-moira-lachesis = { path = "tpt-moira-lachesis" }
 tpt-moira-atropos = { path = "tpt-moira-atropos" }
 
 [[bin]]
-name = "tpt-moira"
+name = "moira"
 path = "src/main.rs"

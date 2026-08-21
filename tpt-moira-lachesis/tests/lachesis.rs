@@ -58,9 +58,9 @@ fn if_let_and_while_let_identifier_patterns_type_check() {
     assert!(type_ok(
         "fn main() { let v = 5; while let x = v { let _ = x; break; } }"
     ));
-    // A non-identifier pattern (`Some(x)`) is not yet supported and is rejected
-    // with a precise diagnostic.
-    assert!(type_err(
+    // Tuple-variant patterns (`Some(x)`) are supported: the payload is bound to
+    // the `Option`'s element type inside the then-block.
+    assert!(type_ok(
         "fn main() { let o = Some(5); if let Some(x) = o { let _ = x; } }"
     ));
 }
@@ -585,8 +585,9 @@ fn match_expressions_type_check() {
             let _ = match x { 1 => 1, _ => true };
         }"
     ));
-    // Struct/variant patterns are not yet supported.
-    assert!(type_err(
+    // Enum-variant patterns are now supported: `Some(x)` / `None` bind and
+    // aggregate to a common type.
+    assert!(type_ok(
         "fn main() {
             let o = Some(5);
             let _ = match o { Some(x) => x, None => 0 };

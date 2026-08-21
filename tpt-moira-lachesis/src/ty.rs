@@ -65,6 +65,11 @@ pub enum Ty {
     Tuple(Vec<Ty>),
     /// Error sentinel.
     Unknown,
+    /// The never type `!` — the type of diverging expressions (`return`,
+    /// `break`, `continue`, `loop`, and a `?` early-return on the error path).
+    /// Used so a diverging `match` arm does not constrain the arm's result type
+    /// (mirroring Rust, where such arms have type `!`).
+    Never,
 }
 
 impl Ty {
@@ -185,6 +190,7 @@ impl fmt::Display for Ty {
                 write!(f, ")")
             }
             Ty::Unknown => write!(f, "<unknown>"),
+            Ty::Never => write!(f, "!"),
         }
     }
 }

@@ -270,6 +270,10 @@ impl TypeChecker {
 
     fn infer_block(&mut self, block: &Block) -> Ty {
         self.env.push(HashMap::new());
+        // The type of the final statement, used to detect a diverging block
+        // (one whose last statement is `return` / `?` / `break` / `continue` /
+        // `loop` and which has no tail expression).
+        let mut last_stmt_ty = Ty::Unit;
         for stmt in &block.stmts {
             match &stmt.kind {
                 StmtKind::Local(l) => {
@@ -301,7 +305,7 @@ impl TypeChecker {
                     self.bind_pattern(&l.pat, &ty);
                 }
                 StmtKind::Semi(e) | StmtKind::Expr(e) => {
-                    self.infer_expr(e);
+                    last_stmt_ty = self.infer_expr(e);
                 }
                 StmtKind::Item(_) => {
                     self.err(Span::default(), "nested items are not supported");
@@ -310,7 +314,17 @@ impl TypeChecker {
         }
         let ty = match &block.tail {
             Some(t) => self.infer_expr(t),
-            None => Ty::Unit,
+            None => {
+                // No tail expression: the block diverges (type `!`) if its final
+                // statement diverges, mirroring Rust. This lets a `match` arm like
+                // `true => { return 1; }` keep the `!` type instead of being forced
+                // to `()`, so it does not constrain the `match` result type.
+                if matches!(last_stmt_ty, Ty::Never) {
+                    Ty::Never
+                } else {
+                    Ty::Unit
+                }
+            }
         };
         self.env.pop();
         ty
@@ -345,6 +359,13 @@ impl TypeChecker {
             self.bind_pattern(pat, &_scrut_ty);
             let arm_ty = self.infer_expr(body);
             self.env.pop();
+            // A diverging arm (`return` / `?` / `break` / `loop` / `continue`,
+            // typed `!`) does not constrain the `match` result type, mirroring
+            // Rust where such arms have type `!`. Without this, `match` arms that
+            // early-return are wrongly forced to `()` and clash with value arms.
+            if matches!(arm_ty, Ty::Never) {
+                continue;
+            }
             if first {
                 result_ty = arm_ty.clone();
                 first = false;
@@ -386,6 +407,7 @@ impl TypeChecker {
                 }
                 Ok(())
             }
+            Pat::Variant(..) => Ok(()),
             Pat::Struct(_, _) => Err(
                 "struct/variant patterns are not yet supported in the type-checked subset"
                     .to_string(),
@@ -427,6 +449,34 @@ impl TypeChecker {
                     .insert(name.clone(), scrut_ty.clone());
                 self.bind_pattern(sub, scrut_ty);
             }
+            Pat::Variant(_, args) => {
+                // Tuple-variant pattern `Some(x)` / `Ok(v)` / `Err(e)`: bind the
+                // payload names to the variant's value type. When the scrutinee is
+                // a modelled `Option<T>` / `Result<T, E>` / `*Result<T, E>` we bind
+                // to `T`; otherwise (opaque `Unknown`) to `Unknown` so usage stays
+                // lenient rather than surfacing a spurious "cannot find value".
+                let inner_ty = Self::variant_payload_ty(scrut_ty);
+                for p in args {
+                    self.bind_pattern(p, &inner_ty);
+                }
+            }
+        }
+    }
+
+    /// The value type carried by a tuple-variant pattern's payload, given the
+    /// scrutinee type. For `Option<T>` / `Result<T, E>` / a `*Result<T, E>` alias
+    /// we return `T`; otherwise `Unknown` (the Phase-1 subset models `Result`/
+    /// `Option` opaquely, so the element is only known when the application args
+    /// are concrete).
+    fn variant_payload_ty(scrut_ty: &Ty) -> Ty {
+        match scrut_ty {
+            Ty::Apply(name, args) if name == "Option" && args.len() == 1 => args[0].clone(),
+            Ty::Apply(name, args)
+                if (name == "Result" || name.ends_with("Result")) && args.len() == 2 =>
+            {
+                args[0].clone()
+            }
+            _ => Ty::Unknown,
         }
     }
 
@@ -489,11 +539,41 @@ impl TypeChecker {
         Ty::Fn(param_tys, Box::new(ret_ty))
     }
 
+    /// Type-check the `?` operator: `e?` where `e` is a `Result`/`Option` (or any
+    /// applied/generic type — the Phase-1 subset cannot verify the `Try` impl, so
+    /// it accepts any `Apply` such as `Result<T, E>`, `Option<T>`, or a `Result`
+    /// type alias like `ParseResult<T>`, as well as a bare `Struct`/`Generic`
+    /// `Try` type) is accepted. On the error path the expression returns early
+    /// from the enclosing function, so it diverges there; its value type is the
+    /// `Ok`/`Some` payload, modelled opaquely as `<unknown>` (matching how
+    /// `Some`/`Ok` constructors and field access on `Result`/`Option` are already
+    /// absorbed in the subset) to avoid cascading a wall of errors through the
+    /// compiler's own (not-yet-fully-resolved) `Result`-returning code. A
+    /// genuinely non-`Try` operand (a primitive, tuple, array, or reference) is
+    /// still rejected so `5?` / `&x?` surface as errors.
+    fn check_try(&mut self, span: Span, inner: &Expr) -> Ty {
+        let t = self.infer_expr(inner);
+        match &t {
+            Ty::Apply(..) | Ty::Struct(_) | Ty::Generic(_) | Ty::Unknown => Ty::Unknown,
+            other => {
+                self.err(
+                    span,
+                    format!(
+                        "the `?` operator can only be applied to `Result` or `Option`, found `{}`",
+                        other
+                    ),
+                );
+                Ty::Unknown
+            }
+        }
+    }
+
     /// Type-check `if let pat = init { then } else { else }` (and its `while let`
     /// analogue). The binding is scoped to the then-block (if) or loop body
-    /// (while). Only identifier patterns are supported in the type-checked
-    /// subset; enum destructuring (`if let Some(x) = opt`) needs full `match` /
-    /// enum-variant support and is rejected with a precise diagnostic.
+    /// (while). Identifier patterns and tuple-variant patterns (`if let Some(x) =
+    /// opt`) are supported; other patterns (literal / tuple / struct) are rejected
+    /// with a precise diagnostic. For a variant pattern the payload names are bound
+    /// to the variant's value type (e.g. `T` for `Option<T>` / `Result<T, E>`).
     fn infer_if_let(
         &mut self,
         local: &Local,
@@ -501,10 +581,10 @@ impl TypeChecker {
         else_b: Option<&Expr>,
         span: Span,
     ) -> Ty {
-        if !matches!(local.pat, Pat::Ident(_)) {
+        if !matches!(local.pat, Pat::Ident(_) | Pat::Variant(..)) {
             self.err(
                 span,
-                "`if let`/`while let` with non-identifier patterns is not yet supported (enum destructuring needs `match`)",
+                "`if let`/`while let` with unsupported pattern (enum destructuring needs `match`)",
             );
             let tt = self.infer_block(then_b);
             let _ = else_b;
@@ -514,9 +594,15 @@ impl TypeChecker {
             Some(e) => self.infer_expr(e),
             None => Ty::Unit,
         };
-        let name = pat_name(&local.pat);
+        // Identifier patterns bind the whole `init` value; variant patterns bind
+        // their payload to the variant's element type.
+        let bind_ty = if matches!(local.pat, Pat::Variant(..)) {
+            Self::variant_payload_ty(&init_ty)
+        } else {
+            init_ty.clone()
+        };
         self.env.push(HashMap::new());
-        self.env.last_mut().unwrap().insert(name, init_ty);
+        self.bind_pattern(&local.pat, &bind_ty);
         let tt = self.infer_block(then_b);
         self.env.pop();
         match else_b {
@@ -533,12 +619,12 @@ impl TypeChecker {
     }
 
     /// Type-check `while let pat = init { body }`. See [`Self::infer_if_let`] for
-    /// the pattern-support restriction.
+    /// the pattern-support notes.
     fn infer_while_let(&mut self, local: &Local, body: &Block, span: Span) -> Ty {
-        if !matches!(local.pat, Pat::Ident(_)) {
+        if !matches!(local.pat, Pat::Ident(_) | Pat::Variant(..)) {
             self.err(
                 span,
-                "`if let`/`while let` with non-identifier patterns is not yet supported (enum destructuring needs `match`)",
+                "`if let`/`while let` with unsupported pattern (enum destructuring needs `match`)",
             );
             self.infer_block(body);
             return Ty::Unit;
@@ -547,9 +633,13 @@ impl TypeChecker {
             Some(e) => self.infer_expr(e),
             None => Ty::Unit,
         };
-        let name = pat_name(&local.pat);
+        let bind_ty = if matches!(local.pat, Pat::Variant(..)) {
+            Self::variant_payload_ty(&init_ty)
+        } else {
+            init_ty.clone()
+        };
         self.env.push(HashMap::new());
-        self.env.last_mut().unwrap().insert(name, init_ty);
+        self.bind_pattern(&local.pat, &bind_ty);
         self.infer_block(body);
         self.env.pop();
         Ty::Unit
@@ -660,7 +750,8 @@ impl TypeChecker {
             }
             ExprKind::Loop(body) => {
                 self.infer_block(body);
-                Ty::Unit
+                // `loop` diverges (type `!`) unless broken out of.
+                Ty::Never
             }
             ExprKind::For(pat, iter, body) => {
                 let iter_ty = self.infer_expr(iter);
@@ -698,9 +789,10 @@ impl TypeChecker {
                 };
                 let ret = self.ret.clone();
                 self.expect(&t, &ret, span);
-                Ty::Unit
+                // `return` diverges (type `!`); it does not produce a value.
+                Ty::Never
             }
-            ExprKind::Break | ExprKind::Continue => Ty::Unit,
+            ExprKind::Break | ExprKind::Continue => Ty::Never,
             ExprKind::Match(scrutinee, arms) => {
                 self.infer_match(span, scrutinee, arms)
             }
@@ -777,13 +869,7 @@ impl TypeChecker {
                 );
                 Ty::Unknown
             }
-            ExprKind::Try(..) => {
-                self.err(
-                    span,
-                    "the `?` operator is not in the type-checked subset".to_string(),
-                );
-                Ty::Unknown
-            }
+            ExprKind::Try(inner) => self.check_try(span, inner),
         };
         ty
     }
@@ -1561,7 +1647,7 @@ impl TypeChecker {
 
     /// Whether two types are mutually compatible for assignment/use.
     fn compatible(&self, a: &Ty, b: &Ty) -> bool {
-        if matches!(a, Ty::Unknown) || matches!(b, Ty::Unknown) {
+        if matches!(a, Ty::Unknown | Ty::Never) || matches!(b, Ty::Unknown | Ty::Never) {
             return true;
         }
         if matches!(a, Ty::Generic(_)) || matches!(b, Ty::Generic(_)) {
@@ -1676,7 +1762,7 @@ fn pat_name(pat: &Pat) -> String {
         Pat::Ident(n) => n.node.clone(),
         Pat::Wild => "_".to_string(),
         Pat::Bind(n, _) => n.clone(),
-        Pat::Path(path) => path
+        Pat::Path(path) | Pat::Variant(path, _) => path
             .segments
             .last()
             .map(|s| s.node.clone())
@@ -1704,6 +1790,11 @@ fn bind_pat_names(pat: &Pat, bound: &mut HashSet<String>) {
             }
         }
         Pat::Path(_) => {}
+        Pat::Variant(_, args) => {
+            for p in args {
+                bind_pat_names(p, bound);
+            }
+        }
         Pat::Ref(p) => bind_pat_names(p, bound),
         Pat::Or(a, b) => {
             bind_pat_names(a, bound);
@@ -2163,5 +2254,95 @@ mod tests {
         assert!(res.is_err());
         let msg = format!("{:?}", res.err().unwrap());
         assert!(msg.contains("captured: a"), "unexpected message: {}", msg);
+    }
+
+    // --- `?` operator + diverging arms -------------------------------------
+
+    #[test]
+    fn try_on_result_is_accepted() {
+        // `get()?` yields the `Ok` payload `i32`; the function returns
+        // `Result<i32, String>`.
+        assert!(
+            check(
+                "fn get() -> Result<i32, String> { Ok(5) }\nfn f() -> Result<i32, String> { let x = get()?; Ok(x) }"
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn try_on_option_is_accepted() {
+        assert!(
+            check(
+                "fn get() -> Option<i32> { Some(5) }\nfn f() -> Option<i32> { let x = get()?; Some(x) }"
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn try_on_non_result_is_rejected() {
+        // `?` on a plain `i32` is not allowed.
+        assert!(check("fn f() -> i32 { let x = 5?; x }").is_err());
+    }
+
+    #[test]
+    fn return_in_match_arm_does_not_force_unit() {
+        // The `true => { return 1; }` arm diverges (type `!`), so it must not
+        // constrain the `match` result type to `()`; the result is `i32`.
+        assert!(
+            check("fn f(b: bool) -> i32 { let r = match b { true => { return 1; }, false => 2 }; r }")
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn try_arm_aggregates_with_value_arm() {
+        // A `?` arm yields the `Ok` payload type and aggregates with the other
+        // value arm rather than being forced to `()`.
+        assert!(
+            check(
+                "fn get() -> Result<i32, String> { Ok(5) }\nfn f(b: bool) -> Result<i32, String> { let r = match b { true => get()?, false => 2 }; Ok(r) }"
+            )
+            .is_ok()
+        );
+    }
+
+    // --- enum-variant destructuring patterns ---------------------------------
+
+    #[test]
+    fn if_let_some_binds_payload() {
+        // `if let Some(x) = opt` binds `x` (the `Option`'s element) into the
+        // then-block; the pattern is no longer rejected as "non-identifier".
+        assert!(
+            check("fn f(opt: Option<i32>) -> i32 { if let Some(x) = opt { x } else { 0 } }")
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn match_on_option_binds_payload() {
+        // `match opt { Some(x) => x, None => 0 }` binds `x` in the `Some` arm.
+        assert!(
+            check("fn f(opt: Option<i32>) -> i32 { match opt { Some(x) => x, None => 0 } }")
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn match_on_result_binds_err_and_ok() {
+        // Both `Ok(x)` and `Err(e)` payloads bind into their arms.
+        assert!(
+            check(
+                "fn f(r: Result<i32, String>) -> i32 { match r { Ok(x) => x, Err(_) => 0 } }"
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn let_some_binds_payload() {
+        // `let Some(x) = opt;` binds `x` at the type-check level.
+        assert!(check("fn f(opt: Option<i32>) { let Some(x) = opt; let _ = x; }").is_ok());
     }
 }

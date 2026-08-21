@@ -1615,7 +1615,7 @@ impl Lower {
                 }
                 Ok((None, binds))
             }
-            ast::Pat::Path(_) | ast::Pat::Struct(_, _) => Err(LowerError(
+            ast::Pat::Path(_) | ast::Pat::Struct(_, _) | ast::Pat::Variant(..) => Err(LowerError(
                 "this match pattern is not supported in the codegen subset".into(),
             )),
             ast::Pat::Bind(name, sub) => {
@@ -1923,7 +1923,7 @@ fn pat_name(p: &Pat) -> Result<String> {
         Pat::Ident(n) => Ok(n.node.clone()),
         Pat::Wild => Ok("_".to_string()),
         Pat::Bind(n, _) => Ok(n.clone()),
-        Pat::Path(path) => Ok(path
+        Pat::Path(path) | Pat::Variant(path, _) => Ok(path
             .segments
             .last()
             .map(|s| s.node.clone())

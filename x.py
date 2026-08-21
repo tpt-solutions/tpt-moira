@@ -64,26 +64,26 @@ REPORT_JSON = BUILD_DIR / "self_host_report.json"
 CRATES: list[dict] = [
     {
         "name": "moira-alloc",
-        "path": "moira-alloc",
-        "lib": "moira-alloc/src/lib.rs",
+        "path": "tpt-moira-alloc",
+        "lib": "tpt-moira-alloc/src/lib.rs",
         "deps": [],
     },
     {
         "name": "clotho",
-        "path": "clotho",
-        "lib": "clotho/src/lib.rs",
+        "path": "tpt-moira-clotho",
+        "lib": "tpt-moira-clotho/src/lib.rs",
         "deps": ["moira-alloc"],
     },
     {
         "name": "atropos",
-        "path": "atropos",
-        "lib": "atropos/src/lib.rs",
+        "path": "tpt-moira-atropos",
+        "lib": "tpt-moira-atropos/src/lib.rs",
         "deps": ["clotho", "moira-alloc"],
     },
     {
         "name": "lachesis",
-        "path": "lachesis",
-        "lib": "lachesis/src/lib.rs",
+        "path": "tpt-moira-lachesis",
+        "lib": "tpt-moira-lachesis/src/lib.rs",
         "deps": ["clotho", "atropos", "moira-alloc"],
     },
     {
