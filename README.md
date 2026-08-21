@@ -81,11 +81,11 @@ advanced lifetime elision, and full macro expansion.
 
 ## Architecture notes
 
-- **Streaming lexer** (`clotho::lexer`): single-pass, token-by-token, with
+- **Streaming lexer** (`tpt_moira_clotho::lexer`): single-pass, token-by-token, with
   bounded lookahead. Skips whitespace, line (`//`) and nested block (`/* */`)
   comments, and decodes string/char escapes.
-- **Recursive-descent parser** (`clotho::parser`): a Pratt-style precedence
-  parser with binding powers, producing the `clotho::ast` tree.
+- **Recursive-descent parser** (`tpt_moira_clotho::parser`): a Pratt-style precedence
+  parser with binding powers, producing the `tpt_moira_clotho::ast` tree.
 
 ## Contributing
 

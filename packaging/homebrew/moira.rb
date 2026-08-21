@@ -2,7 +2,7 @@
 #
 # This is a packaging template, not a final published formula. Maintainers fill
 # in the real version, URL, and SHA-256 (produced by `x.py dist` as
-# `dist/moira-<version>-checksums.txt`) before submitting to a tap.
+# `dist/tpt-moira-<version>-checksums.txt`) before submitting to a tap.
 #
 # Usage (once published):
 #   brew install tptsolutions/tap/moira

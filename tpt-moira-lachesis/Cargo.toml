@@ -1,0 +1,17 @@
+[package]
+name = "tpt-moira-lachesis"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Lachesis: Moira's type inference, trait resolution, and borrow checker"
+readme = "README.md"
+keywords = ["compiler", "type-inference", "borrow-checker", "type-system", "rust"]
+categories = ["compilers", "development-tools"]
+
+[dependencies]
+tpt-moira-clotho = { path = "../tpt-moira-clotho" }
+tpt-moira-atropos = { path = "../tpt-moira-atropos" }
+tpt-moira-alloc = { path = "../tpt-moira-alloc" }

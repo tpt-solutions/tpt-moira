@@ -1,34 +1,34 @@
 [package]
-name = "moira"
+name = "tpt-moira"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.85"
 description = "TPT Moira: a from-scratch, high-performance Rust compiler"
 license = "MIT OR Apache-2.0"
 authors = ["TPT Solutions"]
-repository = "https://github.com/tpt-solutions/moira"
-homepage = "https://github.com/tpt-solutions/moira"
-documentation = "https://docs.rs/moira"
+repository = "https://github.com/tpt-solutions/tpt-moira"
+homepage = "https://github.com/tpt-solutions/tpt-moira"
+documentation = "https://docs.rs/tpt-moira"
 readme = "README.md"
 keywords = ["compiler", "rust", "rustc", "toolchain", "fast"]
 categories = ["compilers", "command-line-utilities", "development-tools"]
 
 
 [workspace]
-members = ["clotho", "lachesis", "atropos", "moira-alloc", "moira-bench"]
+members = ["tpt-moira-clotho", "tpt-moira-lachesis", "tpt-moira-atropos", "tpt-moira-alloc", "tpt-moira-bench"]
 
 [workspace.package]
 edition = "2021"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
 authors = ["TPT Solutions"]
-repository = "https://github.com/tpt-solutions/moira"
+repository = "https://github.com/tpt-solutions/tpt-moira"
 
 [dependencies]
-clotho = { path = "clotho" }
-lachesis = { path = "lachesis" }
-atropos = { path = "atropos" }
+tpt-moira-clotho = { path = "tpt-moira-clotho" }
+tpt-moira-lachesis = { path = "tpt-moira-lachesis" }
+tpt-moira-atropos = { path = "tpt-moira-atropos" }
 
 [[bin]]
-name = "moira"
+name = "tpt-moira"
 path = "src/main.rs"

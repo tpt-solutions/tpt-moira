@@ -3,39 +3,39 @@
 version = 4
 
 [[package]]
-name = "atropos"
+name = "tpt-moira"
 version = "0.1.0"
 dependencies = [
- "clotho",
- "moira-alloc",
+ "tpt-moira-atropos",
+ "tpt-moira-clotho",
+ "tpt-moira-lachesis",
 ]
 
 [[package]]
-name = "clotho"
+name = "tpt-moira-alloc"
 version = "0.1.0"
 
 [[package]]
-name = "lachesis"
+name = "tpt-moira-atropos"
 version = "0.1.0"
 dependencies = [
- "atropos",
- "clotho",
- "moira-alloc",
+ "tpt-moira-alloc",
+ "tpt-moira-clotho",
 ]
 
 [[package]]
-name = "moira"
+name = "tpt-moira-bench"
+version = "0.1.0"
+
+[[package]]
+name = "tpt-moira-clotho"
+version = "0.1.0"
+
+[[package]]
+name = "tpt-moira-lachesis"
 version = "0.1.0"
 dependencies = [
- "atropos",
- "clotho",
- "lachesis",
+ "tpt-moira-alloc",
+ "tpt-moira-atropos",
+ "tpt-moira-clotho",
 ]
-
-[[package]]
-name = "moira-alloc"
-version = "0.1.0"
-
-[[package]]
-name = "moira-bench"
-version = "0.1.0"

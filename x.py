@@ -271,7 +271,7 @@ def sha256_file(path: Path) -> str:
 
 def write_checksums(out: Path, version: str) -> Optional[Path]:
     """Write SHA-256 checksums for every staged artifact into
-    `dist/moira-<version>-checksums.txt` (relative paths, BSD-style)."""
+    `dist/tpt-moira-<version>-checksums.txt` (relative paths, BSD-style)."""
     artifacts = sorted(p for p in out.rglob("*") if p.is_file())
     if not artifacts:
         return None

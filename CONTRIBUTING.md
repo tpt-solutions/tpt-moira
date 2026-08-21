@@ -37,15 +37,15 @@ passes do not need it.
 the same source and classifies any divergence (`MoiraAcceptsButRustcRejects`,
 `RustcAcceptsButMoiraRejects`, `BothReject`). This is the foundation for the
 Phase-3 `rustc` UI-test CI job and the AI-assisted diffing tool. The pure
-classification logic lives in `lachesis::diff`; the orchestration is in
+classification logic lives in `tpt_moira_lachesis::diff`; the orchestration is in
 `src/main.rs`.
 
 ## Trait solver
 
-`lachesis::solver` is the Phase-3 Chalk-like solver foundation: a Horn-clause
+`tpt_moira_lachesis::solver` is the Phase-3 Chalk-like solver foundation: a Horn-clause
 (`Goal`/`Clause`) engine with inference-variable unification (occurs check) and
 a memoized, depth-limited SLD resolver. The built-in operator-trait program
-(`builtin_program`) mirrors `lachesis::traits::TraitDb`, so the solver already
+(`builtin_program`) mirrors `tpt_moira_lachesis::traits::TraitDb`, so the solver already
 backs the existing trait checks and is the seam for user `impl`s, where-clauses,
 and associated types.
 
@@ -53,7 +53,7 @@ User-defined trait `impl`s are parsed by `clotho` as `ast::ImplDef` (`impl Trait
 for Type { .. }`; method bodies are currently ignored). `lachesis` turns them
 into solver facts via `program_with_impls`, and `user_impl_implements(prog,
 trait_name, ty)` queries the result. `infer::ast_to_ty` translates a Clotho type
-into a `lachesis::ty::Ty` for that purpose.
+into a `tpt_moira_lachesis::ty::Ty` for that purpose.
 
 ## Performance regression tracking
 
@@ -94,7 +94,7 @@ source --(clotho: lex/parse/macro)--> AST
        --(atropos: codegen)----------> C | x86-64 asm
 ```
 
-End-to-end `lachesis::check` runs type inference, MIR lowering, and the borrow
+End-to-end `tpt_moira_lachesis::check` runs type inference, MIR lowering, and the borrow
 checker in sequence.
 
 ## Conventions
@@ -108,7 +108,7 @@ checker in sequence.
   `clotho/src/parser.rs`, and `clotho/src/macros.rs` together, and add a parser
   test under `clotho/tests/`.
 - **Borrow checking lives on the MIR:** the NLL-style analysis in
-  `lachesis/src/borrow.rs` runs over `atropos::mir`. New borrow rules should be
+  `lachesis/src/borrow.rs` runs over `tpt_moira_atropos::mir`. New borrow rules should be
   expressed as CFG reachability + liveness over MIR, not on the AST.
 - **Tests are mandatory** for any behavior change:
   - Frontend changes -> `clotho/tests/`.

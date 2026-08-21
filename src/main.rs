@@ -8,9 +8,9 @@
 use std::io::Read;
 use std::process::{Command, ExitCode};
 
-use lachesis::diff::{classify, parity, Allowlist};
-use lachesis::propose::{make_record, LlmProposer, TriageQueue};
-use lachesis::PipelineCacheExt;
+use tpt_moira_lachesis::diff::{classify, parity, Allowlist};
+use tpt_moira_lachesis::propose::{make_record, LlmProposer, TriageQueue};
+use tpt_moira_lachesis::PipelineCacheExt;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -68,7 +68,7 @@ fn main() -> ExitCode {
                 return ExitCode::FAILURE;
             }
         };
-        let prog = match clotho::compile_file(std::path::Path::new(path)) {
+        let prog = match tpt_moira_clotho::compile_file(std::path::Path::new(path)) {
             Ok(p) => p,
             Err(diag) => {
                 eprintln!("moira: parse error: {}", diag);
@@ -82,7 +82,7 @@ fn main() -> ExitCode {
             eprintln!("moira: failed to read stdin");
             return ExitCode::FAILURE;
         }
-        let prog = match clotho::compile_source(&buf) {
+        let prog = match tpt_moira_clotho::compile_source(&buf) {
             Ok(p) => p,
             Err(diag) => {
                 eprintln!("moira: parse error: {}", diag);
@@ -111,7 +111,7 @@ fn main() -> ExitCode {
     // Lachesis type + borrow checker before lowering/codegen. The result is read
     // through the whole-pipeline content-addressed cache when caching is on.
     if check {
-        if let Err(diags) = pipeline().checked(&source, || lachesis::check(&program)) {
+        if let Err(diags) = pipeline().checked(&source, || tpt_moira_lachesis::check(&program)) {
             for d in &diags {
                 eprintln!("moira: {}", d);
             }
@@ -121,7 +121,7 @@ fn main() -> ExitCode {
     }
 
     match emit.as_str() {
-        "check" => match pipeline().checked(&source, || lachesis::check(&program)) {
+        "check" => match pipeline().checked(&source, || tpt_moira_lachesis::check(&program)) {
             Ok(()) => println!("moira: type-check and borrow-check passed"),
             Err(diags) => {
                 for d in &diags {
@@ -136,7 +136,7 @@ fn main() -> ExitCode {
                 println!("  - {:?} {:?}", item.visibility, item.kind);
             }
         }
-        "mir" => match atropos::lower_program(&program) {
+        "mir" => match tpt_moira_atropos::lower_program(&program) {
             Ok(mir) => println!("{mir}"),
             Err(e) => {
                 eprintln!("moira: lowering error: {}", e);
@@ -150,15 +150,15 @@ fn main() -> ExitCode {
                 return ExitCode::FAILURE;
             }
         },
-        "c" => match atropos::lower_program(&program) {
-            Ok(mir) => emit_text(&atropos::codegen_c::emit_c(&mir), &output),
+        "c" => match tpt_moira_atropos::lower_program(&program) {
+            Ok(mir) => emit_text(&tpt_moira_atropos::codegen_c::emit_c(&mir), &output),
             Err(e) => {
                 eprintln!("moira: lowering error: {}", e);
                 return ExitCode::FAILURE;
             }
         },
         "asm" => {
-            match lower_and_ssa(&program).and_then(|ssa| atropos::codegen_native::emit_asm(&ssa)) {
+            match lower_and_ssa(&program).and_then(|ssa| tpt_moira_atropos::codegen_native::emit_asm(&ssa)) {
                 Ok(asm) => emit_text(&asm, &output),
                 Err(e) => {
                     eprintln!("moira: native codegen error: {}", e);
@@ -169,7 +169,7 @@ fn main() -> ExitCode {
         "native" => match lower_and_ssa(&program) {
             Ok(ssa) => {
                 let out = output.unwrap_or_else(|| "moira_out".to_string());
-                match atropos::codegen_native::compile_to_native(&ssa, std::path::Path::new(&out)) {
+                match tpt_moira_atropos::codegen_native::compile_to_native(&ssa, std::path::Path::new(&out)) {
                     Ok(()) => println!("moira: wrote native executable to `{}`", out),
                     Err(e) => {
                         eprintln!("moira: native codegen error: {}", e);
@@ -200,9 +200,9 @@ fn pipeline() -> PipelineCacheExt {
     PipelineCacheExt::new()
 }
 
-fn lower_and_ssa(program: &clotho::ast::Program) -> Result<atropos::SsaProgram, String> {
-    let mir = atropos::lower_program(program).map_err(|e| e.to_string())?;
-    let mut ssa = atropos::build_ssa(&mir)?;
+fn lower_and_ssa(program: &tpt_moira_clotho::ast::Program) -> Result<tpt_moira_atropos::SsaProgram, String> {
+    let mir = tpt_moira_atropos::lower_program(program).map_err(|e| e.to_string())?;
+    let mut ssa = tpt_moira_atropos::build_ssa(&mir)?;
     ssa.optimize();
     Ok(ssa)
 }
@@ -211,7 +211,7 @@ fn lower_and_ssa(program: &clotho::ast::Program) -> Result<atropos::SsaProgram, 
 /// unchanged source string reuses its previously computed SSA instead of
 /// recomputing it (the Phase-4 whole-pipeline cache: this is one of the
 /// artifacts keyed by source hash alongside the check result and MIR).
-fn ssa_text(source: &str, program: &clotho::ast::Program) -> Result<String, String> {
+fn ssa_text(source: &str, program: &tpt_moira_clotho::ast::Program) -> Result<String, String> {
     let s = pipeline().text(source, "ssa", || {
         lower_and_ssa(program)
             .map(|ssa| ssa.to_string())
@@ -243,14 +243,14 @@ fn emit_text(text: &str, output: &Option<String>) {
 /// the offline AI root-cause proposer runs and appends to the triage queue.
 fn run_diff(
     source: &str,
-    program: &clotho::ast::Program,
+    program: &tpt_moira_clotho::ast::Program,
     input_path: Option<&std::path::Path>,
     allowlist_path: Option<&str>,
     update_allowlist: bool,
     parity_flag: bool,
     propose_flag: bool,
 ) -> ExitCode {
-    let moira_errors = match lachesis::check(program) {
+    let moira_errors = match tpt_moira_lachesis::check(program) {
         Ok(()) => Vec::new(),
         Err(diags) => diags.iter().map(|d| d.to_string()).collect(),
     };
@@ -272,7 +272,7 @@ fn run_diff(
             Allowlist::default()
         }
     };
-    let hash = lachesis::content_hash(source);
+    let hash = tpt_moira_lachesis::content_hash(source);
 
     println!(
         "moira-diff: Moira errors={}, rustc errors={}",

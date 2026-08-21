@@ -1,0 +1,15 @@
+[package]
+name = "tpt-moira-bench"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Benchmark harness comparing Moira vs rustc compile times on the Phase-1 subset"
+publish = false
+readme = "README.md"
+keywords = ["benchmark", "compiler", "rustc", "performance", "rust"]
+categories = ["development-tools", "command-line-utilities"]
+
+[dependencies]

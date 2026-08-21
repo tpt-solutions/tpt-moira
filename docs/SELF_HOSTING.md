@@ -137,14 +137,14 @@ probe to flip from *blocked* to *self-hostable*.
 The following constructs in the *compiler's own source* now parse (verified by
 running `moira --emit mir <file>` per leaf module and by a clean `cargo test
 --workspace`, 0 regressions). Each unblocked several crates' first-parse errors:
-- **Byte-char literals `b'\n'`** — `clotho::lexer::lex_byte_char` now consumes
+- **Byte-char literals `b'\n'`** — `tpt_moira_clotho::lexer::lex_byte_char` now consumes
   the closing `'` (it previously left the quote in the stream, corrupting the
   next token and surfacing as `expected {, found char ' '` in `lexer.rs`).
 - **Tuple structs & unit structs** (`struct E(pub String);`, `struct Unit;`) —
   `parse_struct` now handles the `(..)` and bare-`;` forms (previously only brace
-  structs), unblocking `atropos::lower` / `lachesis::cache` / `pipeline_cache`.
+  structs), unblocking `tpt_moira_atropos::lower` / `tpt_moira_lachesis::cache` / `pipeline_cache`.
 - **Attributes on enum variants** (`#[default]`) — `parse_enum` now parses and
-  drops variant attributes, unblocking `atropos::mir`.
+  drops variant attributes, unblocking `tpt_moira_atropos::mir`.
 - **`let … else`** (`let Some(x) = e else { … }`) — `parse_local` now parses and
   discards the diverging `else` block.
 - **Labeled loops** (`'outer: for …`) — the lexer now drops a `'name:` lifetime
@@ -153,11 +153,11 @@ running `moira --emit mir <file>` per leaf module and by a clean `cargo test
   leading `mut`.
 - **Lifetime params/bounds in generics** (`<R: Send + 'static>`, `<'a, T>`) —
   `parse_generics` and `parse_where_clause` tolerate the lexer-dropped lifetime
-  tokens (dangling `,` / trailing `+` before `>`), unblocking `clotho::pipeline`.
+  tokens (dangling `,` / trailing `+` before `>`), unblocking `tpt_moira_clotho::pipeline`.
 - **`Fn`/`FnMut`/`FnOnce` trait types & bounds** (`Box<dyn Fn(&str) -> String +
   Send>`, `F: FnOnce() -> String`, `F: Fn(&str) -> String + 'static`) — `parse_type`
   and the bound parser consume the parenthesized args, optional `-> Ret`, and
-  trailing `+ Bound`s, unblocking `lachesis::propose` / `cache` / `pipeline_cache`.
+  trailing `+ Bound`s, unblocking `tpt_moira_lachesis::propose` / `cache` / `pipeline_cache`.
 - **`where`-clause termination** — the where-clause loop now stops at the body
   `{` rather than parsing it as a type.
 
@@ -172,7 +172,7 @@ cascade into the type-checker / MIR lowers (the documented full-self-host wall).
   (subset does not model the allocator's raw-pointer patterns yet).
 - **clotho**: `lexer.rs` ~byte 4217 `expected =>, found ..` — an inclusive range
    **pattern** `b'0'..=b'9'` in a `match` arm; **range patterns are now modeled**
-   (see `Pat::Range` support in `lachesis::infer` + `atropos::lower::pattern_guard`),
+   (see `Pat::Range` support in `tpt_moira_lachesis::infer` + `tpt_moira_atropos::lower::pattern_guard`),
    so this blocker is resolved at the type-check + codegen level. Still open: range
    **expressions** (`tts[..idx]`, `&sig.params[1..]` slice indexing) are not yet modeled.
 - **atropos**: `lower.rs` ~byte 6652 `expected :, found ,` — a struct/enum field
@@ -195,16 +195,16 @@ code generator**, which still reject most of the compiler's own code:
       `atropos`/`codegen_c.rs` tests. The native ASM backend does not model
       tuples yet.
 - [x] Tuple **destructure** in `let (a, b) = ..` (the `Pat::Tuple` parser path
-       existed; `lachesis::infer` + `atropos::lower` now bind each component —
+       existed; `tpt_moira_lachesis::infer` + `tpt_moira_atropos::lower` now bind each component —
        validated by `tuple_destructure_*` tests). `for (x, y) in ..` destructuring
        is now also resolved for array-of-tuples (each component is read from the
        element's `.fN` field — validated by `for_over_tuple_array_*` tests); only
        `let`-bound (non-literal) array-of-tuples destructuring remains.
-- [x] Closures type-check acceptance — `lachesis::infer::check_closure` now
+- [x] Closures type-check acceptance — `tpt_moira_lachesis::infer::check_closure` now
        exists (the type checker previously failed to compile because it referenced
        the unimplemented method); closures are accepted at the type level. Capture
        analysis and MIR/codegen of closures remain open.
-- [x] `match` accepted by `lachesis::infer` + lowered to MIR (common subset:
+- [x] `match` accepted by `tpt_moira_lachesis::infer` + lowered to MIR (common subset:
        literal / wildcard / identifier / ref / or / tuple-of-identifiers patterns;
        enum-variant destructuring `Some(x)` is still treated as an irrefutable
        binder, not a variant test). `if let` / `while let` were already resolved

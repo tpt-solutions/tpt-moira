@@ -46,16 +46,16 @@ first diagnostic.
 
 ## Lachesis internals
 
-* **Type inference** (`lachesis::infer`) — a direct (non-generic) inference
+* **Type inference** (`tpt_moira_lachesis::infer`) — a direct (non-generic) inference
   engine. Every expression's type is computed locally (literals default to `i32`,
   variables resolve from a scope stack, calls from signatures, fields from struct
   definitions) while operand constraints are checked on the fly. Unknown
   operands become the `Unknown` error sentinel so one mistake does not cascade.
-* **Trait resolution** (`lachesis::traits`) — a built-in trait database the
+* **Trait resolution** (`tpt_moira_lachesis::traits`) — a built-in trait database the
   checker queries for operator applicability (`Add`, `Sub`, `Mul`, `Div`, `Rem`,
   bitwise, `PartialEq`, `PartialOrd`). This is the seam for the Phase-3
   Prolog-style solver.
-* **Borrow checking** (`lachesis::borrow`) — runs over the Atropos MIR. The fast
+* **Borrow checking** (`tpt_moira_lachesis::borrow`) — runs over the Atropos MIR. The fast
   path skips functions with no references. Otherwise it builds the CFG from
   terminators, propagates reference *aliases* (a variable copied from a borrow
   temp keeps the borrow alive), and reports a conflict whenever a place is
@@ -70,7 +70,7 @@ valid coexisting `&` borrows.
 
 ## Incremental cache
 
-`lachesis::cache` is a disk-backed, content-addressed store. Artifacts are keyed
+`tpt_moira_lachesis::cache` is a disk-backed, content-addressed store. Artifacts are keyed
 by the FNV-1a hash of their source text, so recompiling unchanged code reuses the
 cached result. `IncrementalCache::compute_if_absent` mirrors a memoized query
 (the Salsa-like pattern) and is wired into `--emit ssa`.
