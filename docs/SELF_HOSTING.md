@@ -87,6 +87,20 @@ probe to flip from *blocked* to *self-hostable*.
       expression; the surrounding `if`/`while` owns the then-block)
 
 ### Resolved this session (parser-level)
+- **Binary-operand struct literals no longer eat the following `if`/`while`/`for`
+  then-block.** `parse_expr_bp` propagated `allow_struct = true` into the right
+  operand of every binary operator, so `if a > b { a } else { b }` misparsed
+  `b { a }` as a struct literal (yielding "expected {, found else"). The flag now
+  propagates the caller's `allow_struct` value into the RHS, so the
+  `if`/`while`/`match`/`for` condition parsers (which disable struct literals to
+  protect their then-block `{`) keep that guarantee. Top-level `a + Foo { .. }`
+  still parses. Locked in by `clotho/tests/frontend.rs`
+  (`parse_if_with_binary_condition_does_not_eat_then_block`).
+- **Leading-dot floats `.5` / `.25e-3` lex correctly** (`lex_leading_float`),
+  and a `.N` following a receiver is recovered as numeric tuple/struct field
+  access (`expr.0`) in `parse_postfix`. Standalone floats with a type suffix
+  (`0.0f64`, `3.14f32`) already lex via `lex_number`, so the `diff.rs`
+  `0.0f64` float-suffix parse gap is resolved.
 - **Tuple literal expressions `(a, b, c)` now parse.** The tuple branch in
   `parse_atom` previously called `self.expect(TokenKind::RParen)` *after*
   `parse_delimited` had already consumed the closing `)` (a double-consume that
@@ -165,9 +179,10 @@ cascade into the type-checker / MIR lowers (the documented full-self-host wall).
   list the parser diverges on (likely a tuple/enum-variant field or a
   type-ascription `:` edge case).
 - **lachesis**: `borrow.rs` ~byte 9056 `expected expression, found =` — a `let`
-  binding (enum/tuple destructuring or `let … = …` with a pattern the subset
-  does not yet lower); plus `solver.rs` tuple patterns in `match`, `diff.rs`
-  float-literal suffix (`0.0f64`), and `infer.rs` slice indexing.
+   binding (enum/tuple destructuring or `let … = …` with a pattern the subset
+   does not yet lower); plus `solver.rs` tuple patterns in `match`, and
+   `infer.rs` slice indexing. (The `diff.rs` float-literal suffix `0.0f64` is now
+   parsed by `lex_number`, so it is no longer a parse blocker.)
 
 
 ### Broader remaining gaps (the real self-host wall)

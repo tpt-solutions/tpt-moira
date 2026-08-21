@@ -16,7 +16,7 @@ use clotho::ast::{
 };
 use clotho::error::Diag;
 use clotho::token::Span;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// A struct's resolved field types.
 #[derive(Debug, Clone)]
@@ -435,17 +435,43 @@ impl TypeChecker {
     /// Parameters are typed from their annotations (falling back to the `i32`
     /// default for inference), the body is checked in a scope binding each
     /// parameter, and the closure's type is the function type
-    /// `(param_tys) -> ret_ty`. Capture analysis and MIR/codegen of closures
-    /// remain a later Phase-4 deliverable; this accepts closures at the
-    /// type-check level so the compiler builds and the subset can grow toward
-    /// them.
+    /// `(param_tys) -> ret_ty`. Capture analysis (the prerequisite for closure
+    /// codegen) is performed here: any variable the body references from the
+    /// enclosing environment is reported precisely, because the C/native
+    /// backends do not yet lower `ExprKind::Closure` with captures.
     fn check_closure(
         &mut self,
-        _span: Span,
+        span: Span,
         params: &[Param],
         ret: &Option<Type>,
         body: &Expr,
     ) -> Ty {
+        let mut param_names = HashSet::new();
+        for p in params {
+            bind_pat_names(&p.pat, &mut param_names);
+        }
+
+        // Capture analysis: names the body references that resolve to a variable
+        // in the enclosing environment (and are not the closure's own parameters
+        // or a locally-bound name) are the captured variables. Closure codegen
+        // does not yet support captures, so report them precisely here rather
+        // than letting them surface as a cryptic downstream codegen error.
+        let outer_names: HashSet<String> =
+            self.env.iter().flat_map(|s| s.keys().cloned()).collect();
+        let captures: Vec<String> = closure_free_vars(body, &param_names)
+            .into_iter()
+            .filter(|n| outer_names.contains(n))
+            .collect();
+        if !captures.is_empty() {
+            self.err(
+                span,
+                format!(
+                    "closures that capture variables are not yet supported in the codegen subset (captured: {})",
+                    captures.join(", ")
+                ),
+            );
+        }
+
         let mut param_tys = Vec::with_capacity(params.len());
         self.env.push(HashMap::new());
         for p in params {
@@ -1659,6 +1685,209 @@ fn pat_name(pat: &Pat) -> String {
     }
 }
 
+/// Add the variable names bound by `pat` to `bound`.
+///
+/// Only patterns that *introduce* a new binding are recorded here (identifiers,
+/// tuple/reference/`@` patterns, and the inner patterns of `or`/range patterns).
+/// Variant/struct patterns bind names via the matched value rather than a fresh
+/// local and are intentionally ignored for capture detection.
+fn bind_pat_names(pat: &Pat, bound: &mut HashSet<String>) {
+    match pat {
+        Pat::Ident(n) => {
+            bound.insert(n.node.clone());
+        }
+        Pat::Wild => {}
+        Pat::Lit(_) => {}
+        Pat::Tuple(ps) => {
+            for p in ps {
+                bind_pat_names(p, bound);
+            }
+        }
+        Pat::Path(_) => {}
+        Pat::Ref(p) => bind_pat_names(p, bound),
+        Pat::Or(a, b) => {
+            bind_pat_names(a, bound);
+            bind_pat_names(b, bound);
+        }
+        Pat::Struct(_, fields) => {
+            for (_, p) in fields {
+                bind_pat_names(p, bound);
+            }
+        }
+        Pat::Range(a, b, _) => {
+            if let Some(p) = a {
+                bind_pat_names(p, bound);
+            }
+            if let Some(p) = b {
+                bind_pat_names(p, bound);
+            }
+        }
+        Pat::Bind(n, sub) => {
+            bound.insert(n.clone());
+            bind_pat_names(sub, bound);
+        }
+    }
+}
+
+/// Collect the variable names referenced by `expr` that are free with respect to
+/// `bound` (the names bound *inside* `expr` itself, e.g. the closure's own
+/// parameters and any `let`/pattern bindings in its body).
+///
+/// The result is deduplicated (first-use order preserved) and is the set of
+/// names a closure would need to capture. It is the prerequisite for closure
+/// codegen: it identifies exactly which enclosing variables escape into the
+/// closure body.
+fn closure_free_vars(expr: &Expr, bound: &HashSet<String>) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    collect_free_vars(expr, bound, &mut out, &mut seen);
+    out
+}
+
+fn collect_free_vars(
+    expr: &Expr,
+    bound: &HashSet<String>,
+    out: &mut Vec<String>,
+    seen: &mut HashSet<String>,
+) {
+    match &expr.kind {
+        ExprKind::Path(p) => {
+            // Only a single-segment path can name a local variable; multi-segment
+            // paths are associated functions / methods / type constructors.
+            if p.segments.len() == 1 {
+                let n = p.segments[0].node.clone();
+                if !bound.contains(&n) && seen.insert(n.clone()) {
+                    out.push(n);
+                }
+            }
+        }
+        ExprKind::Lit(_) => {}
+        ExprKind::Binary(l, _, r) => {
+            collect_free_vars(l, bound, out, seen);
+            collect_free_vars(r, bound, out, seen);
+        }
+        ExprKind::Unary(_, e) => collect_free_vars(e, bound, out, seen),
+        ExprKind::Call(f, args) => {
+            collect_free_vars(f, bound, out, seen);
+            for a in args {
+                collect_free_vars(a, bound, out, seen);
+            }
+        }
+        ExprKind::MethodCall(r, _, args) => {
+            collect_free_vars(r, bound, out, seen);
+            for a in args {
+                collect_free_vars(a, bound, out, seen);
+            }
+        }
+        ExprKind::Field(e, _) => collect_free_vars(e, bound, out, seen),
+        ExprKind::Index(b, i) => {
+            collect_free_vars(b, bound, out, seen);
+            collect_free_vars(i, bound, out, seen);
+        }
+        ExprKind::Ref(e, _) => collect_free_vars(e, bound, out, seen),
+        ExprKind::Deref(e) => collect_free_vars(e, bound, out, seen),
+        ExprKind::Array(es) => {
+            for e in es {
+                collect_free_vars(e, bound, out, seen);
+            }
+        }
+        ExprKind::Struct(_, fields, base) => {
+            for (_, e) in fields {
+                collect_free_vars(e, bound, out, seen);
+            }
+            if let Some(b) = base {
+                collect_free_vars(b, bound, out, seen);
+            }
+        }
+        ExprKind::Tuple(es) => {
+            for e in es {
+                collect_free_vars(e, bound, out, seen);
+            }
+        }
+        ExprKind::Block(b) => collect_free_vars_block(b, bound, out, seen),
+        ExprKind::If(c, tb, eb) => {
+            collect_free_vars(c, bound, out, seen);
+            collect_free_vars_block(tb, bound, out, seen);
+            if let Some(e) = eb {
+                collect_free_vars(e, bound, out, seen);
+            }
+        }
+        ExprKind::While(c, b) => {
+            collect_free_vars(c, bound, out, seen);
+            collect_free_vars_block(b, bound, out, seen);
+        }
+        ExprKind::Loop(b) => collect_free_vars_block(b, bound, out, seen),
+        ExprKind::For(p, e, b) => {
+            collect_free_vars(e, bound, out, seen);
+            let mut b2 = bound.clone();
+            bind_pat_names(p, &mut b2);
+            collect_free_vars_block(b, &b2, out, seen);
+        }
+        ExprKind::Return(e) => {
+            if let Some(e) = e {
+                collect_free_vars(e, bound, out, seen);
+            }
+        }
+        ExprKind::Break | ExprKind::Continue => {}
+        ExprKind::Match(s, arms) => {
+            collect_free_vars(s, bound, out, seen);
+            for (p, e) in arms {
+                let mut b2 = bound.clone();
+                bind_pat_names(p, &mut b2);
+                collect_free_vars(e, &b2, out, seen);
+            }
+        }
+        ExprKind::Await(e) => collect_free_vars(e, bound, out, seen),
+        ExprKind::Unsafe(b) => collect_free_vars_block(b, bound, out, seen),
+        ExprKind::Closure { params, body, .. } => {
+            let mut b2 = bound.clone();
+            for p in params {
+                bind_pat_names(&p.pat, &mut b2);
+            }
+            collect_free_vars(body, &b2, out, seen);
+        }
+        ExprKind::Cast(e, _) => collect_free_vars(e, bound, out, seen),
+        ExprKind::Range(a, b, _) => {
+            if let Some(e) = a {
+                collect_free_vars(e, bound, out, seen);
+            }
+            if let Some(e) = b {
+                collect_free_vars(e, bound, out, seen);
+            }
+        }
+        // Raw macro tokens are not analyzed for captures; the subset's macros
+        // (`print!`, `vec!`, …) reference only globals.
+        ExprKind::Macro(_) => {}
+        ExprKind::Try(e) => collect_free_vars(e, bound, out, seen),
+    }
+}
+
+fn collect_free_vars_block(
+    b: &Block,
+    bound: &HashSet<String>,
+    out: &mut Vec<String>,
+    seen: &mut HashSet<String>,
+) {
+    let mut bset = bound.clone();
+    for s in &b.stmts {
+        match &s.kind {
+            StmtKind::Local(l) => {
+                if let Some(init) = &l.init {
+                    collect_free_vars(init, &bset, out, seen);
+                }
+                bind_pat_names(&l.pat, &mut bset);
+            }
+            StmtKind::Expr(e) | StmtKind::Semi(e) => collect_free_vars(e, &bset, out, seen),
+            // Nested items introduce their own scopes; their bodies are not
+            // in the captured-variable set of the enclosing closure.
+            StmtKind::Item(_) => {}
+        }
+    }
+    if let Some(tail) = &b.tail {
+        collect_free_vars(tail, &bset, out, seen);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1880,5 +2109,59 @@ mod tests {
         assert!(check("fn g(x: i32) { let y = x as u32; let _ = y; }").is_ok());
         // A type error inside the cast operand is still reported.
         assert!(check("fn h() { let _ = unknown_fn() as i64; }").is_err());
+    }
+
+    // --- closure capture analysis ----------------------------------------
+
+    #[test]
+    fn non_capturing_closure_is_accepted() {
+        // The body references only the closure's own parameter.
+        assert!(check("fn f() { let g = |x: i32| x + 1; }").is_ok());
+    }
+
+    #[test]
+    fn closure_capturing_variable_is_rejected_with_precise_message() {
+        // `a` is an enclosing variable; the diagnostic names exactly the
+        // captured variable rather than failing later in an opaque codegen path.
+        let res = check("fn f() { let a = 5; let g = |x: i32| a + x; }");
+        assert!(res.is_err());
+        let msg = format!("{:?}", res.err().unwrap());
+        assert!(msg.contains("captured: a"), "unexpected message: {}", msg);
+    }
+
+    #[test]
+    fn closure_referencing_function_name_is_accepted() {
+        // `add` is a top-level function (in the `fns` table, not the local
+        // environment), so it is not a captured variable and the closure is
+        // accepted by the type checker.
+        assert!(check(
+            "fn add(a: i32, b: i32) -> i32 { a + b }\nfn f() { let g = |x: i32| add(x, 1); }"
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn closure_capturing_multiple_variables_lists_all() {
+        // Both `a` and `b` escape into the closure; the diagnostic lists both.
+        let res = check("fn f() { let a = 1; let b = 2; let g = |x: i32| a + b + x; }");
+        assert!(res.is_err());
+        let msg = format!("{:?}", res.err().unwrap());
+        assert!(msg.contains("captured: a"), "unexpected message: {}", msg);
+        assert!(
+            msg.contains("captured: a, b") || msg.contains("captured: b"),
+            "unexpected message: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn nested_closure_capture_is_detected() {
+        // The outer closure captures `a`; the inner closure captures `a` and the
+        // outer parameter `x`. Capture analysis descends into nested closures.
+        let res =
+            check("fn f() { let a = 5; let g = |x: i32| { let h = |y: i32| a + x + y; }; }");
+        assert!(res.is_err());
+        let msg = format!("{:?}", res.err().unwrap());
+        assert!(msg.contains("captured: a"), "unexpected message: {}", msg);
     }
 }

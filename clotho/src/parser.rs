@@ -1213,7 +1213,13 @@ impl Parser {
                 break;
             }
             self.bump(); // consume the operator token
-            let rhs = self.parse_expr_bp(r_bp, false)?;
+            // A struct literal is only allowed as an operand when the surrounding
+            // expression permits it (e.g. a top-level statement), so that `if a >
+            // b { .. }` does not misparse `b { .. }` as a struct literal instead
+            // of the `if`'s then-block. The `if`/`while`/`match`/`for` parsers
+            // disable struct literals for their condition, and that flag now
+            // propagates through to this RHS.
+            let rhs = self.parse_expr_bp(r_bp, allow_struct)?;
             let span = Span::new(lhs.span.start, rhs.span.end);
             lhs = Expr {
                 kind: ExprKind::Binary(Box::new(lhs), op, Box::new(rhs)),
@@ -1518,11 +1524,31 @@ impl Parser {
                 let elems = self.parse_delimited(TokenKind::RBracket, |s| s.parse_expr())?;
                 ExprKind::Array(elems)
             }
-            TokenKind::If => return self.parse_if(),
-            TokenKind::While => return self.parse_while(),
-            TokenKind::Loop => return self.parse_loop(),
-            TokenKind::For => return self.parse_for(),
-            TokenKind::Match => return self.parse_match(),
+            // These expression forms may be postfixed (e.g. `match { … }.method()`
+            // or `if cond { } .field`), so they are wrapped in `parse_postfix`
+            // before returning (returning them bare would bypass field/method
+            // access on the whole conditional/match expression). The inner result
+            // is bound to a local first to satisfy the borrow checker.
+            TokenKind::If => {
+                let e = self.parse_if()?;
+                return self.parse_postfix(e);
+            }
+            TokenKind::While => {
+                let e = self.parse_while()?;
+                return self.parse_postfix(e);
+            }
+            TokenKind::Loop => {
+                let e = self.parse_loop()?;
+                return self.parse_postfix(e);
+            }
+            TokenKind::For => {
+                let e = self.parse_for()?;
+                return self.parse_postfix(e);
+            }
+            TokenKind::Match => {
+                let e = self.parse_match()?;
+                return self.parse_postfix(e);
+            }
             TokenKind::Return => {
                 self.bump();
                 if self.starts_expr() && !self.check(&TokenKind::Semicolon) {
@@ -1707,6 +1733,26 @@ impl Parser {
                     let end = self.peek().span.start;
                     expr = Expr {
                         kind: ExprKind::Try(Box::new(expr)),
+                        span: Span::new(start, end),
+                    };
+                }
+                // A `.N` float token immediately following a receiver is numeric
+                // tuple/struct field access. The lexer fuses `.0` into a single
+                // `Float` literal (so standalone leading-dot floats like `.5`
+                // also parse); here we recover the field-access reading, which is
+                // how `expr.0` / `expr.5` appear in real code.
+                TokenKind::Float { text, .. }
+                    if text.starts_with('.') && text[1..].chars().all(|c| c.is_ascii_digit()) =>
+                {
+                    let span = self.peek().span;
+                    let field = text[1..].to_string();
+                    self.bump();
+                    let end = self.peek().span.start;
+                    expr = Expr {
+                        kind: ExprKind::Field(
+                            Box::new(expr),
+                            Spanned::new(field, span),
+                        ),
                         span: Span::new(start, end),
                     };
                 }

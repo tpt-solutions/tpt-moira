@@ -293,6 +293,31 @@ fn parse_tuple_types_and_index() {
 }
 
 #[test]
+fn parse_if_with_binary_condition_does_not_eat_then_block() {
+    // Regression: a struct literal is only allowed as a binary operand when the
+    // surrounding context permits it. With `allow_struct` re-enabled on the RHS
+    // of a comparison, `if a > b { a } else { b }` misparsed `b { a }` as a
+    // struct literal and then failed with "expected {, found else". The flag now
+    // propagates through to the RHS so the then-block's `{` is never swallowed.
+    let src = "fn max(a: i32, b: i32) -> i32 { if a > b { a } else { b } }";
+    let prog = parse_source(src).unwrap();
+    assert_eq!(prog.items.len(), 1);
+    let src2 = "fn f() { if a == b { 1 } else { 0 } }";
+    let prog2 = parse_source(src2).unwrap();
+    assert_eq!(prog2.items.len(), 1);
+}
+
+#[test]
+fn parse_leading_dot_float_and_field_access() {
+    // Regression: a `.` immediately followed by a digit is a leading-dot float
+    // literal (`.5`), and a `.N` following a receiver is numeric tuple/struct
+    // field access (`expr.0`). Both must parse.
+    let src = "fn f(t: (i32, i32)) { let _ = t.0; let _ = t.1.cmp(t.0); let _ = .5; }";
+    let prog = parse_source(src).unwrap();
+    assert_eq!(prog.items.len(), 1);
+}
+
+#[test]
 fn parse_generic_type_alias() {
     // Regression: generic type aliases `type Pair<T> = (T, T);` must parse. The
     // `TypeAliasDef` now carries optional `generics`.

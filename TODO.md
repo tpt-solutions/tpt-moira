@@ -351,17 +351,22 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
       parses fully** and reaches type-check (132 borrow/type errors). `clotho` and
       `atropos` each advanced past their `impl Trait` gate (and `codegen_c.rs`
       past tuple-index) and now hit the next construct in their own source:
-      `clotho` is blocked by a **byte literal** (`b'\n'`) in its own `lexer.rs`
-      that the lexer does not yet support; `atropos` by a `format!("...", name =
-      expr)` named-argument comma in `codegen_native.rs`; `lachesis` by a `for`
-      loop in `borrow.rs`. `moira-alloc` parses (25 type/borrow errors). The real
-      remaining wall is the **type checker + code generator**, which still rejects
-      `match` / closures / generics / tuples from the compiler's own code; closing
-      that is a large, multi-session effort (tuple values end-to-end,
-      `match`/`if let`/closures in `lachesis::infer` + MIR, generics +
-      `where`-clause solving, trait solving wired into `infer`). Validated by
-      `clotho/tests/frontend.rs`, `lachesis/src/infer.rs`, and the `x.py
-      self-host` probe.
+`clotho`'s **byte literal** (`b'\n'`) blocker is **resolved** — the lexer's
+     `lex_byte_char` handles `b'…'` and it parses + type-checks as `Char` (verified
+     via `moira --emit check` on a `b'\n'`/`b'a'` program); `atropos`'s
+     `format!("...", name = expr)` named-argument comma in `codegen_native.rs`
+     remains an open parser/macro gap; `lachesis`'s `for` loop in `borrow.rs` is
+     **resolved** — a `for x in arr` over an array now type- and borrow-checks
+     cleanly (verified via `moira --emit check` on a `for`-over-array program and
+     the existing `for_over_array_is_type_checked` / `for_over_array_literal_runs`
+     tests). `moira-alloc` parses (25 type/borrow errors). The real remaining wall
+     is the **type checker + code generator**,
+     which still rejects `match` / closures / generics / tuples from the
+     compiler's own code; closing that is a large, multi-session effort (tuple
+     values end-to-end, `match`/`if let`/closures in `lachesis::infer` + MIR,
+     generics + `where`-clause solving, trait solving wired into `infer`).
+     Validated by `clotho/tests/frontend.rs`, `lachesis/src/infer.rs`, and the
+     `x.py self-host` probe.
   - [ ] **Parser: close remaining gating constructs** (blocks `clotho`/`lachesis`/`atropos` from parsing at all)
     - [x] Tuple expressions (`(a, b)`) and tuple types — **parser resolved**:
       the tuple branch in `clotho::parser::parse_atom` double-consumed the
@@ -497,15 +502,25 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
           - **Caveat:** enum-variant patterns (`Some(x)`, `Ok(x)`) are not yet
             supported — that is the `match`/enum destructuring task below.
     - [ ] Closures: parsing, capture typing, and MIR/codegen lowering
-          - **Status: Partial (type-check acceptance).** The parser already
-            recognized `|params| body`; the type checker previously failed to
-            compile because `infer_expr` called an unimplemented `check_closure`.
-            `lachesis::infer::check_closure` now exists: parameters are typed from
-            their annotations (defaulting to `i32`), the body is checked in a scope
-            binding each parameter, and the closure's type is the function type
-            `Ty::Fn(param_tys, ret_ty)`. Capture analysis and MIR/codegen of
-            closures remain open (the C/native backends do not yet lower
-            `ExprKind::Closure`).
+           - **Status: Partial (type-check acceptance + capture analysis).** The
+             parser already recognized `|params| body`; `lachesis::infer::check_closure`
+             now exists: parameters are typed from their annotations (defaulting to
+             `i32`), the body is checked in a scope binding each parameter, and the
+             closure's type is the function type `Ty::Fn(param_tys, ret_ty)`.
+             **Capture analysis is now implemented** (`closure_free_vars` /
+             `bind_pat_names` in `lachesis::infer`): the free variables the body
+             references from the enclosing environment are computed and, because the
+             C/native backends do not yet lower `ExprKind::Closure` with captures, a
+             closure that captures variables is rejected at type-check with a precise
+             diagnostic naming exactly the captured variables (e.g.
+             `closures that capture variables are not yet supported in the codegen
+             subset (captured: a, b)`). Non-capturing closures continue to be
+             accepted. Validated by the `infer` unit tests `non_capturing_closure_is_accepted`,
+             `closure_capturing_variable_is_rejected_with_precise_message`,
+             `closure_referencing_function_name_is_accepted`,
+             `closure_capturing_multiple_variables_lists_all`,
+             `nested_closure_capture_is_detected`. MIR/codegen lowering of closures
+             remains open.
     - [ ] Full generics + `where`-clause solving wired into `infer` for real (non-toy) generic code
     - [ ] Wire the Chalk-like trait solver (`lachesis::solver`) into `infer`'s method-resolution path so trait-object/generic-bound method calls in the compiler's own code resolve
   - [ ] **Coverage tracking**

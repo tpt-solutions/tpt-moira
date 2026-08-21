@@ -128,6 +128,12 @@ impl<'src> Lexer<'src> {
 
             let kind = match b {
             b'0'..=b'9' => self.lex_number(),
+            // A `.` immediately followed by a digit is a leading-dot float
+            // literal (e.g. `.5`, `.5e3`); route it to the float lexer rather
+            // than producing a bare `Dot`/`DotDot` punctuation token.
+            b'.' if self.peek_byte_at(1).is_some_and(|c| c.is_ascii_digit()) => {
+                self.lex_leading_float()
+            }
             b'a'..=b'z' | b'A'..=b'Z' | b'_' => self.lex_ident_or_keyword(),
             b'"' => self.lex_string(),
             b'\'' => match self.lex_quote() {
@@ -414,6 +420,54 @@ impl<'src> Lexer<'src> {
                 value: parse_int(&digits, base),
                 suffix: None,
             }
+        }
+    }
+
+    /// Lex a float literal whose integer part is elided, e.g. `.5`, `.25e-3`,
+    /// `.0f64`. Rust accepts a leading `.` before the fractional digits; the
+    /// integer part is empty. The exponent and type-suffix handling mirrors
+    /// [`lex_number`].
+    fn lex_leading_float(&mut self) -> TokenKind {
+        let mut digits = String::new();
+        // Consume the leading `.`.
+        self.bump();
+        digits.push('.');
+        while let Some(b) = self.peek_byte() {
+            if b.is_ascii_digit() {
+                digits.push(b as char);
+                self.bump();
+            } else {
+                break;
+            }
+        }
+        // Optional exponent `e`/`E` (with optional sign).
+        if matches!(self.peek_byte(), Some(b'e') | Some(b'E')) {
+            digits.push(self.bump().unwrap() as char);
+            if matches!(self.peek_byte(), Some(b'+') | Some(b'-')) {
+                digits.push(self.bump().unwrap() as char);
+            }
+            while let Some(b) = self.peek_byte() {
+                if b.is_ascii_digit() {
+                    digits.push(b as char);
+                    self.bump();
+                } else {
+                    break;
+                }
+            }
+        }
+        // Optional type suffix (`f32`, `f64`, …).
+        if let Some(b) = self.peek_byte() {
+            if b.is_ascii_alphabetic() {
+                let suffix = self.lex_ident_body();
+                return TokenKind::Float {
+                    text: digits,
+                    suffix: Some(suffix),
+                };
+            }
+        }
+        TokenKind::Float {
+            text: digits,
+            suffix: None,
         }
     }
 
