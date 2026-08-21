@@ -53,7 +53,79 @@ pub fn lower_program(prog: &Program) -> Result<mir::Program> {
             _ => None,
         })
         .collect();
+    // Literal top-level constants (`const X: i32 = 3;`) are folded into their
+    // uses: the map feeds `lower_expr`'s path resolution so a const reference
+    // becomes a constant operand instead of an undeclared C variable.
+    let const_values: std::collections::HashMap<String, i128> = prog
+        .items
+        .iter()
+        .filter_map(|it| match &it.kind {
+            ItemKind::Const(c) => const_literal(&c.value).map(|v| (c.name.node.clone(), v)),
+            ItemKind::Static(s) => const_literal(&s.value).map(|v| (s.name.node.clone(), v)),
+            _ => None,
+        })
+        .collect();
+    // Enum layout registry. The prelude `std` enums are modeled even when the
+    // source declares no `enum` items; user `enum` definitions register their
+    // own variants below.
+    let mut enum_defs: Vec<(String, Vec<(String, usize)>)> = vec![
+        (
+            "Option".to_string(),
+            vec![("Some".to_string(), 1), ("None".to_string(), 0)],
+        ),
+        (
+            "Result".to_string(),
+            vec![("Ok".to_string(), 1), ("Err".to_string(), 1)],
+        ),
+    ];
     for item in &prog.items {
+        if let ItemKind::Enum(e) = &item.kind {
+            enum_defs.push((
+                e.name.node.clone(),
+                e.variants
+                    .iter()
+                    .map(|v| {
+                        (
+                            v.name.node.clone(),
+                            v.fields.as_ref().map(|f| f.len()).unwrap_or(0),
+                        )
+                    })
+                    .collect(),
+            ));
+        }
+    }
+    // Each enum becomes a tagged struct `{ long long tag; long long f0; }`;
+    // each variant maps its constructor name to the enum + tag + arity.
+    let mut enum_structs: Vec<mir::StructDef> = Vec::new();
+    let mut variants: HashMap<String, (String, i128, usize)> = HashMap::new();
+    for (ename, vars) in &enum_defs {
+        let needs_payload = vars.iter().any(|(_, a)| *a > 0);
+        let mut fields = vec![("tag".to_string(), "long long".to_string())];
+        if needs_payload {
+            fields.push(("f0".to_string(), "long long".to_string()));
+        }
+        enum_structs.push(mir::StructDef {
+            name: ename.clone(),
+            fields,
+        });
+        for (tag, (vname, arity)) in vars.iter().enumerate() {
+            variants.insert(vname.clone(), (ename.clone(), tag as i128, *arity));
+        }
+    }
+
+
+    for st in &enum_structs {
+        if !out.structs.iter().any(|s| s.name == st.name) {
+            out.structs.push(st.clone());
+        }
+    }
+    for item in &prog.items {
+        // `#[cfg(test)]` items (e.g. `mod tests`) are not part of the
+        // compiled artifact; test-only code uses macros and library surface
+        // outside the codegen subset.
+        if item.is_cfg_test() {
+            continue;
+        }
         match &item.kind {
             ItemKind::Struct(s) => {
                 let fields = s
@@ -66,14 +138,20 @@ pub fn lower_program(prog: &Program) -> Result<mir::Program> {
                     fields,
                 });
             }
+            // Enums are lowered as tagged structs, registered above.
+            ItemKind::Enum(_) => {}
             ItemKind::Use(_) => { /* ignored in Phase 1 */ }
             ItemKind::Impl(_) => { /* trait impls are consumed by the type checker */ }
             ItemKind::Module(_) => { /* resolved/inlined by the frontend */ }
+            // Literal constants were folded into `const_values` above; their
+            // uses become constant operands, so the item itself needs no code.
+            ItemKind::Const(_) | ItemKind::Static(_) => {}
             ItemKind::Function(f) => {
                 if f.is_async {
                     let mut l = Lower::new(&out.structs);
                     l.async_fns = async_names.clone();
                     l.all_fn_names = all_fn_names.clone();
+                    l.const_values = const_values.clone();
                     let ad = l.lower_async_function(f)?;
                     out.structs.push(mir::StructDef {
                         name: ad.def.fut_name.clone(),
@@ -88,6 +166,8 @@ pub fn lower_program(prog: &Program) -> Result<mir::Program> {
                     let mut l = Lower::new(&out.structs);
                     l.async_fns = async_names.clone();
                     l.all_fn_names = all_fn_names.clone();
+                    l.const_values = const_values.clone();
+                    l.variants = variants.clone();
                     let func = l.lower_function(f)?;
                     let tuple_structs: Vec<mir::StructDef> =
                         l.tuple_structs.values().cloned().collect();
@@ -99,15 +179,25 @@ pub fn lower_program(prog: &Program) -> Result<mir::Program> {
             other => {
                 return Err(LowerError(format!(
                     "unsupported top-level item in codegen subset: {:?}",
-                    matches!(
-                        other,
-                        ItemKind::Enum(_) | ItemKind::Const(_) | ItemKind::Static(_)
-                    )
+                    matches!(other, ItemKind::Enum(_))
                 )));
             }
         }
     }
     Ok(out)
+}
+
+/// The constant value of a `const`/`static` initializer, when it is a literal
+/// (optionally negated integer/bool/char). Non-literal initializers return
+/// `None` and their uses fall back to variable reads.
+fn const_literal(e: &ast::Expr) -> Option<i128> {
+    match &e.kind {
+        ast::ExprKind::Lit(ast::Lit::Int(v, _)) => Some(*v as i128),
+        ast::ExprKind::Lit(ast::Lit::Bool(b)) => Some(*b as i128),
+        ast::ExprKind::Lit(ast::Lit::Char(c)) => Some(*c as i128),
+        ast::ExprKind::Unary(ast::UnOp::Neg, inner) => const_literal(inner).map(|v| -v),
+        _ => None,
+    }
 }
 
 /// Convert a Clotho type to a C type string, or `"long long"` when unknown.
@@ -140,6 +230,14 @@ struct Lower {
     /// Lengths of `let`-bound array literals (e.g. `let xs = [1, 2, 3];`), so a
     /// later `for x in xs { .. }` can iterate the known-length array.
     array_lens: HashMap<String, usize>,
+    /// Literal top-level constants (`const X: i32 = 3;`) folded into uses:
+    /// `lower_expr` substitutes the constant operand for the path.
+    const_values: HashMap<String, i128>,
+    /// Enum-variant registry: variant constructor name -> (enum struct name,
+    /// tag index, payload arity). Enums are represented as tagged structs
+    /// `{ long long tag; long long f0; }`; construction lowers to a struct
+    /// literal and variant patterns lower to a tag test + field projections.
+    variants: HashMap<String, (String, i128, usize)>,
     /// When set, the enclosing `async fn` state-machine bookkeeping: the future
     /// struct name, the `self` parameter local name, the output C type, and the
     /// list of `(slot_name, c_type)` that must be round-tripped across a
@@ -394,6 +492,8 @@ impl Lower {
             types: HashMap::new(),
             loops: Vec::new(),
             array_lens: HashMap::new(),
+            const_values: HashMap::new(),
+            variants: HashMap::new(),
             async_fns: std::collections::HashSet::new(),
             async_ctx: None,
             expecting_future: false,
@@ -796,6 +896,11 @@ impl Lower {
                         ExprKind::Struct(path, _, _) => {
                             path.segments.last().map(|s| s.node.clone())
                         }
+                        _ if self.variant_c_type(init).is_some() => {
+                            // A variant construction (`let o = Some(5);`) types
+                            // the local as the enum's tagged struct.
+                            self.variant_c_type(init)
+                        }
                         ExprKind::Closure { params, .. } => {
                             // A closure value is a function pointer; type the local
                             // with the uniform `long long (*)(long long, …)` so the C
@@ -1063,6 +1168,25 @@ impl Lower {
                     .last()
                     .map(|s| s.node.clone())
                     .unwrap_or_default();
+                // A literal top-level constant folds to its value; only fall
+                // back to a variable read when it is not a known const (the
+                // C backend would otherwise see an undeclared identifier).
+                if let Some(v) = self.const_values.get(&name) {
+                    return Ok(mir::Operand::Const(*v));
+                }
+                // A nullary variant (`None`) is the enum's tagged struct with
+                // just the tag set.
+                if let Some((ename, tag, 0)) = self.variants.get(&name).cloned() {
+                    let t = self.fresh_temp(&format!("struct {}", ename));
+                    self.emit(
+                        t.clone(),
+                        mir::Rvalue::StructLit(
+                            ename,
+                            vec![("tag".to_string(), mir::Operand::Const(tag))],
+                        ),
+                    );
+                    return Ok(mir::Operand::var(t));
+                }
                 Ok(mir::Operand::var(name))
             }
             ExprKind::Range(..) => Err(LowerError(
@@ -1115,6 +1239,19 @@ impl Lower {
                 Ok(mir::Operand::var(t))
             }
             ExprKind::Call(callee, args) => {
+                // A tuple-variant constructor (`Some(5)`, `Ok(v)`, user
+                // `MyEnum::Var(x)`) lowers to a tagged-struct literal, not a
+                // function call.
+                if let ExprKind::Path(p) = &callee.kind {
+                    let vname = p
+                        .segments
+                        .last()
+                        .map(|s| s.node.clone())
+                        .unwrap_or_default();
+                    if let Some((ename, tag, arity)) = self.variants.get(&vname).cloned() {
+                        return self.lower_variant_construction(&ename, tag, arity, args);
+                    }
+                }
                 // A closure literal as the callee is invoked immediately: lambda-lift
                 // it into a top-level function and call that directly.
                 let (callee_operand, result_ty) = if let ExprKind::Closure {
@@ -1442,7 +1579,7 @@ impl Lower {
                 self.emit(t.clone(), mir::Rvalue::Cast(operand, type_to_c(ty)));
                 Ok(mir::Operand::var(t))
             }
-            ExprKind::Macro(..) => Err(LowerError("macros are not in the codegen subset".into())),
+            ExprKind::Macro(m) => self.lower_print_macro(m),
             ExprKind::Tuple(elems) => {
                 // Build a tuple value: lower each element, derive its C type
                 // (constants fall back to `long long`), register the generated
@@ -1646,15 +1783,54 @@ impl Lower {
     }
 
     /// Lower `if let pat = init { then } else { else }` (parsed as
-    /// `If(Block{Local}, ..)`). Only identifier patterns are supported; enum
-    /// destructuring is rejected. The binding is emitted as a local and the
-    /// branch is taken unconditionally (the pattern is irrefutable).
+    /// `If(Block{Local}, ..)`). Identifier patterns are irrefutable (the branch
+    /// is always taken); enum-variant patterns (`Some(x)`, `None`, …) lower a
+    /// real tag-test guard and take the `else` branch when the tag mismatches.
     fn lower_if_let(
         &mut self,
         local: &ast::Local,
         then_b: &ast::Block,
         else_b: Option<&Expr>,
     ) -> Result<mir::Operand> {
+        let init_op = match &local.init {
+            Some(e) => self.lower_expr(e)?,
+            None => mir::Operand::Unit,
+        };
+        // Variant / nullary-variant patterns get a real guard + payload binds.
+        if matches!(
+            local.pat,
+            ast::Pat::Variant(..) | ast::Pat::Path(_)
+        ) {
+            let (cond, binds) = self.pattern_guard(&init_op, &local.pat)?;
+            let cond = cond.unwrap_or(mir::Operand::Const(1));
+            let result = self.fresh_temp("long long");
+            let then_blk = self.new_block();
+            let else_blk = self.new_block();
+            let merge = self.new_block();
+            self.set_term(mir::Terminator::If(cond, then_blk, else_blk));
+
+            self.current = then_blk;
+            for (name, val) in binds {
+                if !self.func.locals.iter().any(|(n, _)| n == &name) {
+                    self.func.locals.push((name.clone(), Some("long long".into())));
+                }
+                self.emit(name, mir::Rvalue::Use(val));
+            }
+            let v_then = self.lower_block_value(then_b)?;
+            self.emit(result.clone(), mir::Rvalue::Use(v_then));
+            self.set_term(mir::Terminator::Goto(merge));
+
+            self.current = else_blk;
+            let v_else = match else_b {
+                Some(eb) => self.lower_expr(eb)?,
+                None => mir::Operand::Unit,
+            };
+            self.emit(result.clone(), mir::Rvalue::Use(v_else));
+            self.set_term(mir::Terminator::Goto(merge));
+
+            self.current = merge;
+            return Ok(mir::Operand::var(result));
+        }
         if !matches!(local.pat, ast::Pat::Ident(_)) {
             return Err(LowerError(
                 "`if let`/`while let` with non-identifier patterns is not yet supported (enum destructuring needs `match`)"
@@ -1805,6 +1981,225 @@ impl Lower {
         Ok(mir::Operand::var(result))
     }
 
+    /// The C type of an expression that constructs an enum variant
+    /// (`Some(..)` / `None` / user variants), i.e. `struct <Enum>` — `None`
+    /// when the expression is not a variant construction.
+    fn variant_c_type(&self, e: &ast::Expr) -> Option<String> {
+        let vname = match &e.kind {
+            ExprKind::Call(callee, _) => match &callee.kind {
+                ExprKind::Path(p) => p.segments.last().map(|s| s.node.clone())?,
+                _ => return None,
+            },
+            ExprKind::Path(p) => p.segments.last().map(|s| s.node.clone())?,
+            _ => return None,
+        };
+        self.variants
+            .get(&vname)
+            .map(|(ename, _, _)| format!("struct {}", ename))
+    }
+
+    /// Lower a builtin `println!`/`eprintln!`/`print!`/`eprint!` invocation.
+    ///
+    /// The format string is split on `{}` placeholders; literal segments lower
+    /// to `print_str("<segment>")` calls and each placeholder consumes the next
+    /// argument, printed with the runtime helper chosen from the argument's C
+    /// type (`print_str` for `char*`, `print_f64` for `double`, `print_i64`
+    /// otherwise). The `ln` variants append a trailing newline. `format!`
+    /// evaluates its arguments for side effects and yields the string-literal
+    /// placeholder (real formatted-string construction is a documented
+    /// follow-up — the subset has no heap string runtime yet).
+    fn lower_print_macro(&mut self, m: &ast::MacroCall) -> Result<mir::Operand> {
+        let name = m
+            .path
+            .segments
+            .last()
+            .map(|s| s.node.clone())
+            .unwrap_or_default();
+        let args = tpt_moira_clotho::parser::Parser::parse_macro_args(m.tokens.clone());
+        match name.as_str() {
+            "println" | "eprintln" | "print" | "eprint" => {
+                let newline = name.ends_with("ln");
+                let stderr = name.starts_with('e');
+                // `eprintln!`/`eprint!` route through the stderr helpers when
+                // available; the subset runtime prints to stdout, so the
+                // prefix marks intent and the call targets the same helper.
+                let _ = stderr;
+                let mut fmt: Option<String> = None;
+                let mut rest: Vec<&ast::Expr> = Vec::new();
+                for (i, a) in args.iter().enumerate() {
+                    if i == 0 {
+                        if let ExprKind::Lit(ast::Lit::Str(s)) = &a.kind {
+                            fmt = Some(s.clone());
+                            continue;
+                        }
+                    }
+                    rest.push(a);
+                }
+                let mut placeholders: Vec<&ast::Expr> = rest.drain(..).collect();
+                let segments: Vec<String> = fmt
+                    .as_deref()
+                    .map(|f| f.split("{}").map(|s| s.to_string()).collect())
+                    .unwrap_or_default();
+                let has_fmt = fmt.is_some();
+                let emit_str = |s: &str, l: &mut Self| -> Result<()> {
+                    if s.is_empty() {
+                        return Ok(());
+                    }
+                    let seg = l.fresh_temp("char*");
+                    l.emit(
+                        seg.clone(),
+                        mir::Rvalue::Call(
+                            mir::Operand::Func("print_str".to_string()),
+                            vec![mir::Operand::CStr(s.to_string())],
+                        ),
+                    );
+                    Ok(())
+                };
+                // Interleave literal segments with placeholder arguments.
+                if has_fmt {
+                    emit_str(&segments[0], self)?;
+                    for (i, a) in placeholders.iter_mut().enumerate() {
+                        let op = self.lower_expr(a)?;
+                        let printer = match self.temp_type_of(match &op {
+                            mir::Operand::Var(n) => n.as_str(),
+                            _ => "",
+                        })
+                        .as_str()
+                        {
+                            t if t.contains("char*") => "print_str",
+                            "double" => "print_f64",
+                            _ => "print_i64",
+                        };
+                        let seg_idx = i + 1;
+                        let after = segments.get(seg_idx).cloned().unwrap_or_default();
+                        let t = self.fresh_temp("long long");
+                        self.emit(
+                            t.clone(),
+                            mir::Rvalue::Call(
+                                mir::Operand::Func(printer.to_string()),
+                                vec![op],
+                            ),
+                        );
+                        emit_str(&after, self)?;
+                    }
+                } else {
+                    // No format string: print each argument in order.
+                    for a in placeholders.drain(..) {
+                        let op = self.lower_expr(a)?;
+                        let t = self.fresh_temp("long long");
+                        self.emit(
+                            t.clone(),
+                            mir::Rvalue::Call(
+                                mir::Operand::Func("print_i64".to_string()),
+                                vec![op],
+                            ),
+                        );
+                    }
+                }
+                if newline {
+                    let seg = self.fresh_temp("char*");
+                    self.emit(
+                        seg.clone(),
+                        mir::Rvalue::Call(
+                            mir::Operand::Func("print_str".to_string()),
+                            vec![mir::Operand::CStr("\n".to_string())],
+                        ),
+                    );
+                }
+                Ok(mir::Operand::Unit)
+            }
+            "format" => {
+                // Evaluate for side effects; the value is the string-literal
+                // placeholder (no heap string runtime yet).
+                for a in args {
+                    self.lower_expr(&a)?;
+                }
+                Ok(mir::Operand::Const(0))
+            }
+            other => Err(LowerError(format!(
+                "macro `{}` is not in the codegen subset",
+                other
+            ))),
+        }
+    }
+
+    /// Lower a tuple-variant constructor call (`Some(5)`, `Ok(v)`) to a
+    /// tagged-struct literal: `{ tag: <variant tag>, f0: <first payload>, .. }`.
+    fn lower_variant_construction(
+        &mut self,
+        ename: &str,
+        tag: i128,
+        arity: usize,
+        args: &[ast::Expr],
+    ) -> Result<mir::Operand> {
+        if args.len() != arity {
+            return Err(LowerError(format!(
+                "variant constructor expects {} payload value(s), found {}",
+                arity,
+                args.len()
+            )));
+        }
+        let mut fields = vec![("tag".to_string(), mir::Operand::Const(tag))];
+        for (i, a) in args.iter().enumerate() {
+            let v = self.lower_expr(a)?;
+            fields.push((format!("f{}", i), v));
+        }
+        let t = self.fresh_temp(&format!("struct {}", ename));
+        self.emit(t.clone(), mir::Rvalue::StructLit(ename.to_string(), fields));
+        Ok(mir::Operand::var(t))
+    }
+
+    /// The tag-test guard and payload bindings for a variant pattern
+    /// (`Some(x)`, `MyEnum::Var(a, b)`): the arm is taken when the scrutinee's
+    /// `tag` field equals the variant's index; each sub-pattern binds against
+    /// the corresponding payload field projection.
+    fn variant_guard(
+        &mut self,
+        scrut: &mir::Operand,
+        path: &ast::Path,
+        subpats: &[ast::Pat],
+    ) -> Result<(Option<mir::Operand>, Vec<(String, mir::Operand)>)> {
+        let vname = path
+            .segments
+            .last()
+            .map(|s| s.node.clone())
+            .unwrap_or_default();
+        let Some((_, tag, _arity)) = self.variants.get(&vname).cloned() else {
+            return Err(LowerError(format!(
+                "unknown enum variant `{}` in pattern",
+                vname
+            )));
+        };
+        // Guard: scrut.tag == tag.
+        let tag_val = self.fresh_temp("long long");
+        self.emit(
+            tag_val.clone(),
+            mir::Rvalue::Field(scrut.clone(), "tag".to_string(), false),
+        );
+        let cond = self.fresh_temp("long long");
+        self.emit(
+            cond.clone(),
+            mir::Rvalue::Binary(
+                mir::BinOp::Eq,
+                mir::Operand::var(tag_val),
+                mir::Operand::Const(tag),
+            ),
+        );
+        // Payload bindings: sub-pattern i matches field `f{i}`.
+        let mut binds = Vec::new();
+        for (i, sp) in subpats.iter().enumerate() {
+            let field_t = self.fresh_temp("long long");
+            self.emit(
+                field_t.clone(),
+                mir::Rvalue::Field(scrut.clone(), format!("f{}", i), false),
+            );
+            let fv = mir::Operand::var(field_t);
+            let (_c, mut b) = self.pattern_guard(&fv, sp)?;
+            binds.append(&mut b);
+        }
+        Ok((Some(mir::Operand::var(cond)), binds))
+    }
+
     /// Build the guard condition and binding assignments for a pattern against the
     /// scrutinee operand. Returns `(None, binds)` for irrefutable patterns (the
     /// arm is always taken) or `(Some(cond), binds)` for a literal comparison.
@@ -1814,10 +2209,32 @@ impl Lower {
         pat: &ast::Pat,
     ) -> Result<(Option<mir::Operand>, Vec<(String, mir::Operand)>)> {
         match pat {
-            ast::Pat::Ident(n) => Ok((
-                None,
-                vec![(n.node.clone(), scrut.clone())],
-            )),
+            ast::Pat::Ident(n) => {
+                // A bare name that is a known *nullary* variant (`None`) is a
+                // tag test, not a binding — the parser cannot distinguish it
+                // from an identifier pattern.
+                if let Some((_, tag, 0)) = self.variants.get(&n.node).cloned() {
+                    let tag_val = self.fresh_temp("long long");
+                    self.emit(
+                        tag_val.clone(),
+                        mir::Rvalue::Field(scrut.clone(), "tag".to_string(), false),
+                    );
+                    let cond = self.fresh_temp("long long");
+                    self.emit(
+                        cond.clone(),
+                        mir::Rvalue::Binary(
+                            mir::BinOp::Eq,
+                            mir::Operand::var(tag_val),
+                            mir::Operand::Const(tag),
+                        ),
+                    );
+                    return Ok((Some(mir::Operand::var(cond)), Vec::new()));
+                }
+                Ok((
+                    None,
+                    vec![(n.node.clone(), scrut.clone())],
+                ))
+            }
             ast::Pat::Wild => Ok((None, Vec::new())),
             ast::Pat::Ref(inner) => self.pattern_guard(scrut, inner),
             ast::Pat::Or(a, b) => {
@@ -1926,7 +2343,38 @@ impl Lower {
                 }
                 Ok((None, binds))
             }
-            ast::Pat::Path(_) | ast::Pat::Struct(_, _) | ast::Pat::Variant(..) => Err(LowerError(
+            ast::Pat::Variant(path, subpats) => self.variant_guard(scrut, path, subpats),
+            ast::Pat::Path(path) => {
+                // A nullary variant path (`None`) is a tag test; any other
+                // path pattern stays unsupported in the codegen subset.
+                let vname = path
+                    .segments
+                    .last()
+                    .map(|s| s.node.clone())
+                    .unwrap_or_default();
+                if let Some((_, tag, 0)) = self.variants.get(&vname).cloned() {
+                    let tag_val = self.fresh_temp("long long");
+                    self.emit(
+                        tag_val.clone(),
+                        mir::Rvalue::Field(scrut.clone(), "tag".to_string(), false),
+                    );
+                    let cond = self.fresh_temp("long long");
+                    self.emit(
+                        cond.clone(),
+                        mir::Rvalue::Binary(
+                            mir::BinOp::Eq,
+                            mir::Operand::var(tag_val),
+                            mir::Operand::Const(tag),
+                        ),
+                    );
+                    Ok((Some(mir::Operand::var(cond)), Vec::new()))
+                } else {
+                    Err(LowerError(
+                        "this match pattern is not supported in the codegen subset".into(),
+                    ))
+                }
+            }
+            ast::Pat::Struct(_, _) => Err(LowerError(
                 "this match pattern is not supported in the codegen subset".into(),
             )),
             ast::Pat::Bind(name, sub) => {

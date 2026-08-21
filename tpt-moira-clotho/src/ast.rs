@@ -33,6 +33,29 @@ pub struct Item {
     pub attributes: Vec<Attribute>,
 }
 
+impl Item {
+    /// Whether this item is gated behind `#[cfg(test)]` (e.g. a `#[cfg(test)]
+    /// mod tests { .. }` block). Non-test compilation — type-checking,
+    /// borrow-checking, and code generation — skips such items entirely: test
+    /// code uses macros (`assert!`, `assert_eq!`) and library surface
+    /// (`drop`, `to_string`) outside the compiler's supported subset.
+    pub fn is_cfg_test(&self) -> bool {
+        self.attributes.iter().any(|attr| {
+            let is_cfg = attr
+                .path
+                .segments
+                .last()
+                .map(|s| s.node == "cfg")
+                .unwrap_or(false);
+            // A bare `cfg(test)` has the single identifier argument `test`.
+            is_cfg
+                && attr.args.iter().any(|t| {
+                    matches!(t.kind, crate::token::TokenKind::Ident(ref n) if n == "test")
+                })
+        })
+    }
+}
+
 /// A single attribute `#[path(args)]` (or inner `#![path(args)]`).
 ///
 /// The `path` is the attribute name (its last segment, e.g. `derive`),

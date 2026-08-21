@@ -28,6 +28,9 @@ pub enum Val {
     Const(i128),
     /// The unit value `()`.
     Unit,
+    /// An opaque C string constant (from an expanded `println!` segment);
+    /// carried through as a name the native backend renders as a literal.
+    CStr(String),
 }
 
 /// The right-hand side of an SSA value binding.
@@ -134,6 +137,7 @@ fn build_function(f: &mir::Function) -> Result<SsaFunction, String> {
                 mir::Operand::Const(c) => Val::Const(*c),
                 mir::Operand::Unit => Val::Unit,
                 mir::Operand::Func(n) => Val::Name(n.clone()),
+                mir::Operand::CStr(s) => Val::CStr(s.clone()),
             }
         };
         for stmt in &block.stmts {
@@ -581,5 +585,6 @@ fn show_val(v: &Val) -> String {
         Val::Name(n) => n.clone(),
         Val::Const(c) => c.to_string(),
         Val::Unit => "()".to_string(),
+        Val::CStr(s) => format!("{:?}", s),
     }
 }

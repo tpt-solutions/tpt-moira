@@ -599,15 +599,86 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
             remaining blockers are the ones listed above (`match` lowering,
             closures in MIR/codegen, full generics inference, tuple
             destructure).
-    - [ ] Once a crate parses + type-checks, attempt full codegen and record pass/fail per crate in `docs/SELF_HOSTING.md`
-      - Status: the probe records `codegen_ok` (and the failure reason) per crate,
-        and `docs/SELF_HOSTING.md` already captures the per-crate "Blocks
-        self-host until" table. As of 2026-08-22 all five crates still fail
-        codegen (each on a distinct subset gap: `moira-alloc` → macros, `clotho` →
-        unsupported top-level item, `atropos` → closures, `lachesis` → `for`
-        iterator, driver → `if let`/enum-destructure), so full codegen of any
-        crate is not yet reached. Flipping a crate requires its type-check +
-        codegen gaps to close first.
+          - **Re-run (2026-08-22, later): `1/5` self-hostable — `moira-alloc`
+            flipped.** Enabled by: `#[cfg(test)] mod tests` blocks are now
+            skipped by the type checker, borrow checker inputs, and codegen
+            (attributes propagate through module flattening in
+            `clotho::flatten_items`; `Item::is_cfg_test()`); the prelude gained
+            `RefCell::new`/`.borrow`/`.borrow_mut`, `Vec::last`, and
+            `str::to_string`; two-segment paths (`Arena::default()`) now fall
+            back to inherent-impl methods; and receivers whose type is
+            `Unknown` absorb method calls silently instead of cascading
+            diagnostics. Remaining blockers for the other four crates are the
+            large type-check debt (hundreds of diagnostics each) plus codegen
+            gaps (`for` over iterators, closures, enum destructuring).
+          - Re-run (2026-08-22, later still): `1/5` holds. Path/const
+            resolution landed: multi-segment call paths
+            (`std::env::args()`, `tpt_moira_clotho::compile_file(...)`)
+            resolve against their **last two segments** (module prefixes are
+            not modeled); top-level `const`/`static` items are registered as
+            values and literal consts fold to constant operands in codegen
+            (`lower.rs` no longer rejects `const`/`static` items); associated
+            constants (`ExitCode::FAILURE`) resolve via the new
+            `assoc_consts` table; the prelude gained `to_string` on numeric
+            primitives and `Vec::first`/`contains`. Driver type/borrow errors
+            fell 158 → 115; `atropos` 1548 → 1369. The driver's dominant
+            remaining class is real (non-test) macro use — 37 sites of
+            `format!`/`write!`/`println!`-family — which needs macro
+            type-checking.
+          - **Enum codegen landed (2026-08-22).** Enums lower to tagged structs
+            (`{ long long tag; long long f0; }`): variant construction
+            (`Some(5)`, `None`, user `MyEnum::Var(x)`) becomes a struct
+            literal, `match` arms with variant patterns become tag-test guards
+            with `f0` payload projections, and `if let`/`while let` now accept
+            variant patterns (previously rejected outright). The prelude
+            `Option`/`Result` variants are registered even without `enum`
+            items; user `enum` definitions register their own variants. Also
+            fixed a latent invalid-C bug: struct-typed locals were declared
+            twice (once as a local, again as a "temp" — `lower` publishes
+            local types into `temp_types`), so the C backend now skips temp
+            declarations whose names are already declared. Verified
+            end-to-end: `enum_match_and_if_let_run` compiles and runs a
+            `match`/`if let Some(x)` program printing `7 0 8`. Remaining
+            codegen blockers for the large crates: `for` over iterators and
+            macro expansion.
+          - **Builtin print macros landed (2026-08-22).** `println!` /
+            `eprintln!` / `print!` / `eprint!` are now type-checked with real
+            re-parsed arguments (`Parser::parse_macro_args` splits the raw
+            token stream on top-level commas) and lower to interleaved
+            `print_str`/`print_i64`/`print_f64` runtime calls — the format
+            string splits on `{}` placeholders, each placeholder consumes the
+            next argument with the printer chosen from its C type, and the
+            `ln` variants append a newline. `format!` type-checks as `str`
+            and evaluates its arguments (the value is the string placeholder —
+            no heap string runtime yet). A new `mir::Operand::CStr` carries
+            string-literal segments through MIR/SSA. Driver type/borrow errors
+            fell 115 → **98**; its remaining classes are std-surface modeling
+            (`ExitCode`/`args().skip().collect()` iterator chains, `write!`)
+            and `format!` value construction.
+          - **Cascade absorption + std surface round (2026-08-22, final).**
+            Field access on an `Unknown` base is now absorbed (like method
+            calls and deref), killing whole cascade families. The prelude
+            gained builder-style `Command` methods (`args`/`arg`/`status`/
+            `output`), `Option::{map, unwrap_or, unwrap_or_else, as_deref}`,
+            `Stdio::piped`, `fs::{temp_dir, remove_file, open}`,
+            `env::{temp_dir, current_dir}`, `File::open`,
+            `Vec::from_utf8_lossy`, a free `write`, and registered the modeled
+            std types as field-less structs (so `let v: Vec<u8> = …` resolves).
+            Driver errors 98 → **69**; clotho 1721, lachesis 1409, atropos
+            1412. The driver's remaining errors are dominated by **cross-crate
+            resolution** (`tpt_moira_atropos::lower_program(...)` — items from
+            other workspace crates are invisible to the single-crate checker)
+            and iterator chains, both of which need new infrastructure rather
+            than prelude entries.
+    - [x] Once a crate parses + type-checks, attempt full codegen and record pass/fail per crate in `docs/SELF_HOSTING.md`
+      - **Status: Resolved as a process (2026-08-22)** — the probe records
+        `codegen_ok` (and the failure reason) per crate and refreshes
+        `docs/SELF_HOSTING.md` on every run. With the cfg(test)/prelude fixes,
+        `moira-alloc` became the first crate to pass parse + check + codegen
+        (**1/5 self-hostable**); the other four crates' per-crate "Blocks
+        self-host until" entries stay accurate via each probe run (their
+        remaining gaps: heavy type-check debt; codegen for `for` over
+        iterators, closures, enum destructuring, and non-test top-level items).
   - [x] Bootstrap build script wiring the three crates (like `x.py`) — `x.py`
         orchestrates Stage-0 host build + Stage-1 self-host readiness probe
         (see `docs/SELF_HOSTING.md`); probe currently reports 0/5 crates
@@ -635,7 +706,18 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
   - [ ] Verify output parity (stage-1 == stage-2 binary)
     - [ ] Build Stage-2: compile Moira's source with the Stage-1 (Moira-built) binary
     - [ ] Byte-diff the Stage-1 and Stage-2 `moira` binaries (or their `--emit asm`/`c` output on a fixed corpus) for identity
-    - [ ] Extend `tests/determinism.rs` (or a new `tests/stage_parity.rs`) to automate the Stage-1-vs-Stage-2 comparison in CI
+    - [x] Extend `tests/determinism.rs` (or a new `tests/stage_parity.rs`) to automate the Stage-1-vs-Stage-2 comparison in CI
+      - **Status: Resolved (2026-08-22).** New `tests/stage_parity.rs` runs the
+        Stage-0 binary and a Stage-1/Stage-2 binary (path from the
+        `MOIRA_STAGE1_BIN` env var) as separate processes over a fixed corpus
+        (`mir`/`ssa`/`c` on the struct sample, `asm` on the struct-free
+        sample), caching disabled via `MOIRA_NO_CACHE=1`, and asserts
+        byte-identical output. When `MOIRA_STAGE1_BIN` is unset — today's
+        default, since no Stage-1 binary exists yet — each test skips itself
+        with a note instead of failing. The release workflow's determinism
+        gate now runs the harness with `MOIRA_STAGE1_BIN` sourced from a repo
+        variable of the same name, so the comparison activates in CI the
+        moment a Stage-1 artifact is published.
     - [ ] Investigate and fix any non-determinism surfaced (timestamps, hash-map iteration, path embedding, etc.)
 - [ ] **Final cross-subsystem optimization pass**
   - [x] Parallelize type-check + borrow-check passes
@@ -670,6 +752,12 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
         xlarge 6.93x / nested 6.78x); no regressions vs the previous run
         (geomean improved from 6.36x). History in
         `moira-bench-results/history.mbh`.
+      - Note (2026-08-22): back-to-back recorded runs on the same machine
+        showed ±30-70% wall-time swings *between identical binaries* (runs
+        #7-#10), so single-run deltas under ~50% on this Windows host are
+        noise — treat only sustained multi-run trends as regressions. The
+        latest run (#10, after the trait-solver/generics checker work) sits at
+        6.55x geomean, within noise of the pre-change 6.91x.
   - [x] Incremental caching across the whole pipeline (not just expressions)
     - **Status: Resolved.** `tpt_moira_lachesis::pipeline_cache` generalizes the Phase-2
       SSA cache into a whole-pipeline content-addressed store: the type-check +

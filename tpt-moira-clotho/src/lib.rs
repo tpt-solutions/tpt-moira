@@ -70,36 +70,49 @@ fn flatten_items(items: Vec<ast::Item>, base: &Path) -> Result<Vec<ast::Item>, e
     let mut out = Vec::with_capacity(items.len());
     for item in items {
         match item.kind {
-            ast::ItemKind::Module(m) => match m.kind {
-                ast::ModuleKind::Inline(sub) => {
-                    out.extend(flatten_items(sub, base)?);
+            ast::ItemKind::Module(ref m) => {
+                // A `#[cfg(test)] mod tests { .. }` gate applies to every item
+                // inside: propagate the module's cfg attributes onto the
+                // flattened children so the checker/codegen can skip them.
+                let gated = item.is_cfg_test();
+                let inherited = if gated {
+                    item.attributes.clone()
+                } else {
+                    Vec::new()
+                };
+                let sub = match &m.kind {
+                    ast::ModuleKind::Inline(sub) => flatten_items(sub.clone(), base)?,
+                    ast::ModuleKind::External => {
+                        let candidate = base.join(format!("{}.rs", m.name.node));
+                        let (sub_path, sub_base) = if candidate.is_file() {
+                            (
+                                candidate.clone(),
+                                candidate.parent().unwrap_or(base).to_path_buf(),
+                            )
+                        } else {
+                            let mod_rs = base.join(&m.name.node).join("mod.rs");
+                            (mod_rs, base.join(&m.name.node))
+                        };
+                        let sub_src = std::fs::read_to_string(&sub_path).map_err(|e| {
+                            error::Diag::error(
+                                format!(
+                                    "cannot resolve module `{}` (tried `{}`): {}",
+                                    m.name.node,
+                                    sub_path.display(),
+                                    e
+                                ),
+                                None,
+                            )
+                        })?;
+                        let sub_prog = pipeline::compile(&sub_src)?;
+                        flatten_items(sub_prog.items, &sub_base)?
+                    }
+                };
+                for mut child in sub {
+                    child.attributes.extend(inherited.iter().cloned());
+                    out.push(child);
                 }
-                ast::ModuleKind::External => {
-                    let candidate = base.join(format!("{}.rs", m.name.node));
-                    let (sub_path, sub_base) = if candidate.is_file() {
-                        (
-                            candidate.clone(),
-                            candidate.parent().unwrap_or(base).to_path_buf(),
-                        )
-                    } else {
-                        let mod_rs = base.join(&m.name.node).join("mod.rs");
-                        (mod_rs, base.join(&m.name.node))
-                    };
-                    let sub_src = std::fs::read_to_string(&sub_path).map_err(|e| {
-                        error::Diag::error(
-                            format!(
-                                "cannot resolve module `{}` (tried `{}`): {}",
-                                m.name.node,
-                                sub_path.display(),
-                                e
-                            ),
-                            None,
-                        )
-                    })?;
-                    let sub_prog = pipeline::compile(&sub_src)?;
-                    out.extend(flatten_items(sub_prog.items, &sub_base)?);
-                }
-            },
+            }
             other => out.push(ast::Item {
                 visibility: item.visibility,
                 kind: other,
@@ -109,3 +122,4 @@ fn flatten_items(items: Vec<ast::Item>, base: &Path) -> Result<Vec<ast::Item>, e
     }
     Ok(out)
 }
+

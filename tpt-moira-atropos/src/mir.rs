@@ -169,6 +169,10 @@ pub enum Operand {
     /// Used for ordinary calls and as the value a closure expression lowers to
     /// (the closure is lambda-lifted into a top-level `mir::Function`).
     Func(String),
+    /// A string literal, used as a C string argument (e.g. the literal segments
+    /// of an expanded `println!`). The C backend renders it as a quoted
+    /// literal; the SSA/native backends treat it as an opaque constant.
+    CStr(String),
 }
 
 impl Operand {
@@ -184,6 +188,7 @@ impl fmt::Display for Operand {
             Operand::Const(c) => write!(f, "{}", c),
             Operand::Unit => f.write_str("()"),
             Operand::Func(n) => f.write_str(n),
+            Operand::CStr(s) => write!(f, "{:?}", s),
         }
     }
 }

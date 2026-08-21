@@ -63,9 +63,9 @@ parse blockers below are historical, now resolved):
   `map_err(|e| { .. })`-style closures) and advanced `lachesis`/`atropos`.
 
 The remaining gate is the **type checker + code generator** (the documented
-"real self-host wall"). The latest probe reads `0/5` self-hostable; all five
-crates reach type-check and report type/borrow errors. Two type-check blockers
-were closed this session:
+"real self-host wall"). The latest probe (2026-08-22) reads **`1/5`
+self-hostable — `moira-alloc`** is the first crate to pass parse + type-check +
+codegen end to end. Two type-check blockers were closed this session:
 
 - **`?` operator** — `infer::check_try` now type-checks `Result`/`Option`/`ParseResult`
   (any `Apply`/`Struct`/`Generic` `Try` type) and yields the opaque payload; only
@@ -76,17 +76,37 @@ were closed this session:
   `infer_match` skips `Never` arms when aggregating the result type. This clears
   the `match`-arm "expected (), found str" errors.
 
+What unblocked `moira-alloc` (2026-08-22):
+
+- **`#[cfg(test)] mod tests` is now skipped** by the type checker and codegen:
+  `Item::is_cfg_test()` detects the gate and `clotho::flatten_items` propagates
+  a module's cfg attributes onto its flattened children. Test-only macros
+  (`assert!`/`assert_eq!`) and library surface (`drop`, `to_string`) therefore
+  no longer fail non-test compilation.
+- **Prelude additions**: `RefCell::new` / `.borrow()` / `.borrow_mut()`,
+  `Vec::last`, `str::len` / `.is_empty()` / `.to_string()`; string literals
+  coerce to `&str`; primitive receivers report source-level names.
+- **`Type::method(...)` paths resolve inherent-impl methods**
+  (e.g. `Arena::default()`), not just prelude associated functions.
+- **Solver-wired method resolution**: generic receivers bounded by a user trait
+  (`T: Show`) and concrete receivers covered by an impl both resolve through
+  the Chalk-like solver; `where`-clause bounds are enforced at call sites.
+
 Latest per-crate type/borrow error counts (from the 2026-08-22 probe):
-`clotho` 1985, `lachesis` 2033, `atropos` 1667, `moira` (driver) 196,
-`moira-alloc` 25. The dominant remaining classes are macros
-(`vec!`/`format!`/`write!`), enum-variant destructuring patterns
-(`Some(x)`/`Ok(x)`), `X::new` associated-function resolution on user types,
-`Self` in type position, real generics in `infer`, and slice indexing. These are
-the Phase-4 features tracked below and in `TODO.md`.
+`clotho` 1721, `lachesis` 1409, `atropos` 1412, `moira` (driver) 69,
+`moira-alloc` 0 (self-hostable). The driver's remaining errors are dominated
+by **cross-crate resolution** (items from other workspace crates are invisible
+to the single-crate checker) and iterator chains; the large crates' dominant
+classes are macros beyond the print family, generics at field-access depth,
+and `for` over Vec-backed iterators. Landed this session: enum codegen
+(tagged structs, verified end-to-end), the builtin print macros
+(`println!`/`eprintln!` with real type-checked arguments), cascade absorption
+for unknown receivers/fields, and broad std-surface prelude modeling. These
+are the Phase-4 features tracked below and in `TODO.md`.
 
 | Crate | Role | Blocks self-host until |
 |-------|------|------------------------|
-| `moira-alloc` | region allocator | type/borrow checker covers raw-pointer allocator patterns |
+| `moira-alloc` | region allocator | — (**self-hostable**) |
 | `clotho` | lexer / parser / AST | full type-check (generics, `?`, macros, enum patterns) |
 | `atropos` | MIR / SSA / codegen | full type-check + codegen of its own constructs |
 | `lachesis` | type + borrow + traits | full type-check + codegen of its own constructs |

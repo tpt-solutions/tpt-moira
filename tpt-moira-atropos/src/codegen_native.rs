@@ -174,6 +174,10 @@ impl<'a> Emitter<'a> {
                 let slot = self.slots.value[*i];
                 format!("    push QWORD {}\n", self.off(slot))
             }
+            // A C string constant has no register-level representation in the
+            // integer subset; emit 0 (the native backend does not yet run
+            // print-macro programs).
+            Val::CStr(_) => "    xor rax, rax\n    push rax\n".to_string(),
         }
     }
 

@@ -64,6 +64,13 @@ jobs:
       - name: Run cross-process determinism check
         run: python3 x.py determinism --release
 
+      - name: Stage-parity harness (runs when a Stage-1 binary is published)
+        run: cargo test --release -p tpt-moira --test stage_parity
+        env:
+          # Set this once self-hosting produces a Stage-1 binary; until then
+          # the harness skips itself.
+          MOIRA_STAGE1_BIN: ${{ vars.MOIRA_STAGE1_BIN }}
+
   publish:
     name: Publish GitHub release
     needs: [release-artifacts, determinism-gate]

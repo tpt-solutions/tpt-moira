@@ -73,6 +73,10 @@ pub struct TypeChecker {
     /// Nullary prelude values usable without a call site, e.g. `None` (a unit
     /// value of type `Option`), mirroring how `None` is a bare variant in Rust.
     values: HashMap<String, Ty>,
+    /// Associated constants `Type::CONST`, keyed by `(type_name, const_name)`
+    /// (e.g. `ExitCode::FAILURE`). User top-level constants are registered
+    /// under their own name at collection time.
+    assoc_consts: HashMap<(String, String), Ty>,
     env: Vec<HashMap<String, Ty>>,
     /// Stack of the generic parameter lists of the functions currently being
     /// checked. The top entry scopes the generic type parameters so that a bare
@@ -96,6 +100,7 @@ impl Default for TypeChecker {
             self_type: None,
             solver: None,
             values: HashMap::new(),
+            assoc_consts: HashMap::new(),
             env: Vec::new(),
             generic_scope: Vec::new(),
             ret: Ty::Unit,
@@ -115,8 +120,13 @@ impl TypeChecker {
             prog,
         )));
         // Pass 1: collect struct and function signatures so callers may refer to
-        // functions defined later in the file (forward references).
+        // functions defined later in the file (forward references). Items
+        // gated behind `#[cfg(test)]` (e.g. `mod tests`) are skipped — test
+        // code is outside the type-checked subset.
         for item in &prog.items {
+            if item.is_cfg_test() {
+                continue;
+            }
             match &item.kind {
                 tpt_moira_clotho::ast::ItemKind::Struct(s) => {
                     // Resolve field types within the struct's own generic scope
@@ -209,6 +219,17 @@ impl TypeChecker {
                     );
                 }
                 // Enums/consts/statics/uses are not part of the type-checked subset.
+                tpt_moira_clotho::ast::ItemKind::Const(c) => {
+                    // Top-level constants are usable as bare values; the
+                    // declared type (when present) is their type, otherwise
+                    // they absorb any use.
+                    let ty = c.ty.as_ref().map(|t| cx.type_to_ty(t)).unwrap_or(Ty::Unknown);
+                    cx.values.insert(c.name.node.clone(), ty);
+                }
+                tpt_moira_clotho::ast::ItemKind::Static(s) => {
+                    let ty = cx.type_to_ty(&s.ty);
+                    cx.values.insert(s.name.node.clone(), ty);
+                }
                 _ => {}
             }
         }
@@ -241,8 +262,11 @@ impl TypeChecker {
         // (heap-backed `Vec`, etc.) remains a codegen follow-up.
         cx.register_prelude();
 
-        // Pass 2: check each function body.
+        // Pass 2: check each function body (`#[cfg(test)]` items skipped).
         for item in &prog.items {
+            if item.is_cfg_test() {
+                continue;
+            }
             if let tpt_moira_clotho::ast::ItemKind::Function(f) = &item.kind {
                 cx.check_function(f);
             }
@@ -252,6 +276,9 @@ impl TypeChecker {
         // `Self` and the impl's generics in scope (so `self`, `Self`, and `T`
         // all resolve). The methods' signatures were collected in Pass 1.
         for item in &prog.items {
+            if item.is_cfg_test() {
+                continue;
+            }
             if let tpt_moira_clotho::ast::ItemKind::Impl(imp) = &item.kind {
                 let self_name = imp.for_ty.node_name();
                 cx.self_type = Some(self_name);
@@ -692,6 +719,15 @@ impl TypeChecker {
                 match self.lookup(&name) {
                     Some(t) => t,
                     None => {
+                        // Associated constant `Type::CONST` (e.g.
+                        // `ExitCode::FAILURE`), resolved from the path's last
+                        // two segments.
+                        if p.segments.len() >= 2 {
+                            let tname = p.segments[p.segments.len() - 2].node.clone();
+                            if let Some(t) = self.assoc_consts.get(&(tname, name.clone())) {
+                                return t.clone();
+                            }
+                        }
                         // Nullary prelude values usable without a call site.
                         if let Some(t) = self.values.get(&name) {
                             t.clone()
@@ -895,12 +931,43 @@ impl TypeChecker {
             ExprKind::Closure { params, ret, body } => {
                 self.check_closure(span, params, ret, body)
             }
-            ExprKind::Macro(..) => {
-                self.err(
-                    span,
-                    "macros are not in the type-checked subset".to_string(),
-                );
-                Ty::Unknown
+            ExprKind::Macro(m) => {
+                // Builtin `println!`-family macros are type-checked with real
+                // (re-parsed) arguments; their result types mirror Rust.
+                let name = m
+                    .path
+                    .segments
+                    .last()
+                    .map(|s| s.node.clone())
+                    .unwrap_or_default();
+                match name.as_str() {
+                    "println" | "eprintln" | "print" | "eprint" => {
+                        for a in tpt_moira_clotho::parser::Parser::parse_macro_args(
+                            m.tokens.clone(),
+                        ) {
+                            self.infer_expr(&a);
+                        }
+                        Ty::Unit
+                    }
+                    "format" => {
+                        let args =
+                            tpt_moira_clotho::parser::Parser::parse_macro_args(m.tokens.clone());
+                        if args.is_empty() {
+                            self.err(span, "format! requires at least a format string".to_string());
+                        }
+                        for a in args {
+                            self.infer_expr(&a);
+                        }
+                        Ty::Str
+                    }
+                    _ => {
+                        self.err(
+                            span,
+                            format!("macro `{}` is not in the type-checked subset", name),
+                        );
+                        Ty::Unknown
+                    }
+                }
             }
             ExprKind::Try(inner) => self.check_try(span, inner),
         };
@@ -1020,6 +1087,9 @@ impl TypeChecker {
                 let t = self.infer_expr(e2);
                 match &t {
                     Ty::Ref(inner) | Ty::RefMut(inner) => (**inner).clone(),
+                    // Deref through `Unknown` (an earlier error already
+                    // fired) is absorbed silently.
+                    Ty::Unknown => Ty::Unknown,
                     _ => {
                         self.err(span, "cannot dereference a non-reference".to_string());
                         Ty::Unknown
@@ -1078,7 +1148,7 @@ impl TypeChecker {
             // Enforce declared bounds on the inferred type arguments — both
             // inline (`<T: Show>`) and `where`-clause (`where T: Show`)
             // predicates.
-            let mut enforce = |cx: &mut Self, concrete: &Ty, bn: &str| {
+            let enforce = |cx: &mut Self, concrete: &Ty, bn: &str| {
                 if let Some(bt) = BuiltinTrait::from_name(bn) {
                     if !TraitDb::implements(bt, concrete) {
                         cx.err(
@@ -1177,6 +1247,11 @@ impl TypeChecker {
                 }
             },
             _ => {
+                // An `Unknown` base means an earlier error already fired;
+                // absorb the field access instead of cascading diagnostics.
+                if matches!(bt, Ty::Unknown) {
+                    return Ty::Unknown;
+                }
                 self.err(span, format!("type {} has no fields", bt));
                 Ty::Unknown
             }
@@ -1249,7 +1324,10 @@ impl TypeChecker {
 
     /// Resolve a call path to a function signature. A single-segment path
     /// (`foo`) looks up a free function; a two-segment path (`Type::fn`) looks
-    /// up an associated function from the prelude.
+    /// up an associated function (prelude, then inherent impls). Longer paths
+    /// (`std::env::args`) resolve against their *last two* segments — module
+    /// prefixes are not modeled, so `std::path::Path::new` resolves the same
+    /// as `Path::new`.
     fn resolve_call(&mut self, segments: &[String], span: Span) -> Option<FnSig> {
         match segments.len() {
             1 => self.fns.get(&segments[0]).cloned(),
@@ -1257,7 +1335,24 @@ impl TypeChecker {
                 .assoc_fns
                 .get(&(segments[0].clone(), segments[1].clone()))
                 .cloned()
+                .or_else(|| {
+                    // Inherent methods on user types: `Type::method(...)` (e.g.
+                    // `Arena::default()` from an `impl Arena<T>` block).
+                    self.user_methods
+                        .get(&(segments[0].clone(), segments[1].clone()))
+                        .cloned()
+                })
                 .or_else(|| self.fns.get(&segments[1]).cloned()),
+            n if n > 2 => {
+                // Try the last-two segments first, then the bare last segment.
+                let t = &segments[n - 2];
+                let m = &segments[n - 1];
+                self.assoc_fns
+                    .get(&(t.clone(), m.clone()))
+                    .cloned()
+                    .or_else(|| self.user_methods.get(&(t.clone(), m.clone())).cloned())
+                    .or_else(|| self.fns.get(m).cloned())
+            }
             _ => {
                 self.err(
                     span,
@@ -1279,6 +1374,15 @@ impl TypeChecker {
         args: &[Expr],
     ) -> Ty {
         let recv_ty = self.infer_expr(recv);
+        // An `Unknown` receiver (possibly behind refs — an earlier error
+        // already fired) absorbs this call silently instead of cascading a
+        // wall of "no method" diagnostics.
+        if matches!(recv_ty, Ty::Unknown) || matches!(self.strip_refs(&recv_ty), Ty::Unknown) {
+            for a in args {
+                self.infer_expr(a);
+            }
+            return Ty::Unknown;
+        }
         let recv_name = self.type_name(&recv_ty);
         // 1) User-defined method from an `impl` block. The receiver is the first
         //    parameter (`self`/`&self`/`&mut self`); the remaining parameters are
@@ -1425,16 +1529,15 @@ impl TypeChecker {
     /// innermost-scope-first across the active generic scopes.
     fn generic_bounds_of(&self, name: &str) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
-        let mut push_bound = |out: &mut Vec<String>, b: &TypeBound| {
-            if let TypeBound::Trait(path) = b {
-                let seg = path
-                    .segments
-                    .last()
-                    .map(|s| s.node.clone())
-                    .unwrap_or_default();
-                if !out.contains(&seg) {
-                    out.push(seg);
-                }
+        let push_bound = |out: &mut Vec<String>, b: &TypeBound| {
+            let TypeBound::Trait(path) = b;
+            let seg = path
+                .segments
+                .last()
+                .map(|s| s.node.clone())
+                .unwrap_or_default();
+            if !out.contains(&seg) {
+                out.push(seg);
             }
         };
         for g in self.generic_scope.iter().rev() {
@@ -1587,6 +1690,10 @@ impl TypeChecker {
             .insert(("String".into(), "new".into()), sig(vec![], std("String")));
         self.assoc_fns
             .insert(("Box".into(), "new".into()), sig(vec![Unknown], std("Box")));
+        self.assoc_fns.insert(
+            ("RefCell".into(), "new".into()),
+            sig(vec![Unknown], std("RefCell")),
+        );
 
         // Methods on `Vec<T>`.
         self.methods
@@ -1620,6 +1727,149 @@ impl TypeChecker {
             .insert(("str".into(), "len".into()), sig(vec![], Usize));
         self.methods
             .insert(("str".into(), "is_empty".into()), sig(vec![], Bool));
+        self.methods
+            .insert(("str".into(), "to_string".into()), sig(vec![], std("String")));
+        // Methods on `RefCell<T>` (interior mutability, as used by the
+        // compiler's own arena in `moira-alloc`).
+        self.methods.insert(
+            ("RefCell".into(), "borrow".into()),
+            sig(vec![], Ref(Box::new(Unknown))),
+        );
+        self.methods.insert(
+            ("RefCell".into(), "borrow_mut".into()),
+            sig(vec![], RefMut(Box::new(Unknown))),
+        );
+        self.methods
+            .insert(("Vec".into(), "last".into()), sig(vec![], std("Option")));
+        self.methods
+            .insert(("Vec".into(), "first".into()), sig(vec![], std("Option")));
+        self.methods
+            .insert(("Vec".into(), "contains".into()), sig(vec![Unknown], Bool));
+
+        // `to_string` on the numeric/primitive types (via the standard
+        // `ToString` trait, modeled per receiver type name).
+        for prim in [
+            "i32", "Int", "i64", "I64", "u8", "U8", "u32", "U32", "usize",
+            "Usize", "f64", "F64",
+        ] {
+            self.methods.insert(
+                (prim.to_string(), "to_string".into()),
+                sig(vec![], std("String")),
+            );
+        }
+
+        // Common `std` associated functions / constants referenced by the
+        // compiler's own driver. Module prefixes are not modeled: resolution
+        // uses a path's last two segments.
+        self.assoc_consts.insert(
+            ("ExitCode".into(), "SUCCESS".into()),
+            Struct("ExitCode".to_string()),
+        );
+        self.assoc_consts.insert(
+            ("ExitCode".into(), "FAILURE".into()),
+            Struct("ExitCode".to_string()),
+        );
+        self.assoc_fns.insert(
+            ("env".into(), "args".into()),
+            sig(vec![], Apply("Args".to_string(), vec![])),
+        );
+        self.assoc_fns.insert(
+            ("fs".into(), "read_to_string".into()),
+            sig(vec![Ref(Box::new(Str))], Apply("Result".to_string(), vec![Str])),
+        );
+        self.assoc_fns.insert(
+            ("Path".into(), "new".into()),
+            sig(vec![Ref(Box::new(Str))], std("Path")),
+        );
+        self.assoc_fns.insert(
+            ("io".into(), "stdin".into()),
+            sig(vec![], std("Stdin")),
+        );
+        self.assoc_fns.insert(
+            ("Command".into(), "new".into()),
+            sig(vec![Str], std("Command")),
+        );
+        // Builder-style `Command` methods and process/file surface used by the
+        // driver (modeled loosely: builder methods return the type back,
+        // terminal ones return modeled results).
+        self.methods
+            .insert(("Command".into(), "args".into()), sig(vec![Unknown], std("Command")));
+        self.methods
+            .insert(("Command".into(), "arg".into()), sig(vec![Str], std("Command")));
+        self.methods
+            .insert(("Command".into(), "status".into()), sig(vec![], std("ExitStatus")));
+        self.methods
+            .insert(("Command".into(), "output".into()), sig(vec![], std("Output")));
+        self.methods.insert(
+            ("Option".into(), "map".into()),
+            sig(vec![Unknown], std("Option")),
+        );
+        self.methods.insert(
+            ("Option".into(), "unwrap_or".into()),
+            sig(vec![Unknown], Unknown),
+        );
+        self.methods.insert(
+            ("Option".into(), "unwrap_or_else".into()),
+            sig(vec![Unknown], Unknown),
+        );
+        self.methods.insert(
+            ("Option".into(), "as_deref".into()),
+            sig(vec![], Unknown),
+        );
+        self.assoc_fns
+            .insert(("Stdio".into(), "piped".into()), sig(vec![], std("Stdio")));
+        self.assoc_fns.insert(
+            ("fs".into(), "temp_dir".into()),
+            sig(vec![], std("PathBuf")),
+        );
+        self.assoc_fns.insert(
+            ("env".into(), "temp_dir".into()),
+            sig(vec![], std("PathBuf")),
+        );
+        self.assoc_fns.insert(
+            ("env".into(), "current_dir".into()),
+            sig(vec![], Apply("Result".to_string(), vec![std("PathBuf")])),
+        );
+        self.assoc_fns.insert(
+            ("fs".into(), "remove_file".into()),
+            sig(vec![std("Path")], Apply("Result".to_string(), vec![Unit])),
+        );
+        self.assoc_fns.insert(
+            ("fs".into(), "open".into()),
+            sig(vec![std("Path")], Apply("Result".to_string(), vec![std("File")])),
+        );
+        self.assoc_fns.insert(
+            ("File".into(), "open".into()),
+            sig(vec![std("Path")], Apply("Result".to_string(), vec![std("File")])),
+        );
+        self.assoc_fns.insert(
+            ("Vec".into(), "from_utf8_lossy".into()),
+            sig(vec![Ref(Box::new(std("Vec")))], std("Cow")),
+        );
+        self.fns.insert(
+            "write".to_string(),
+            FnSig {
+                params: vec![Unknown, Ref(Box::new(Str))],
+                ret: Ty::Unit,
+                is_async: false,
+                generics: Generics::default(),
+            },
+        );
+        // Register the modeled `std` types as (field-less) structs so `let v:
+        // Vec<u8> = ...`, method receivers, and struct-typed expressions
+        // resolve instead of erroring with "unknown struct".
+        for std_type in [
+            "Vec", "String", "Path", "PathBuf", "File", "Command", "ExitCode",
+            "ExitStatus", "Output", "Stdio", "Stdin", "Child", "Cow", "Args",
+        ] {
+            self.structs.insert(
+                std_type.to_string(),
+                StructInfo {
+                    fields: Vec::new(),
+                    generics: Generics::default(),
+                },
+            );
+        }
 
         // Wider primitive output helpers (mirror the C/native backend runtimes).
         self.fns.insert(
@@ -2322,6 +2572,78 @@ mod tests {
              fn main() { let r = call(1.0); print_i32(r); }"
         )
         .is_err());
+    }
+
+    #[test]
+    fn cfg_test_module_is_skipped_by_the_checker() {
+        // `#[cfg(test)] mod tests` uses macros (`assert_eq!`) and library
+        // surface outside the subset; non-test checking must ignore it.
+        assert!(check(
+            "fn add(a: i32, b: i32) -> i32 { a + b }\n\
+             #[cfg(test)]\n\
+             mod tests {\n\
+                 fn check() { let _ = assert_eq_helper(1); }\n\
+                 fn assert_eq_helper(x: i32) -> i32 { x.not_a_real_method() }\n\
+             }"
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn refcell_interior_mutability_resolves() {
+        // `RefCell::new`, `.borrow()`, `.borrow_mut()` (as used by the
+        // compiler's own arena in `moira-alloc`).
+        assert!(check(
+            "fn main() {\n\
+                 let cell = RefCell::new(1);\n\
+                 let mut r = cell.borrow_mut();\n\
+                 let _ = cell.borrow();\n\
+             }"
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn type_associated_fn_from_inherent_impl_resolves() {
+        // `Arena::default()` — a two-segment path resolving against an
+        // inherent `impl` method (not the prelude).
+        assert!(check(
+            "struct Arena<T> { v: i32 }\n\
+             impl<T> Arena<T> {\n\
+                 fn default() -> Self { Arena { v: 0 } }\n\
+             }\n\
+             fn main() { let a = Arena::default(); let _ = a; }"
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn top_level_const_resolves_as_value() {
+        // `const LIMIT: i32 = 10;` used as a bare value.
+        assert!(check(
+            "const LIMIT: i32 = 10;\n\
+             fn main() { let x = LIMIT; let _ = x; }"
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn multi_segment_call_path_resolves_last_two_segments() {
+        // `std::env::args()` resolves via its last two segments (module
+        // prefixes are not modeled) against the prelude's std surface.
+        assert!(check(
+            "fn main() { let a = std::env::args(); let _ = a; }"
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn assoc_const_resolves_via_path() {
+        // `ExitCode::FAILURE` — an associated constant on a std type.
+        assert!(check(
+            "fn f() -> ExitCode { ExitCode::FAILURE }"
+        )
+        .is_ok());
     }
 
     #[test]

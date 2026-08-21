@@ -216,6 +216,78 @@ fn run_src(src: &str) -> Option<String> {
 }
 
 #[test]
+fn enum_match_and_if_let_run() {
+    // Enum-variant construction (`Some(7)` / `None`), `match` with
+    // tag-test guards + payload binding, and `if let Some(x) = ...` all
+    // lower through the tagged-struct representation and produce correct
+    // runtime values.
+    let out = match run_src(
+        "fn describe(o: Option) -> i32 {\n\
+             match o {\n\
+                 Some(v) => v,\n\
+                 None => 0,\n\
+             }\n\
+         }\n\
+         fn main() {\n\
+             let a = Some(7);\n\
+             let b = None;\n\
+             print_i32(describe(a));\n\
+             print_i32(describe(b));\n\
+             if let Some(x) = a {\n\
+                 print_i32(x + 1);\n\
+             }\n\
+         }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping enum match run");
+            return;
+        }
+    };
+    assert_eq!(out, "7\n0\n8", "expected describe(Some)=7, describe(None)=0, x+1=8");
+}
+
+#[test]
+fn enum_c_emission_contains_tagged_struct() {
+    let mir = lower_src(
+        "fn f(o: Option) -> i32 {\n\
+             match o {\n\
+                 Some(v) => v,\n\
+                 None => 0,\n\
+             }\n\
+         }",
+    );
+    let c = tpt_moira_atropos::codegen_c::emit_c(&mir);
+    assert!(
+        c.contains("struct Option {"),
+        "enum should lower to a tagged struct:\n{c}"
+    );
+    assert!(c.contains(".tag"), "construction should set the tag:\n{c}");
+    assert!(
+        c.contains(".f0 = ") || c.contains("o.f0"),
+        "payload should be stored/read via the f0 field:\n{c}"
+    );
+}
+
+#[test]
+fn println_macro_expands_to_print_calls() {
+    // `println!`/`eprintln!` expand to interleaved `print_str`/`print_i64`
+    // runtime calls; literal segments, `{}` placeholders and the trailing
+    // newline all appear in the emitted C.
+    let mir = lower_src(
+        "fn main() {\n\
+             let n = 42;\n\
+             println!(\"hello\");\n\
+             println!(\"n = {}!\", n);\n\
+         }",
+    );
+    let c = tpt_moira_atropos::codegen_c::emit_c(&mir);
+    assert!(c.contains("print_str(\"hello\")"), "literal segment:\n{c}");
+    assert!(c.contains("print_i64(n)"), "placeholder arg printed:\n{c}");
+    assert!(c.contains("print_str(\"\\n\")"), "trailing newline:\n{c}");
+}
+
+#[test]
 fn for_over_array_literal_runs() {
     let out = match run_src(
         "fn main() {

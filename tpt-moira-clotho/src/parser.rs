@@ -23,6 +23,41 @@ impl Parser {
         Parser::new(crate::lexer::tokenize(src))
     }
 
+    /// Split a macro-invocation token stream on top-level commas and parse each
+    /// segment as an expression. Used to give the builtin `println!`-family
+    /// macros real (type-checked, lowerable) arguments.
+    pub fn parse_macro_args(tokens: Vec<Token>) -> Vec<Expr> {
+        let mut args = Vec::new();
+        let mut cur: Vec<Token> = Vec::new();
+        let mut depth = 0i32;
+        for t in tokens {
+            match &t.kind {
+                TokenKind::LParen | TokenKind::LBracket | TokenKind::LBrace => {
+                    depth += 1;
+                    cur.push(t);
+                }
+                TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace => {
+                    depth -= 1;
+                    cur.push(t);
+                }
+                TokenKind::Comma if depth == 0 => {
+                    if !cur.is_empty() {
+                        if let Ok(e) = Parser::new(std::mem::take(&mut cur)).parse_expr() {
+                            args.push(e);
+                        }
+                    }
+                }
+                _ => cur.push(t),
+            }
+        }
+        if !cur.is_empty() {
+            if let Ok(e) = Parser::new(cur).parse_expr() {
+                args.push(e);
+            }
+        }
+        args
+    }
+
     // ---- low-level token cursor ----
 
     fn peek(&self) -> &Token {

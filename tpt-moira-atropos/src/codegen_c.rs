@@ -141,10 +141,15 @@ fn emit_function(
     // SSA temporary declarations. Iterate in a deterministic (sorted) order so
     // the emitted C is identical across runs/processes — `temp_types` is a
     // `HashMap`, whose iteration order is otherwise randomized per process and
-    // would break stage-1 == stage-2 output parity.
+    // would break stage-1 == stage-2 output parity. Names already declared as
+    // parameters or locals are skipped: `lower` publishes local types into
+    // `temp_types` too, and a duplicate `struct Point p;` would not compile.
     let mut temps: Vec<(&String, &String)> = f.temp_types.iter().collect();
     temps.sort_by(|a, b| a.0.cmp(b.0));
     for (name, ty) in temps {
+        if declared.contains(name.as_str()) {
+            continue;
+        }
         out.push_str(&format!("    {} {};\n", c_type(ty, struct_names), name));
     }
     out.push('\n');
@@ -196,7 +201,27 @@ fn emit_operand(o: &mir::Operand) -> String {
         mir::Operand::Const(c) => c.to_string(),
         mir::Operand::Unit => "0".to_string(),
         mir::Operand::Func(n) => n.clone(),
+        mir::Operand::CStr(s) => c_str_lit(s),
     }
+}
+
+/// Render a Rust string as a C string literal (escapes `\`, `"`, and the
+/// common control characters).
+fn c_str_lit(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for ch in s.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 /// Map a Moira primitive type name to its C equivalent. Struct type names and
