@@ -155,21 +155,39 @@ def probe_crate(moira: Path, crate: dict) -> ProbeResult:
         result.notes.append(f"entry point {crate['lib']} not found")
         return result
 
-    # Parse + check (Lachesis type/borrow checker).
+    # Parse stage: `--emit ast` only parses + macro-expands (it never runs the
+    # Lachesis checker or the Atropos lowering), so a clean exit is a *pure* parse
+    # signal. This lets the probe track parse pass/fail independently of type/borrow
+    # checking (TODO: "Re-run and track crate-by-crate parse pass/fail").
+    res_parse = run([str(moira), "--emit", "ast", str(lib)])
+    result.parse_ok = res_parse.returncode == 0
+    if not result.parse_ok:
+        err = (res_parse.stderr or res_parse.stdout).strip().splitlines()
+        snippet = err[-1] if err else "(no diagnostic)"
+        result.notes.append(f"parse failed: {snippet}")
+        # A parse failure blocks both check and codegen; record it but continue
+        # so the report still shows the parse column as `fail`.
+        return result
+
+    # Check stage (Lachesis type/borrow checker).
     res = run([str(moira), "--check", str(lib)])
-    result.parse_ok = res.returncode == 0
     result.check_ok = res.returncode == 0
     if res.returncode != 0:
         err = (res.stderr or res.stdout).strip().splitlines()
         snippet = err[-1] if err else "(no diagnostic)"
-        result.notes.append(f"check failed: {snippet}")
+        # Count the diagnostics for a faster-at-a-glance signal.
+        count = len([l for l in err if "type/borrow error" in l or "error" in l])
+        note = f"check failed: {snippet}"
+        if count:
+            note = f"check failed ({count} diagnostic line(s)): {snippet}"
+        result.notes.append(note)
 
     # Codegen probe (C backend) — independent of check; reports whether the
     # subset lowers + emits at all.
     safe = "".join(c if c.isalnum() or c in "-._" else "_" for c in crate["name"])
     res_c = run([str(moira), "--emit", "c", "-o", str(BUILD_DIR / f"{safe}.c"), str(lib)])
     result.codegen_ok = res_c.returncode == 0
-    if res_c.returncode != 0 and result.parse_ok:
+    if res_c.returncode != 0:
         err = (res_c.stderr or res_c.stdout).strip().splitlines()
         snippet = err[-1] if err else "(no diagnostic)"
         result.notes.append(f"codegen failed: {snippet}")
@@ -220,11 +238,12 @@ def self_host(release: bool, strict: bool) -> int:
         f"**Self-hostable: {len(ready)} / {len(results)}**  ",
         f"(Blocked: {len(blocked)})",
         "",
-        "| Crate | Parse/Check | Codegen | Status |",
-        "|-------|-------------|---------|--------|",
+        "| Crate | Parse | Check | Codegen | Status |",
+        "|-------|-------|-------|---------|--------|",
     ]
     for r in results:
-        p = "ok" if r.check_ok else "fail"
+        p = "ok" if r.parse_ok else "fail"
+        c = "ok" if r.check_ok else "fail"
         g = "ok" if r.codegen_ok else "fail"
         status = "SELF-HOSTABLE" if r.self_hostable else "blocked"
         lines.append(f"| {r.crate} | {p} | {g} | {status} |")
@@ -404,6 +423,226 @@ def changelog(release: bool) -> int:
     return 0
 
 
+def docs(release: bool, out: Optional[str]) -> int:
+    """Build a versioned static documentation site under ``dist/docs`` (or
+    ``--out``). This backs the "publish versioned docs tied to releases"
+    deliverable: every release bundles the architecture guide, self-hosting
+    status, stability policy, contributor guide, TODO/roadmap, README, the
+    generated changelog, and the latest self-host probe report — as plain HTML
+    (no external toolchain required) plus the raw markdown sources.
+    """
+    version = workspace_version()
+    outdir = Path(out) if out else ROOT / "dist" / "docs"
+    md_dir = outdir / "md"
+    html_dir = outdir / "html"
+    md_dir.mkdir(parents=True, exist_ok=True)
+    html_dir.mkdir(parents=True, exist_ok=True)
+
+    # (source path, site title). Missing files are skipped with a warning.
+    pages = [
+        ("README.md", "Overview"),
+        ("docs/ARCHITECTURE.md", "Architecture"),
+        ("docs/SELF_HOSTING.md", "Self-Hosting Status"),
+        ("docs/STABILITY.md", "Stability Policy"),
+        ("CONTRIBUTING.md", "Contributing"),
+        ("TODO.md", "Roadmap / TODO"),
+    ]
+    # Include the freshly generated changelog when it exists.
+    changelog_path = ROOT / "dist" / f"moira-{version}-CHANGELOG.md"
+    entries: list[tuple[str, str, str]] = []  # (html filename, title, source rel path)
+    for rel, title in pages:
+        src = ROOT / rel
+        if not src.exists():
+            log(f"docs: warning — {rel} not found, skipping")
+            continue
+        text = src.read_text(encoding="utf-8")
+        (md_dir / src.name).write_text(text, encoding="utf-8")
+        html_name = src.stem.lower().replace("_", "-") + ".html"
+        (html_dir / html_name).write_text(
+            render_html_page(title, md_to_html(text), version), encoding="utf-8"
+        )
+        entries.append((html_name, title, rel))
+    if changelog_path.exists():
+        text = changelog_path.read_text(encoding="utf-8")
+        (md_dir / changelog_path.name).write_text(text, encoding="utf-8")
+        (html_dir / "changelog.html").write_text(
+            render_html_page("Changelog", md_to_html(text), version), encoding="utf-8"
+        )
+        entries.append(("changelog.html", "Changelog", changelog_path.name))
+    # Snapshot the latest self-host probe report when present.
+    report = ROOT / "build" / "self_host_report.md"
+    if report.exists():
+        text = report.read_text(encoding="utf-8")
+        (md_dir / "self-host-report.md").write_text(text, encoding="utf-8")
+        (html_dir / "self-host-report.html").write_text(
+            render_html_page("Self-Host Probe Report", md_to_html(text), version),
+            encoding="utf-8",
+        )
+        entries.append(("self-host-report.html", "Self-Host Probe Report", "build/self_host_report.md"))
+    # Version stamp so deployed sites can keep one directory per release.
+    (outdir / "version.txt").write_text(version + "\n", encoding="utf-8")
+
+    nav = "".join(f'<a href="html/{name}">{title}</a>' for name, title, _ in entries)
+    body = ["<h1>Moira documentation</h1>",
+            f'<p class="meta">Version {version} &middot; TPT Solutions</p>',
+            "<ul>"]
+    for name, title, rel in entries:
+        body.append(
+            f'<li><a href="html/{name}">{title}</a>'
+            f' <span class="meta">({rel})</span></li>'
+        )
+    body.append("</ul>")
+    (outdir / "index.html").write_text(
+        render_html_page("Moira documentation", "\n".join(body), version, nav=nav),
+        encoding="utf-8",
+    )
+    log(f"docs site ({len(entries) + 1} pages, version {version}) -> {outdir}")
+    return 0
+
+
+def render_html_page(title: str, body_html: str, version: str, nav: str = "") -> str:
+    """Wrap converted markdown in a minimal, dependency-free HTML shell."""
+    nav_html = f"<nav>{nav}</nav>" if nav else ""
+    return (
+        "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n"
+        "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
+        f"<title>{title} — Moira {version}</title>\n"
+        "<style>\n"
+        "body { font-family: system-ui, sans-serif; max-width: 60rem;"
+        " margin: 2rem auto; padding: 0 1rem; line-height: 1.55; color: #1a1a1a; }\n"
+        "nav a { margin-right: 1rem; }\n"
+        "pre { background: #f4f4f4; padding: 0.75rem; overflow-x: auto;"
+        " border-radius: 4px; }\n"
+        "code { background: #f4f4f4; padding: 0.1rem 0.3rem; border-radius: 3px; }\n"
+        "pre code { background: none; padding: 0; }\n"
+        ".meta { color: #666; font-size: 0.9em; }\n"
+        "</style>\n</head>\n<body>\n"
+        f"{nav_html}\n{body_html}\n</body>\n</html>\n"
+    )
+
+
+def escape_html(text: str) -> str:
+    return (
+        text.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+    )
+
+
+def md_inline(text: str) -> str:
+    """Inline Markdown (code spans, bold, italic, links) to HTML."""
+    text = escape_html(text)
+    text = re.sub(r"`([^`]+)`", r"<code>\1</code>", text)
+    text = re.sub(r"\*\*([^*]+)\*\*", r"<strong>\1</strong>", text)
+    text = re.sub(r"(?<!\*)\*([^*]+)\*(?!\*)", r"<em>\1</em>", text)
+    text = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r'<a href="\2">\1</a>', text)
+    return text
+
+
+def md_to_html(md: str) -> str:
+    """Convert a subset of Markdown to HTML (no external dependencies).
+
+    Handles: fenced code blocks, ATX headings, bullet/numbered lists, block
+    quotes, horizontal rules, paragraphs, and inline formatting (bold, italic,
+    inline code, links). Good enough for the project's documentation set.
+    """
+    out: list[str] = []
+    in_code = False
+    code_buf: list[str] = []
+    list_stack: list[str] = []  # "ul" or "ol"
+    para_buf: list[str] = []
+    last_li_idx: Optional[int] = None
+
+    def flush_para() -> None:
+        nonlocal last_li_idx
+        if para_buf:
+            inline = md_inline(" ".join(para_buf))
+            if list_stack and last_li_idx is not None:
+                # A continuation line of the previous list item (Markdown soft
+                # wrap): fold it into that item instead of breaking the list.
+                out[last_li_idx] = out[last_li_idx][:-len("</li>")] + " " + inline + "</li>"
+            else:
+                out.append(f"<p>{inline}</p>")
+            para_buf.clear()
+
+    def close_lists() -> None:
+        while list_stack:
+            out.append(f"</{list_stack.pop()}>")
+
+    for raw in md.splitlines():
+        line = raw.rstrip()
+        if line.strip().startswith("```"):
+            flush_para()
+            close_lists()
+            if in_code:
+                if code_buf:
+                    out.append(escape_html("\n".join(code_buf)))
+                out.append("</code></pre>")
+                in_code = False
+            else:
+                in_code = True
+                code_buf = []
+                out.append("<pre><code>")
+            continue
+        if in_code:
+            code_buf.append(raw)
+            continue
+        stripped = line.strip()
+        if not stripped:
+            flush_para()
+            close_lists()
+            continue
+        m = re.match(r"^(#{1,6})\s+(.*)$", stripped)
+        if m:
+            flush_para()
+            close_lists()
+            level = len(m.group(1))
+            out.append(f"<h{level}>{md_inline(m.group(2))}</h{level}>")
+            continue
+        if re.match(r"^(-{3,}|\*{3,})$", stripped):
+            flush_para()
+            close_lists()
+            out.append("<hr>")
+            continue
+        m = re.match(r"^[-*+]\s+(.*)$", stripped)
+        if m:
+            flush_para()
+            if not list_stack or list_stack[-1] != "ul":
+                close_lists()
+                list_stack.append("ul")
+                out.append("<ul>")
+            out.append(f"<li>{md_inline(m.group(1))}</li>")
+            last_li_idx = len(out) - 1
+            continue
+        m = re.match(r"^\d+[.)]\s+(.*)$", stripped)
+        if m:
+            flush_para()
+            if not list_stack or list_stack[-1] != "ol":
+                close_lists()
+                list_stack.append("ol")
+                out.append("<ol>")
+            out.append(f"<li>{md_inline(m.group(1))}</li>")
+            last_li_idx = len(out) - 1
+            continue
+        if stripped.startswith(">"):
+            flush_para()
+            close_lists()
+            out.append(
+                "<blockquote><p>"
+                + md_inline(stripped.lstrip("> ").rstrip())
+                + "</p></blockquote>"
+            )
+            continue
+        para_buf.append(stripped)
+    if in_code:
+        out.append(escape_html("\n".join(code_buf)))
+        out.append("</code></pre>")
+    flush_para()
+    close_lists()
+    return "\n".join(out)
+
+
 # Emit modes whose output must be byte-identical across stages, with the sample
 # source each one is exercised on. `asm` must avoid composite types because the
 # from-scratch native backend only handles the integer/control-flow subset.
@@ -517,7 +756,7 @@ def main(argv: list[str]) -> int:
         "command",
         nargs="?",
         default="all",
-        choices=["build", "check", "test", "self-host", "dist", "determinism", "changelog", "all"],
+        choices=["build", "check", "test", "self-host", "dist", "determinism", "changelog", "docs", "all"],
     )
     parser.add_argument("--release", action="store_true", help="use the release profile")
     parser.add_argument(
@@ -535,6 +774,7 @@ def main(argv: list[str]) -> int:
         default=None,
         help="dist: GPG key id to sign with (implies --sign)",
     )
+    parser.add_argument("--out", default=None, help="docs: output directory (default dist/docs)")
     args = parser.parse_args(argv)
 
     if args.command in ("build", "all"):
@@ -558,6 +798,8 @@ def main(argv: list[str]) -> int:
         return determinism(args.release)
     if args.command == "changelog":
         return changelog(args.release)
+    if args.command == "docs":
+        return docs(args.release, args.out)
     if args.command == "dist":
         sign = args.sign or args.sign_key is not None
         return dist(args.release, sign, args.sign_key)

@@ -130,7 +130,10 @@ fn collect_names_in_op(op: &Op, visit: &mut impl FnMut(&str)) {
                 visit(n);
             }
         }
-        Op::Call(_, args) => {
+        Op::Call(c, args) => {
+            if let Val::Name(n) = c {
+                visit(n);
+            }
             for a in args {
                 if let Val::Name(n) = a {
                     visit(n);
@@ -246,7 +249,11 @@ impl<'a> Emitter<'a> {
                 s.push_str("    push rax\n");
                 Ok(s)
             }
-            Op::Call(name, args) => {
+            Op::Call(callee, args) => {
+                let name = match callee {
+                    Val::Name(n) => n.clone(),
+                    other => return Err(format!("native backend only supports calls through a named function, found {:?}", other)),
+                };
                 if args.len() > 6 {
                     return Err(format!(
                         "native backend supports at most 6 arguments, `{}` needs {}",

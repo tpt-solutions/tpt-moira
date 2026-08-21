@@ -37,7 +37,7 @@ pub enum Op {
     Copy(Val),
     Binary(mir::BinOp, Val, Val),
     Unary(mir::UnOp, Val),
-    Call(String, Vec<Val>),
+    Call(Val, Vec<Val>),
     StructLit(String, Vec<(String, Val)>),
     Field(Val, String),
     Ref(Val),
@@ -133,6 +133,7 @@ fn build_function(f: &mir::Function) -> Result<SsaFunction, String> {
                 }
                 mir::Operand::Const(c) => Val::Const(*c),
                 mir::Operand::Unit => Val::Unit,
+                mir::Operand::Func(n) => Val::Name(n.clone()),
             }
         };
         for stmt in &block.stmts {
@@ -142,8 +143,8 @@ fn build_function(f: &mir::Function) -> Result<SsaFunction, String> {
                     Op::Binary(*b, resolve(l, &last_def), resolve(r, &last_def))
                 }
                 mir::Rvalue::Unary(u, o) => Op::Unary(*u, resolve(o, &last_def)),
-                mir::Rvalue::Call(name, args) => Op::Call(
-                    name.clone(),
+                mir::Rvalue::Call(callee, args) => Op::Call(
+                    resolve(callee, &last_def),
                     args.iter().map(|a| resolve(a, &last_def)).collect(),
                 ),
                 mir::Rvalue::StructLit(name, fields) => Op::StructLit(
@@ -443,7 +444,10 @@ fn collect_names(op: &Op, out: &mut HashSet<String>) {
                 out.insert(n.clone());
             }
         }
-        Op::Call(_, args) => {
+        Op::Call(c, args) => {
+            if let Val::Name(n) = c {
+                out.insert(n.clone());
+            }
             for a in args {
                 if let Val::Name(n) = a {
                     out.insert(n.clone());
@@ -465,7 +469,11 @@ fn operands_of(op: &Op) -> Vec<Val> {
     match op {
         Op::Copy(v) | Op::Unary(_, v) | Op::Ref(v) | Op::Field(v, _) => vec![v.clone()],
         Op::Binary(_, l, r) => vec![l.clone(), r.clone()],
-        Op::Call(_, args) => args.clone(),
+        Op::Call(c, args) => {
+            let mut v = vec![c.clone()];
+            v.extend(args.iter().cloned());
+            v
+        }
         Op::StructLit(_, fields) => fields.iter().map(|(_, v)| v.clone()).collect(),
         Op::Const(_) => vec![],
     }
@@ -485,7 +493,10 @@ fn rewrite_operands(op: &mut Op, remap: &HashMap<usize, usize>) {
             fix(l);
             fix(r);
         }
-        Op::Call(_, args) => args.iter_mut().for_each(fix),
+        Op::Call(c, args) => {
+            fix(c);
+            args.iter_mut().for_each(fix)
+        }
         Op::StructLit(_, fields) => fields.iter_mut().for_each(|(_, v)| fix(v)),
         Op::Const(_) => {}
     }
@@ -533,9 +544,9 @@ impl std::fmt::Display for SsaProgram {
                             writeln!(f, "{:?} {}, {}", b, show_val(l), show_val(r))?
                         }
                         Op::Unary(u, o) => writeln!(f, "{:?} {}", u, show_val(o))?,
-                        Op::Call(name, args) => {
+                        Op::Call(callee, args) => {
                             let a: Vec<String> = args.iter().map(show_val).collect();
-                            writeln!(f, "call {} ({})", name, a.join(", "))?
+                            writeln!(f, "call {} ({})", show_val(callee), a.join(", "))?
                         }
                         Op::StructLit(name, fields) => {
                             let flds: Vec<String> = fields

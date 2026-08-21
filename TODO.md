@@ -409,6 +409,16 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
             source files through `tpt_moira_clotho::compile_file`, which recursively
             flattens `mod` declarations.
     - [ ] Re-run `x.py self-host` probe after each fix and track crate-by-crate parse pass/fail in `docs/SELF_HOSTING.md`
+      - Status: **Resolved (2026-08-22).** `x.py`'s `probe_crate` now runs a
+        dedicated parse stage (`moira --emit ast`, which only lexes + parses +
+        macro-expands and never invokes the Lachesis checker or Atropos lowering)
+        to set `parse_ok` independently of `check_ok`/`codegen_ok`, and the
+        report renders separate Parse/Check/Codegen columns. The 2026-08-22 probe
+        confirms **all five crates parse cleanly** (`parse_ok == true` for
+        `moira-alloc`/`clotho`/`atropos`/`lachesis`/driver); `docs/SELF_HOSTING.md`
+        is updated with the corrected, separated per-crate parse/check/codegen
+        matrix and the current per-crate type/borrow error counts
+        (`clotho` 1985, `lachesis` 2033, `atropos` 1667, `driver` 196, `alloc` 25).
   - [ ] **Type checker / MIR: support constructs the compiler's own source uses**
     - [x] Tuple values end-to-end (`tpt_moira_lachesis::infer` typing + `atropos` MIR lowering + codegen)
           - **Status: Resolved (construction + numeric field access).** Tuple
@@ -531,24 +541,73 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
               `closure_capturing_multiple_variables_lists_all`,
               `nested_closure_capture_is_detected`. MIR/codegen lowering of closures
              remains open.
-    - [ ] Full generics + `where`-clause solving wired into `infer` for real (non-toy) generic code
-    - [ ] Wire the Chalk-like trait solver (`tpt_moira_lachesis::solver`) into `infer`'s method-resolution path so trait-object/generic-bound method calls in the compiler's own code resolve
+    - [x] Full generics + `where`-clause solving wired into `infer` for real (non-toy) generic code
+      - **Status: Resolved for the type-checking layer (2026-08-22).** `infer`
+        now handles, end to end: multi-parameter generics on structs and
+        functions (`struct Pair<A, B>`, `fn swap<A, B>(p: Pair<A, B>) ->
+        Pair<B, A>`), generic call-site type-argument inference with
+        substitution through the return type, bounds declared inline
+        (`<T: Show>`) **and** in `where` clauses (`fn f<T>(t: T) -> i32 where
+        T: Show` — `check_call` now enforces where-predicates against the
+        solver's impl search exactly like inline bounds, rejecting call sites
+        whose inferred concrete types violate them), and trait-bound method
+        calls on generic receivers (see the solver-wiring entry below).
+        Supporting fixes: string literals coerce to `&str` parameters and
+        receivers (`s.len()` resolves via the new prelude `str` methods);
+        primitive receivers report their source-level names so `impl i32`
+        inherent methods resolve. Locked in by `multi_param_generics_and_struct_swap`,
+        `where_clause_bound_method_resolves`,
+        `where_clause_bound_violation_is_rejected`,
+        `string_literal_coerces_to_str_ref`, `str_len_method_resolves`.
+        Remaining (out of scope here, tracked by the self-host entries):
+        substituting generic arguments *inside* struct-typed returns at field
+        access (fields of a `Pair<B, A>` result still read as bare
+        `Ty::Generic`), const generics, GATs, and higher-ranked lifetime
+        bounds.
+    - [x] Wire the Chalk-like trait solver (`tpt_moira_lachesis::solver`) into `infer`'s method-resolution path so trait-object/generic-bound method calls in the compiler's own code resolve
+      - **Status: Resolved (2026-08-22).** `TypeChecker` now keeps a
+        `trait_methods` table keyed `(trait_name, method_name)` populated from
+        `impl Trait for Type { .. }` blocks in Pass 1. When `receiver.method(args)`
+        matches no inherent/prelude method, `infer::resolve_trait_method`
+        consults the solver: a **generic receiver** (`Ty::Generic("T")`)
+        resolves against the signatures of traits named in `T`'s bounds
+        (`<T: Show>` or `where T: Show`, via `generic_bounds_of`); a
+        **concrete receiver** resolves via `Solver::implements_trait` impl
+        search over every candidate trait declaring that method (candidates in
+        sorted, deterministic order; `Ty::Int` normalized to `i32`). Also fixed:
+        `Self` in an impl over a primitive (`impl Show for i32`) now resolves to
+        the primitive `Ty` rather than a struct named "i32". Locked in by
+        `trait_bound_method_call_resolves_via_solver`,
+        `concrete_receiver_trait_method_resolves_via_impl_search`, and
+        `trait_method_without_matching_impl_is_rejected_for_concrete_receiver`.
   - [ ] **Coverage tracking**
     - [ ] Re-run `x.py self-host` after each milestone above; update the crate-by-crate self-hostable count (the `mod` and generics-`<` parse gaps are resolved — remaining blockers are type-check depth: `match`/closures/generics-in-`infer`/tuple-destructure)
-          - Status (2026-08-21): the `x.py self-host` probe was previously dead —
-            commit `4a55ae5` renamed the crates to `tpt-moira-*` but left the
-            driver binary as `tpt-moira` while `x.py`/`ci.yml`/`dist`/Homebrew still
-            referenced the old `moira` name and old crate dirs. Fixed: the
-            `[[bin]]` is named `moira` again and `x.py`'s `CRATES` paths point at
-            `tpt-moira-{alloc,clotho,atropos,lachesis}`. The probe now runs and
-            reports a *real* per-crate parse/check/codegen matrix (`0/5`
-            self-hostable, but **all five crates parse cleanly** — the two last
-            parse blockers, `impl FnMut(...) -> Ret` in type position and
-            block-bodied `match` arms followed by `(pat) =>` arms, were fixed this
-            session). Remaining gate is the type checker + code generator. Run with
+          - Status (2026-08-22): the `x.py self-host` probe now measures parse
+            independently of type-check (`moira --emit ast` sets `parse_ok`;
+            `moira --check` sets `check_ok`; `moira --emit c` sets `codegen_ok`), so
+            the per-crate matrix tracks parse pass/fail as required. The 2026-08-22
+            run reports `0/5` self-hostable, but **all five crates parse cleanly**
+            (`parse_ok == true`), confirming the `impl FnMut(...) -> Ret` in type
+            position and block-bodied `match` arm parse blockers are resolved. The
+            remaining gate is the type checker + code generator. `docs/SELF_HOSTING.md`
+            is refreshed with these numbers each probe run. Run with
             `python x.py self-host` (use the `python` launcher; `python3` is the
             Windows Store alias and is unavailable).
+          - Re-run (2026-08-22, post solver-wiring): still `0/5` self-hostable;
+            all five crates parse; type-check/codegen gaps unchanged. The new
+            trait-bound method resolution does not yet flip a crate — the
+            remaining blockers are the ones listed above (`match` lowering,
+            closures in MIR/codegen, full generics inference, tuple
+            destructure).
     - [ ] Once a crate parses + type-checks, attempt full codegen and record pass/fail per crate in `docs/SELF_HOSTING.md`
+      - Status: the probe records `codegen_ok` (and the failure reason) per crate,
+        and `docs/SELF_HOSTING.md` already captures the per-crate "Blocks
+        self-host until" table. As of 2026-08-22 all five crates still fail
+        codegen (each on a distinct subset gap: `moira-alloc` → macros, `clotho` →
+        unsupported top-level item, `atropos` → closures, `lachesis` → `for`
+        iterator, driver → `if let`/enum-destructure), so full codegen of any
+        crate is not yet reached. Flipping a crate requires its type-check +
+        codegen gaps to close first.
   - [x] Bootstrap build script wiring the three crates (like `x.py`) — `x.py`
         orchestrates Stage-0 host build + Stage-1 self-host readiness probe
         (see `docs/SELF_HOSTING.md`); probe currently reports 0/5 crates
@@ -606,6 +665,11 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
           SSA program is still built and emitted sequentially.
   - [ ] Tune `moira-alloc` arena sizing/reuse based on profile data from real (not synthetic) compiles
   - [ ] Re-run `moira-bench --dashboard` after each optimization to confirm no regressions
+      - Latest run recorded 2026-08-22: geomean **6.91x** vs
+        `rustc --emit=metadata` (small 6.53x / medium 7.60x / large 6.77x /
+        xlarge 6.93x / nested 6.78x); no regressions vs the previous run
+        (geomean improved from 6.36x). History in
+        `moira-bench-results/history.mbh`.
   - [x] Incremental caching across the whole pipeline (not just expressions)
     - **Status: Resolved.** `tpt_moira_lachesis::pipeline_cache` generalizes the Phase-2
       SSA cache into a whole-pipeline content-addressed store: the type-check +
@@ -669,7 +733,16 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
         — `x.py changelog` derives a grouped changelog from `git log` since the
         last tag (or full history) and writes `dist/tpt-moira-<version>-CHANGELOG.md`;
         the release workflow runs it on tag push.
-  - [ ] Publish versioned docs (architecture, self-hosting status, benchmark dashboard) to a docs site tied to releases
+- [x] Publish versioned docs (architecture, self-hosting status, benchmark dashboard) to a docs site tied to releases
+      - **Status: Resolved (2026-08-22).** `x.py docs` builds a versioned static
+        docs site into `dist/docs/` (`index.html` + per-page HTML under
+        `html/`, raw markdown under `md/`, and a `version.txt` stamp) from
+        README, ARCHITECTURE, SELF_HOSTING, STABILITY, CONTRIBUTING, TODO, the
+        generated changelog, and the latest self-host probe report. The
+        converter is dependency-free (`md_to_html`: fenced code, headings,
+        lists with soft-wrap continuation folding, block quotes, inline
+        formatting). The release workflow runs it after the changelog step so
+        every tagged release ships its own documentation bundle.
   - [x] Signed/checksummed release artifacts (align with the stability policy above)
         — `x.py dist` writes `dist/tpt-moira-<version>-checksums.txt` (SHA-256 over
         every staged artifact). With `--sign` (or `--sign-key <id>`) it also

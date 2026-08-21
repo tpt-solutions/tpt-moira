@@ -109,7 +109,7 @@ fn emit_function(
         .iter()
         .map(|p| {
             let t = param_types.get(p.as_str()).copied().unwrap_or("long long");
-            format!("{} {}", c_type(t, struct_names), p)
+            format!("{}", c_decl(t, p, &struct_names))
         })
         .collect();
     let param_str = if params.is_empty() {
@@ -136,7 +136,7 @@ fn emit_function(
             .as_deref()
             .map(|t| c_type(t, struct_names))
             .unwrap_or_else(|| "long long".to_string());
-        out.push_str(&format!("    {} {};\n", t, name));
+        out.push_str(&format!("    {};\n", c_decl(&t, name, &struct_names)));
     }
     // SSA temporary declarations. Iterate in a deterministic (sorted) order so
     // the emitted C is identical across runs/processes — `temp_types` is a
@@ -171,7 +171,10 @@ fn emit_function(
                         ));
                     }
                     // A void call is emitted as a bare statement (no destination).
-                    mir::Rvalue::Call(name, _) if void_names.contains(name.as_str()) => {
+                    mir::Rvalue::Call(callee, _) if matches!(
+                        callee,
+                        mir::Operand::Func(n) if void_names.contains(n.as_str())
+                    ) => {
                         out.push_str(&format!("    {};\n", emit_rvalue(&s.rvalue)));
                     }
                     _ => {
@@ -192,6 +195,7 @@ fn emit_operand(o: &mir::Operand) -> String {
         mir::Operand::Var(n) => n.clone(),
         mir::Operand::Const(c) => c.to_string(),
         mir::Operand::Unit => "0".to_string(),
+        mir::Operand::Func(n) => n.clone(),
     }
 }
 
@@ -230,6 +234,22 @@ fn c_type(ty: &str, struct_names: &std::collections::HashSet<&str>) -> String {
     mapped.to_string()
 }
 
+/// Render a *declaration* of `name` with C type `ty`.
+///
+/// Most types lower to `ctypename name`, but a function-pointer type such as
+/// `long long (*)(long long)` cannot be written that way in C — the variable name
+/// must sit inside the parentheses: `long long (*name)(long long)`. This helper
+/// rewrites the `(*)` to `(*name)` for such types and otherwise defers to
+/// [`c_type`].
+fn c_decl(ty: &str, name: &str, struct_names: &std::collections::HashSet<&str>) -> String {
+    if let Some(star) = ty.find("(*)") {
+        let (ret, rest) = ty.split_at(star);
+        let rest = rest.replacen("(*)", &format!("(*{})", name), 1);
+        return format!("{}{}", ret.trim_end(), rest);
+    }
+    format!("{} {}", c_type(ty, struct_names), name)
+}
+
 fn emit_rvalue(rv: &mir::Rvalue) -> String {
     match rv {
         mir::Rvalue::Use(o) => emit_operand(o),
@@ -241,9 +261,9 @@ fn emit_rvalue(rv: &mir::Rvalue) -> String {
             mir::UnOp::Not => format!("(!{})", emit_operand(o)),
             mir::UnOp::Deref => format!("(*{})", emit_operand(o)),
         },
-        mir::Rvalue::Call(name, args) => {
+        mir::Rvalue::Call(callee, args) => {
             let a: Vec<String> = args.iter().map(emit_operand).collect();
-            format!("{}({})", name, a.join(", "))
+            format!("{}({})", emit_operand(callee), a.join(", "))
         }
         mir::Rvalue::StructLit(name, fields) => {
             let inits: Vec<String> = fields

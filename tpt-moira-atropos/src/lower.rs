@@ -42,6 +42,17 @@ pub fn lower_program(prog: &Program) -> Result<mir::Program> {
             _ => None,
         })
         .collect();
+    // Names of every top-level function (incl. async), used to distinguish a bare
+    // call path (`foo(..)`) from an indirect call through a function-pointer local
+    // (a closure value) during lowering.
+    let all_fn_names: std::collections::HashSet<String> = prog
+        .items
+        .iter()
+        .filter_map(|it| match &it.kind {
+            ItemKind::Function(f) => Some(f.name.node.clone()),
+            _ => None,
+        })
+        .collect();
     for item in &prog.items {
         match &item.kind {
             ItemKind::Struct(s) => {
@@ -62,6 +73,7 @@ pub fn lower_program(prog: &Program) -> Result<mir::Program> {
                 if f.is_async {
                     let mut l = Lower::new(&out.structs);
                     l.async_fns = async_names.clone();
+                    l.all_fn_names = all_fn_names.clone();
                     let ad = l.lower_async_function(f)?;
                     out.structs.push(mir::StructDef {
                         name: ad.def.fut_name.clone(),
@@ -70,14 +82,17 @@ pub fn lower_program(prog: &Program) -> Result<mir::Program> {
                     out.functions.push(ad.poll_fn.clone());
                     out.functions.push(ad.run_fn.clone());
                     out.functions.push(ad.ctor_fn.clone());
+                    out.functions.extend(ad.closures.iter().cloned());
                     out.async_fns.push(ad.def);
                 } else {
                     let mut l = Lower::new(&out.structs);
                     l.async_fns = async_names.clone();
+                    l.all_fn_names = all_fn_names.clone();
                     let func = l.lower_function(f)?;
                     let tuple_structs: Vec<mir::StructDef> =
                         l.tuple_structs.values().cloned().collect();
                     out.functions.push(func);
+                    out.functions.extend(l.closures.drain(..));
                     out.structs.extend(tuple_structs);
                 }
             }
@@ -138,6 +153,15 @@ struct Lower {
     /// deterministic name derived from the component C types. Emitted into the
     /// program's `structs` at the end of lowering.
     tuple_structs: HashMap<String, mir::StructDef>,
+    /// Counter for lambda-lifted closure function names (`__moira_closure_N`).
+    closure_counter: usize,
+    /// Top-level functions (closures) lambda-lifted out of the current function
+    /// body, appended to the program after the enclosing function is lowered.
+    closures: Vec<mir::Function>,
+    /// Names of every top-level (and `async`) function in the program, so a bare
+    /// call path can be told apart from an indirect call through a function-pointer
+    /// local (a closure value).
+    all_fn_names: std::collections::HashSet<String>,
 }
 
 /// Build a deterministic struct name for a tuple with the given component C
@@ -150,6 +174,195 @@ fn tuple_struct_name(elem_c_tys: &[String]) -> String {
         name.push_str(t.replace(' ', "_").replace('*', "p").as_str());
     }
     name
+}
+
+/// Build a deterministic C function-pointer type for a non-capturing closure
+/// with `param_count` parameters. Every parameter (and the result) is `long long`
+/// so the type lines up with the lambda-lifted MIR function's signature.
+fn func_ptr_c_type(param_count: usize) -> String {
+    if param_count == 0 {
+        "long long (*)(void)".to_string()
+    } else {
+        format!("long long (*)({})", vec!["long long"; param_count].join(", "))
+    }
+}
+
+/// Collect every single-segment path name referenced by `e` into `out` (deduped).
+/// Used by [`closure_captures`] to detect captured variables structurally.
+fn collect_path_names(
+    e: &Expr,
+    bound: &std::collections::HashSet<String>,
+    out: &mut Vec<String>,
+    seen: &mut std::collections::HashSet<String>,
+) {
+    match &e.kind {
+        ExprKind::Path(p) => {
+            if p.segments.len() == 1 {
+                let n = p.segments[0].node.clone();
+                if !bound.contains(&n) && seen.insert(n.clone()) {
+                    out.push(n);
+                }
+            }
+        }
+        ExprKind::Lit(_) => {}
+        ExprKind::Binary(l, _, r) => {
+            collect_path_names(l, bound, out, seen);
+            collect_path_names(r, bound, out, seen);
+        }
+        ExprKind::Unary(_, e) => collect_path_names(e, bound, out, seen),
+        ExprKind::Call(f, args) => {
+            collect_path_names(f, bound, out, seen);
+            for a in args {
+                collect_path_names(a, bound, out, seen);
+            }
+        }
+        ExprKind::MethodCall(r, _, args) => {
+            collect_path_names(r, bound, out, seen);
+            for a in args {
+                collect_path_names(a, bound, out, seen);
+            }
+        }
+        ExprKind::Field(e, _) => collect_path_names(e, bound, out, seen),
+        ExprKind::Index(b, i) => {
+            collect_path_names(b, bound, out, seen);
+            collect_path_names(i, bound, out, seen);
+        }
+        ExprKind::Ref(e, _) => collect_path_names(e, bound, out, seen),
+        ExprKind::Deref(e) => collect_path_names(e, bound, out, seen),
+        ExprKind::Array(es) => {
+            for e in es {
+                collect_path_names(e, bound, out, seen);
+            }
+        }
+        ExprKind::Struct(_, fields, base) => {
+            for (_, e) in fields {
+                collect_path_names(e, bound, out, seen);
+            }
+            if let Some(b) = base {
+                collect_path_names(b, bound, out, seen);
+            }
+        }
+        ExprKind::Tuple(es) => {
+            for e in es {
+                collect_path_names(e, bound, out, seen);
+            }
+        }
+        ExprKind::Block(b) => collect_path_names_block(b, bound, out, seen),
+        ExprKind::If(c, tb, eb) => {
+            collect_path_names(c, bound, out, seen);
+            collect_path_names_block(tb, bound, out, seen);
+            if let Some(e) = eb {
+                collect_path_names(e, bound, out, seen);
+            }
+        }
+        ExprKind::While(c, b) => {
+            collect_path_names(c, bound, out, seen);
+            collect_path_names_block(b, bound, out, seen);
+        }
+        ExprKind::Loop(b) => collect_path_names_block(b, bound, out, seen),
+        ExprKind::For(p, e, b) => {
+            collect_path_names(e, bound, out, seen);
+            let mut b2 = bound.clone();
+            bind_pat_names_in(p, &mut b2);
+            collect_path_names_block(b, &b2, out, seen);
+        }
+        ExprKind::Return(e) => {
+            if let Some(e) = e {
+                collect_path_names(e, bound, out, seen);
+            }
+        }
+        ExprKind::Break | ExprKind::Continue => {}
+        ExprKind::Match(s, arms) => {
+            collect_path_names(s, bound, out, seen);
+            for (p, e) in arms {
+                let mut b2 = bound.clone();
+                bind_pat_names_in(p, &mut b2);
+                collect_path_names(e, &b2, out, seen);
+            }
+        }
+        ExprKind::Await(e) => collect_path_names(e, bound, out, seen),
+        ExprKind::Unsafe(b) => collect_path_names_block(b, bound, out, seen),
+        ExprKind::Closure { params, body, .. } => {
+            let mut b2 = bound.clone();
+            for p in params {
+                if let Ok(n) = pat_name(&p.pat) {
+                    b2.insert(n);
+                }
+            }
+            collect_path_names(body, &b2, out, seen);
+        }
+        ExprKind::Cast(e, _) => collect_path_names(e, bound, out, seen),
+        ExprKind::Range(a, b, _) => {
+            if let Some(a) = a {
+                collect_path_names(a, bound, out, seen);
+            }
+            if let Some(b) = b {
+                collect_path_names(b, bound, out, seen);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_path_names_block(
+    b: &ast::Block,
+    bound: &std::collections::HashSet<String>,
+    out: &mut Vec<String>,
+    seen: &mut std::collections::HashSet<String>,
+) {
+    let mut bound_set = bound.clone();
+    for s in &b.stmts {
+        match &s.kind {
+            StmtKind::Local(local) => {
+                if let Some(init) = &local.init {
+                    collect_path_names(init, &bound_set, out, seen);
+                }
+                if let Ok(n) = pat_name(&local.pat) {
+                    bound_set.insert(n);
+                }
+            }
+            StmtKind::Semi(e) | StmtKind::Expr(e) => collect_path_names(e, &bound_set, out, seen),
+            StmtKind::Item(_) => {}
+        }
+    }
+    if let Some(tail) = &b.tail {
+        collect_path_names(tail, &bound_set, out, seen);
+    }
+}
+
+fn bind_pat_names_in(pat: &Pat, out: &mut std::collections::HashSet<String>) {
+    match pat {
+        Pat::Ident(n) => {
+            out.insert(n.node.clone());
+        }
+        Pat::Tuple(ps) => {
+            for p in ps {
+                bind_pat_names_in(p, out);
+            }
+        }
+        Pat::Wild => {}
+        _ => {}
+    }
+}
+
+/// Return the names a closure would need to capture: single-segment path names in
+/// `body` that are not bound within the closure (`bound`, its own params and any
+/// internal `let`s) and not top-level function names (`fn_names`).
+fn closure_captures(
+    body: &Expr,
+    bound: &std::collections::HashSet<String>,
+    fn_names: &std::collections::HashSet<String>,
+) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    collect_path_names(body, bound, &mut names, &mut seen);
+    let mut caps: Vec<String> = names
+        .into_iter()
+        .filter(|n| !bound.contains(n) && !fn_names.contains(n))
+        .collect();
+    caps.sort();
+    caps.dedup();
+    caps
 }
 
 /// Bookkeeping for lowering an `async fn` into a suspending state machine.
@@ -185,6 +398,9 @@ impl Lower {
             async_ctx: None,
             expecting_future: false,
             tuple_structs: HashMap::new(),
+            closure_counter: 0,
+            closures: Vec::new(),
+            all_fn_names: std::collections::HashSet::new(),
         }
     }
 
@@ -411,6 +627,7 @@ impl Lower {
             poll_fn,
             run_fn,
             ctor_fn,
+            closures: self.closures,
         })
     }
 
@@ -475,6 +692,73 @@ impl Lower {
         }
     }
 
+    /// Lambda-lift a non-capturing closure `|params| body` into a fresh top-level
+    /// `mir::Function` and return a `Func` operand referencing it (the closure
+    /// value). The lifted function always returns `long long` (a `()` result is
+    /// returned as `0`, which callers discard) so its C signature lines up with the
+    /// uniform `long long (*)(long long, …)` function-pointer type used for closure
+    /// values.
+    ///
+    /// Capturing closures are rejected with the same precise message the type
+    /// checker uses, because the codegen subset does not yet model an environment
+    /// struct for captured variables.
+    fn lower_closure(&mut self, params: &[ast::Param], body: &Expr) -> Result<mir::Operand> {
+        let mut param_names = std::collections::HashSet::new();
+        for p in params {
+            param_names.insert(pat_name(&p.pat)?);
+        }
+        // Structural capture analysis: any single-segment path name the body
+        // references that is neither a closure parameter nor a top-level function is
+        // a captured variable.
+        let captures = closure_captures(body, &param_names, &self.all_fn_names);
+        if !captures.is_empty() {
+            return Err(LowerError(format!(
+                "closures that capture variables are not yet supported in the codegen subset (captured: {})",
+                captures.join(", ")
+            )));
+        }
+
+        let name = format!("__moira_closure_{}", self.closure_counter);
+        self.closure_counter += 1;
+
+        // Build the lifted function in its own context, seeded with the enclosing
+        // environment so nested closures and async names resolve.
+        let mut sub = Lower::new(&self.structs);
+        sub.async_fns = self.async_fns.clone();
+        sub.all_fn_names = self.all_fn_names.clone();
+        sub.closure_counter = self.closure_counter;
+        sub.func.name = name.clone();
+        sub.func.ret = Some("long long".to_string());
+        for p in params {
+            let n = pat_name(&p.pat)?;
+            // Structural lowering: closure parameters are `long long` so the lifted
+            // signature matches the uniform function-pointer type.
+            sub.func.params.push(n.clone());
+            sub.func.locals.push((n, Some("long long".to_string())));
+        }
+        sub.new_block();
+        // A closure body is an expression; a block-bodied closure (`|x| { .. }`)
+        // lowers through `lower_block_value`, while a bare expression (`|x| x + 1`)
+        // lowers through `lower_expr`. Both leave the entry block's terminator
+        // `Unreachable`, so we attach the `return` of the tail value.
+        let value = match &body.kind {
+            ExprKind::Block(b) => sub.lower_block_value(b)?,
+            _ => sub.lower_expr(body)?,
+        };
+        if let mir::Terminator::Unreachable = sub.func.blocks[sub.current].term {
+            let ret = if sub.func.ret.is_some() {
+                Some(value)
+            } else {
+                None
+            };
+            sub.set_term(mir::Terminator::Return(ret));
+        }
+        sub.func.temp_types = sub.types.clone();
+        self.closure_counter = sub.closure_counter;
+        self.closures.push(sub.func.clone());
+        Ok(mir::Operand::Func(name))
+    }
+
     fn lower_stmt(&mut self, s: &Stmt) -> Result<()> {
         match &s.kind {
             StmtKind::Local(local) => {
@@ -511,6 +795,12 @@ impl Lower {
                     (None, Some(init)) => match &init.kind {
                         ExprKind::Struct(path, _, _) => {
                             path.segments.last().map(|s| s.node.clone())
+                        }
+                        ExprKind::Closure { params, .. } => {
+                            // A closure value is a function pointer; type the local
+                            // with the uniform `long long (*)(long long, …)` so the C
+                            // declaration matches the lambda-lifted function.
+                            Some(func_ptr_c_type(params.len()))
                         }
                         ExprKind::Tuple(elems) => {
                             // Infer the generated struct type for the tuple shape
@@ -825,42 +1115,59 @@ impl Lower {
                 Ok(mir::Operand::var(t))
             }
             ExprKind::Call(callee, args) => {
-                let name = match &callee.kind {
-                    ExprKind::Path(p) => p
-                        .segments
-                        .last()
-                        .map(|s| s.node.clone())
-                        .unwrap_or_default(),
-                    _ => return Err(LowerError("call target must be a path".into())),
-                };
-                // A call to an `async fn` has no bare body; it lowers either to
-                // the future constructor (`__ctor`, used by `.await`) or to the
-                // sync run-wrapper (`__run`, used everywhere else) which drives
-                // the future to completion and returns its output.
-                let is_async_call = self.async_fns.contains(&name);
-                let name = if is_async_call {
-                    if self.expecting_future {
-                        format!("{}__ctor", name)
-                    } else {
-                        format!("{}__run", name)
-                    }
+                // A closure literal as the callee is invoked immediately: lambda-lift
+                // it into a top-level function and call that directly.
+                let (callee_operand, result_ty) = if let ExprKind::Closure {
+                    params,
+                    body,
+                    ..
+                } = &callee.kind
+                {
+                    (self.lower_closure(params, body)?, "long long".to_string())
                 } else {
-                    name
+                    let name = match &callee.kind {
+                        ExprKind::Path(p) => p
+                            .segments
+                            .last()
+                            .map(|s| s.node.clone())
+                            .unwrap_or_default(),
+                        _ => return Err(LowerError("call target must be a path".into())),
+                    };
+                    // A call to an `async fn` has no bare body; it lowers either to
+                    // the future constructor (`__ctor`, used by `.await`) or to the
+                    // sync run-wrapper (`__run`, used everywhere else) which drives
+                    // the future to completion and returns its output.
+                    let is_async_call = self.async_fns.contains(&name);
+                    let callee_name = if is_async_call {
+                        if self.expecting_future {
+                            format!("{}__ctor", name)
+                        } else {
+                            format!("{}__run", name)
+                        }
+                    } else {
+                        name.clone()
+                    };
+                    let result_ty = if is_async_call && self.expecting_future {
+                        format!("{}__fut", name.trim_end_matches("__ctor"))
+                    } else {
+                        "long long".to_string()
+                    };
+                    // A name that is not a known top-level function is an indirect call
+                    // through a function-pointer local (a closure value); everything
+                    // else is a direct call to a top-level function.
+                    let op = if self.all_fn_names.contains(&name) {
+                        mir::Operand::Func(callee_name)
+                    } else {
+                        mir::Operand::Var(name)
+                    };
+                    (op, result_ty)
                 };
                 let mut operands = Vec::new();
                 for a in args {
                     operands.push(self.lower_expr(a)?);
                 }
-                // The result type is the future struct when we are building a
-                // future (`__ctor`), otherwise `long long` (the `__run` output
-                // or a sync call's result).
-                let result_ty = if is_async_call && self.expecting_future {
-                    format!("{}__fut", name.trim_end_matches("__ctor"))
-                } else {
-                    "long long".to_string()
-                };
                 let t = self.fresh_temp(result_ty);
-                self.emit(t.clone(), mir::Rvalue::Call(name, operands));
+                self.emit(t.clone(), mir::Rvalue::Call(callee_operand, operands));
                 Ok(mir::Operand::var(t))
             }
             ExprKind::Field(base, field) => {
@@ -1097,7 +1404,10 @@ impl Lower {
                     operands.push(self.lower_expr(a)?);
                 }
                 let t = self.fresh_temp("long long");
-                self.emit(t.clone(), mir::Rvalue::Call(method.node.clone(), operands));
+                self.emit(
+                    t.clone(),
+                    mir::Rvalue::Call(mir::Operand::Func(method.node.clone()), operands),
+                );
                 Ok(mir::Operand::var(t))
             }
             ExprKind::Index(base, idx) => {
@@ -1124,9 +1434,7 @@ impl Lower {
                 Ok(mir::Operand::var(t))
             }
             ExprKind::Unsafe(..) => Err(LowerError("`unsafe` is not in the codegen subset".into())),
-            ExprKind::Closure { .. } => {
-                Err(LowerError("closures are not in the codegen subset".into()))
-            }
+            ExprKind::Closure { params, body, .. } => self.lower_closure(params, body),
             ExprKind::Cast(e, ty) => {
                 let operand = self.lower_expr(e)?;
                 let cty = type_to_c(ty);
@@ -1290,7 +1598,10 @@ impl Lower {
         let status = self.fresh_temp("long long");
         self.emit(
             status.clone(),
-            mir::Rvalue::Call(callee_poll.clone(), vec![mir::Operand::var(awt_addr)]),
+            mir::Rvalue::Call(
+                mir::Operand::Func(callee_poll.clone()),
+                vec![mir::Operand::var(awt_addr)],
+            ),
         );
         let cmp = self.fresh_temp("long long");
         self.emit(
@@ -1674,6 +1985,9 @@ struct AsyncLower {
     poll_fn: mir::Function,
     run_fn: mir::Function,
     ctor_fn: mir::Function,
+    /// Closures lambda-lifted out of the async body (none in the supported linear
+    /// async subset, but threaded through so they are never silently dropped).
+    closures: Vec<mir::Function>,
 }
 
 /// Collect the names + C types of every `let` binding in a (linear) block, used
@@ -1859,7 +2173,7 @@ fn build_run_wrapper(
     func.blocks[loop_b].stmts.push(mir::Stmt {
         place: status.clone(),
         rvalue: mir::Rvalue::Call(
-            poll_name.to_string(),
+            mir::Operand::Func(poll_name.to_string()),
             vec![mir::Operand::var(fut_ptr.clone())],
         ),
     });

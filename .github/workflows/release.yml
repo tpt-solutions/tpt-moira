@@ -42,6 +42,9 @@ jobs:
       - name: Generate changelog
         run: python3 x.py changelog
 
+      - name: Build versioned docs site
+        run: python3 x.py docs
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:

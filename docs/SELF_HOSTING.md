@@ -21,21 +21,28 @@ Windows; use the `python` launcher) and read `build/self_host_report.md`. The
 probe reports, per crate: parse/check acceptance and C-backend codegen
 acceptance.
 
-**Probe health (2026-08-21):** the self-host probe was previously *dead* — commit
+**Probe health (2026-08-22):** the self-host probe was previously *dead* — commit
 `4a55ae5` renamed the workspace crates to `tpt-moira-*` but left the driver
 binary as `tpt-moira` while `x.py`/`ci.yml`/`dist`/Homebrew still referenced the
-old `moira` name and the old crate directory names. Both were fixed this
+old `moira` name and the old crate directory names. Both were fixed in an earlier
 session: the `[[bin]]` is once again named `moira` (matching every reference),
 and `x.py`'s `CRATES` entry points point at `tpt-moira-{alloc,clotho,atropos,lachesis}`.
 The probe now runs and produces a *real* per-crate parse/check/codegen report
 instead of "entry point not found".
 
-**Parse gate is closed for `clotho` and the driver; `lachesis`/`atropos` are
-parse-blocked on deeper constructs.** As of this session `clotho` and the driver
-parse cleanly (they now reach the type/borrow checker); `lachesis` and `atropos`
-advanced past their earlier parse errors but still hit a parse blocker further
-into their own source (a `)` and an `as`, respectively). Three parse blockers
-were fixed:
+The probe (2026-08-22) now measures **parse independently of type-check**: it
+runs `moira --emit ast` (which only lexes + parses + macro-expands and never
+invokes the Lachesis checker or Atropos lowering) to set `parse_ok`, then runs
+`moira --check` for `check_ok`, then `moira --emit c` for `codegen_ok`. This
+directly tracks the crate-by-crate parse pass/fail that the "real self-host
+wall" section below describes (see `x.py`'s `probe_crate`).
+
+**Parse gate is closed for all five crates.** The latest probe reports every
+crate with `parse_ok == true` (clotho, atropos, lachesis, the driver, and
+moira-alloc all parse their own `lib.rs` cleanly). The remaining gate is purely
+the **type checker + code generator**. The earlier "lachesis/atropos parse-blocked
+on deeper constructs" blockers were all closed in prior sessions (the three
+parse blockers below are historical, now resolved):
 
 - `impl FnMut(&mut Self) -> ParseResult<T>`-style closure trait types in type
   position: the `impl Trait` parser consumed the `(args)` but not the `-> Ret`
@@ -69,12 +76,13 @@ were closed this session:
   `infer_match` skips `Never` arms when aggregating the result type. This clears
   the `match`-arm "expected (), found str" errors.
 
-Latest per-crate type/borrow error counts (after these fixes): `clotho` 2061,
-`lachesis` 2253, `atropos` 1857, `moira` (driver) 203, `moira-alloc` 25. The
-dominant remaining classes are macros (`vec!`/`format!`/`write!`), enum-variant
-destructuring patterns (`Some(x)`/`Ok(x)`), `X::new` associated-function
-resolution on user types, `Self` in type position, real generics in `infer`, and
-slice indexing. These are the Phase-4 features tracked below and in `TODO.md`.
+Latest per-crate type/borrow error counts (from the 2026-08-22 probe):
+`clotho` 1985, `lachesis` 2033, `atropos` 1667, `moira` (driver) 196,
+`moira-alloc` 25. The dominant remaining classes are macros
+(`vec!`/`format!`/`write!`), enum-variant destructuring patterns
+(`Some(x)`/`Ok(x)`), `X::new` associated-function resolution on user types,
+`Self` in type position, real generics in `infer`, and slice indexing. These are
+the Phase-4 features tracked below and in `TODO.md`.
 
 | Crate | Role | Blocks self-host until |
 |-------|------|------------------------|

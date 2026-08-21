@@ -98,8 +98,10 @@ pub enum Rvalue {
     Binary(BinOp, Operand, Operand),
     /// Unary primitive operation.
     Unary(UnOp, Operand),
-    /// Function call `name(args)`.
-    Call(String, Vec<Operand>),
+    /// Function call `callee(args)`, where `callee` is either a named top-level
+    /// function (`Operand::Func`) or an indirect call through a function pointer
+    /// held in a variable (`Operand::Var`) — the latter backs closures.
+    Call(Operand, Vec<Operand>),
     /// Struct literal `{ field: value, .. }` of the named struct type.
     StructLit(String, Vec<(String, Operand)>),
     /// Field projection `operand.field`. When `deref` is true the operand is a
@@ -163,6 +165,10 @@ pub enum Operand {
     Const(i128),
     /// The unit value `()`.
     Unit,
+    /// A reference to a top-level function by name — a function-pointer constant.
+    /// Used for ordinary calls and as the value a closure expression lowers to
+    /// (the closure is lambda-lifted into a top-level `mir::Function`).
+    Func(String),
 }
 
 impl Operand {
@@ -177,6 +183,7 @@ impl fmt::Display for Operand {
             Operand::Var(n) => f.write_str(n),
             Operand::Const(c) => write!(f, "{}", c),
             Operand::Unit => f.write_str("()"),
+            Operand::Func(n) => f.write_str(n),
         }
     }
 }
@@ -269,9 +276,9 @@ impl fmt::Display for Rvalue {
             Rvalue::Use(o) => write!(f, "use {}", o),
             Rvalue::Binary(b, l, r) => write!(f, "{:?} {}, {}", b, l, r),
             Rvalue::Unary(u, o) => write!(f, "{:?} {}", u, o),
-            Rvalue::Call(name, args) => {
+            Rvalue::Call(callee, args) => {
                 let a: Vec<String> = args.iter().map(|x| x.to_string()).collect();
-                write!(f, "call {} ({})", name, a.join(", "))
+                write!(f, "call {} ({})", callee, a.join(", "))
             }
             Rvalue::StructLit(name, fields) => {
                 let fl: Vec<String> = fields

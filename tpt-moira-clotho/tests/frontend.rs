@@ -368,6 +368,10 @@ fn parse_closures() {
         "fn f() { let _ = (0..3).map(|e| e + 1); }",
         // Explicit return type.
         "fn f() { let g = |e| -> i32 { e }; }",
+        // Reference-pattern parameter, including used as the first of several call
+        // arguments (the `&` inner pattern must not swallow the closing `|`).
+        "fn f() { let _ = v.iter().any(|&u| eq(u, x), extra); }",
+        "fn f() { let g = |&mut u| u; }",
     ];
     for src in cases {
         let prog = parse_source(src).expect("closure should parse");

@@ -55,6 +55,13 @@ pub struct TypeChecker {
     /// `(self_type_name, method_name)`. These resolve `receiver.method(args)`
     /// calls against the user's own types (in addition to the `std` prelude).
     user_methods: HashMap<(String, String), FnSig>,
+    /// Methods declared inside `impl Trait for Type { .. }` blocks, keyed by
+    /// `(trait_name, method_name)`. Consulted by method resolution when the
+    /// receiver is a generic parameter bounded by that trait (`fn f<T: Show>(t:
+    /// T) { t.show(); }`) or when the Chalk-like solver proves the concrete
+    /// receiver type implements the trait (the "wire the solver into method
+    /// resolution" Phase-3 deliverable).
+    trait_methods: HashMap<(String, String), FnSig>,
     /// The `Self` type name of the item currently being checked (a method inside
     /// an `impl`, or an `impl`'s signature collection). Lets `type_to_ty` resolve
     /// the `Self` path to the concrete self type.
@@ -85,6 +92,7 @@ impl Default for TypeChecker {
             assoc_fns: HashMap::new(),
             methods: HashMap::new(),
             user_methods: HashMap::new(),
+            trait_methods: HashMap::new(),
             self_type: None,
             solver: None,
             values: HashMap::new(),
@@ -149,6 +157,31 @@ impl TypeChecker {
                                 FnSig {
                                     params,
                                     ret,
+                                    is_async: f.is_async,
+                                    generics: imp.generics.clone(),
+                                },
+                            );
+                            // Also index the method under its trait so that
+                            // trait-bound method resolution (`T: Show` →
+                            // `t.show()`) can find it via the solver.
+                            let params2 = f
+                                .params
+                                .iter()
+                                .map(|p| cx.type_to_ty(&p.ty))
+                                .collect();
+                            let ret2 = f
+                                .ret
+                                .as_ref()
+                                .map(|t| cx.type_to_ty(t))
+                                .unwrap_or(Ty::Unit);
+                            cx.trait_methods.insert(
+                                (
+                                    imp.trait_name.node.clone(),
+                                    f.name.node.clone(),
+                                ),
+                                FnSig {
+                                    params: params2,
+                                    ret: ret2,
                                     is_async: f.is_async,
                                     generics: imp.generics.clone(),
                                 },
@@ -1042,47 +1075,59 @@ impl TypeChecker {
                     );
                 }
             }
-            // Enforce declared bounds on the inferred type arguments.
+            // Enforce declared bounds on the inferred type arguments — both
+            // inline (`<T: Show>`) and `where`-clause (`where T: Show`)
+            // predicates.
+            let mut enforce = |cx: &mut Self, concrete: &Ty, bn: &str| {
+                if let Some(bt) = BuiltinTrait::from_name(bn) {
+                    if !TraitDb::implements(bt, concrete) {
+                        cx.err(
+                            span,
+                            format!(
+                                "the trait bound `{}: {}` is not satisfied",
+                                concrete,
+                                bt.name()
+                            ),
+                        );
+                    }
+                } else if !matches!(concrete, Ty::Generic(_)) {
+                    // User-defined trait bound: consult the solver's `impl`
+                    // clauses (e.g. `impl Show for i32`). Integer literals
+                    // infer as `Ty::Int` (the i32 default), so normalize to
+                    // `Ty::I32` for the query.
+                    let query_ty = if matches!(concrete, Ty::Int) {
+                        Ty::I32
+                    } else {
+                        concrete.clone()
+                    };
+                    let holds = cx.solver.as_ref().map_or(false, |s| {
+                        s.implements_trait(crate::solver::TraitId::User(bn.to_string()), &query_ty)
+                    });
+                    if !holds {
+                        cx.err(
+                            span,
+                            format!("the trait bound `{}: {}` is not satisfied", concrete, bn),
+                        );
+                    }
+                }
+            };
             for p in &sig.generics.params {
                 if let Some(concrete) = sub.get(&p.name.node) {
                     for bound in &p.bounds {
                         let bn = bound_trait_name_str(bound);
-                        if let Some(bt) = BuiltinTrait::from_name(&bn) {
-                            if !TraitDb::implements(bt, concrete) {
-                                self.err(
-                                    span,
-                                    format!(
-                                        "the trait bound `{}: {}` is not satisfied",
-                                        concrete,
-                                        bt.name()
-                                    ),
-                                );
-                            }
-                        } else if !matches!(concrete, Ty::Generic(_)) {
-                            // User-defined trait bound: consult the solver's
-                            // `impl` clauses (e.g. `impl Show for i32`). Integer
-                            // literals infer as `Ty::Int` (the i32 default), so
-                            // normalize to `Ty::I32` for the query.
-                            let query_ty = if matches!(concrete, Ty::Int) {
-                                Ty::I32
-                            } else {
-                                concrete.clone()
-                            };
-                            let holds = self.solver.as_ref().map_or(false, |s| {
-                                s.implements_trait(
-                                    crate::solver::TraitId::User(bn.clone()),
-                                    &query_ty,
-                                )
-                            });
-                            if !holds {
-                                self.err(
-                                    span,
-                                    format!(
-                                        "the trait bound `{}: {}` is not satisfied",
-                                        concrete, bn
-                                    ),
-                                );
-                            }
+                        enforce(self, concrete, &bn);
+                    }
+                }
+            }
+            // `where` predicates: `where T: Bound` (or any path type naming a
+            // parameter with an inferred concrete type).
+            for pred in &sig.generics.where_clause {
+                if let tpt_moira_clotho::ast::TypeKind::Path(p, _) = &pred.ty.kind {
+                    let pname = p.segments.last().map(|s| s.node.clone()).unwrap_or_default();
+                    if let Some(concrete) = sub.get(&pname) {
+                        for bound in &pred.bounds {
+                            let bn = bound_trait_name_str(bound);
+                            enforce(self, concrete, &bn);
                         }
                     }
                 }
@@ -1256,6 +1301,15 @@ impl TypeChecker {
         let sig = match sig {
             Some(s) => s,
             None => {
+                // 3) Trait-bound method resolution through the Chalk-like
+                //    solver: the receiver may be a generic parameter bounded
+                //    by a user trait (`T: Show`) or a concrete type an `impl`
+                //    covers (`impl Show for i32`).
+                if let Some(ty) =
+                    self.resolve_trait_method(span, &recv_ty, &method.node.clone(), args)
+                {
+                    return ty;
+                }
                 self.err(
                     span,
                     format!(
@@ -1284,6 +1338,122 @@ impl TypeChecker {
             self.expect(&at, pt, a.span);
         }
         sig.ret.clone()
+    }
+
+    /// Trait-bound method resolution backed by the Chalk-like solver.
+    ///
+    /// Called when `receiver.method(args)` matched no inherent method. Two
+    /// resolution paths:
+    ///
+    /// * **Generic receiver** (`Ty::Generic("T")`): the generic parameter's
+    ///   declared bounds (`<T: Show>` or `where T: Show`) name candidate
+    ///   traits; a signature from an `impl Trait for _ { fn method .. }` block
+    ///   is used to check the call. No impl search is needed — the bound is
+    ///   discharged where the generic is instantiated.
+    /// * **Concrete receiver**: every trait that declares this method is a
+    ///   candidate; the solver's impl search (`Solver::implements_trait`)
+    ///   decides which ones actually apply to the receiver's type. A single
+    ///   applicable trait resolves the call; several are resolved in sorted
+    ///   (deterministic) order of the first match; none falls back to the
+    ///   caller's "no method" diagnostic.
+    ///
+    /// Returns `Some(ret_ty)` and checks the arguments when resolution
+    /// succeeds, `None` otherwise.
+    fn resolve_trait_method(
+        &mut self,
+        span: Span,
+        recv_ty: &Ty,
+        method: &str,
+        args: &[Expr],
+    ) -> Option<Ty> {
+
+        if let Ty::Generic(pname) = recv_ty {
+            for tr in self.generic_bounds_of(pname) {
+                if let Some(sig) =
+                    self.trait_methods.get(&(tr.clone(), method.to_string())).cloned()
+                {
+                    return Some(self.check_user_method(span, recv_ty, &sig, args));
+                }
+            }
+            return None;
+        }
+        // Concrete receiver: collect candidate traits declaring this method,
+        // then let the solver pick the applicable ones. Integer literals
+        // infer as `Ty::Int` (the i32 default), so normalize to `Ty::I32`
+        // for the solver's impl search (mirroring the call-site bound check).
+        let query_ty = if matches!(recv_ty, Ty::Int) {
+            Ty::I32
+        } else {
+            recv_ty.clone()
+        };
+        let mut candidates: Vec<String> = self
+            .trait_methods
+            .keys()
+            .filter(|(_, m)| m == method)
+            .cloned()
+            .map(|(t, _)| t)
+            .collect();
+        candidates.sort();
+        candidates.dedup();
+        let mut matches: Vec<(String, FnSig)> = Vec::new();
+        for tr in candidates {
+            let implemented = self
+                .solver
+                .as_ref()
+                .map(|s| {
+                    s.implements_trait(crate::solver::TraitId::User(tr.clone()), &query_ty)
+                })
+                .unwrap_or(false);
+            if implemented {
+                if let Some(sig) =
+                    self.trait_methods.get(&(tr.clone(), method.to_string()))
+                {
+                    matches.push((tr, sig.clone()));
+                }
+            }
+        }
+        // Deterministic pick: sorted by trait name (the candidate list was
+        // already sorted, so `matches` is in that order). The normalized
+        // query type is used for the receiver check so an integer-literal
+        // receiver (`Ty::Int`) matches an `&self` of `i32`.
+        let (_, sig) = matches.into_iter().next()?;
+        Some(self.check_user_method(span, &query_ty, &sig, args))
+    }
+
+    /// The user-trait bounds declared on generic parameter `name`, either
+    /// inline (`<T: Show>`) or in a `where` clause (`where T: Show`), searched
+    /// innermost-scope-first across the active generic scopes.
+    fn generic_bounds_of(&self, name: &str) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        let mut push_bound = |out: &mut Vec<String>, b: &TypeBound| {
+            if let TypeBound::Trait(path) = b {
+                let seg = path
+                    .segments
+                    .last()
+                    .map(|s| s.node.clone())
+                    .unwrap_or_default();
+                if !out.contains(&seg) {
+                    out.push(seg);
+                }
+            }
+        };
+        for g in self.generic_scope.iter().rev() {
+            for p in &g.params {
+                if p.name.node == name {
+                    for b in &p.bounds {
+                        push_bound(&mut out, b);
+                    }
+                }
+            }
+            for w in &g.where_clause {
+                if w.ty.node_name() == name {
+                    for b in &w.bounds {
+                        push_bound(&mut out, b);
+                    }
+                }
+            }
+        }
+        out
     }
 
     /// Type-check a call to a user-defined method resolved from an `impl` block.
@@ -1332,11 +1502,38 @@ impl TypeChecker {
     }
 
     /// The base type name of a value type, following `&`/`&mut` to its referent
-    /// so methods/associated functions on the referent can be found.
+    /// so methods/associated functions on the referent can be found. Primitive
+    /// types map to their source-level names (`i32`, `str`, …) so prelude
+    /// methods and `impl Primitive` inherent methods resolve on them too.
     fn type_name(&self, ty: &Ty) -> Option<String> {
         match ty {
             Ty::Struct(n) | Ty::Apply(n, _) => Some(n.clone()),
             Ty::Ref(inner) | Ty::RefMut(inner) => self.type_name(inner),
+            // Primitives (Display prints the source-level name).
+            t if matches!(
+                t,
+                Ty::Int
+                    | Ty::I8
+                    | Ty::I16
+                    | Ty::I32
+                    | Ty::I64
+                    | Ty::I128
+                    | Ty::Isize
+                    | Ty::U8
+                    | Ty::U16
+                    | Ty::U32
+                    | Ty::U64
+                    | Ty::U128
+                    | Ty::Usize
+                    | Ty::F32
+                    | Ty::F64
+                    | Ty::Bool
+                    | Ty::Char
+                    | Ty::Str
+            ) =>
+            {
+                Some(format!("{}", t))
+            }
             _ => None,
         }
     }
@@ -1417,6 +1614,12 @@ impl TypeChecker {
             .insert(("String".into(), "push_str".into()), sig(vec![Str], Unit));
         self.methods
             .insert(("String".into(), "len".into()), sig(vec![], Usize));
+        // Methods on `str` (string-slice receivers, incl. literals auto-ref'd
+        // to `&str`).
+        self.methods
+            .insert(("str".into(), "len".into()), sig(vec![], Usize));
+        self.methods
+            .insert(("str".into(), "is_empty".into()), sig(vec![], Bool));
 
         // Wider primitive output helpers (mirror the C/native backend runtimes).
         self.fns.insert(
@@ -1577,9 +1780,12 @@ impl TypeChecker {
                     .map(|s| s.node.clone())
                     .unwrap_or_default();
                 // `Self` resolves to the enclosing impl's concrete self type.
+                // A primitive self type (`impl Show for i32`) resolves to the
+                // primitive `Ty` (not a struct named "i32") so receiver checks
+                // against e.g. `&self: &i32` compare equal types.
                 if name == "Self" {
                     return match &self.self_type {
-                        Some(s) => Ty::Struct(s.clone()),
+                        Some(s) => prim(s).unwrap_or_else(|| Ty::Struct(s.clone())),
                         None => Ty::Struct("Self".to_string()),
                     };
                 }
@@ -1659,6 +1865,11 @@ impl TypeChecker {
             return true;
         }
         if matches!(b, Ty::Int) && a.is_numeric() {
+            return true;
+        }
+        // A string literal (`Ty::Str`) auto-coerces to `&str`, mirroring
+        // Rust's `fn f(s: &str)` accepting `f("hi")`.
+        if matches!(a, Ty::Str) && matches!(b, Ty::Ref(y) if matches!(**y, Ty::Str)) {
             return true;
         }
         match (a, b) {
@@ -2008,9 +2219,109 @@ mod tests {
     }
 
     #[test]
+    fn trait_bound_method_call_resolves_via_solver() {
+        // `impl Show for i32 { fn show(&self) -> i32 }` plus a generic
+        // `T: Show` receiver: the method call resolves through the solver's
+        // bound table (the "wire the solver into method resolution" task).
+        let src = "struct Unit {}\n\
+                   impl Show for i32 { fn show(&self) -> i32 { 42 } }\n\
+                   fn call<T: Show>(t: T) -> i32 { t.show() }\n\
+                   fn main() { let _ = call(7); }";
+        assert!(check(src).is_ok(), "generic-bound method call should resolve");
+    }
+
+    #[test]
+    fn concrete_receiver_trait_method_resolves_via_impl_search() {
+        // A concrete receiver with no inherent method, but an `impl` of a
+        // trait declaring it — resolved via Solver::implements_trait.
+        let src = "struct Unit {}\n\
+                   impl Show for i32 { fn show(&self) -> i32 { 1 } }\n\
+                   fn main() { let x = 5; let _ = x.show(); }";
+        let prog = tpt_moira_clotho::parser::Parser::from_source(src)
+            .parse_program()
+            .expect("parse");
+        if let Err(errs) = TypeChecker::check_program(&prog) {
+            for e in &errs {
+                eprintln!("DIAG: {}", e);
+            }
+            panic!("expected success");
+        }
+    }
+
+    #[test]
+    fn trait_method_without_matching_impl_is_rejected_for_concrete_receiver() {
+        // The trait declares `show`, but no impl covers `f64` — the solver
+        // must not resolve the call.
+        let src = "struct Unit {}\n\
+                   impl Show for i32 { fn show(&self) -> i32 { 1 } }\n\
+                   fn main() { let x = 1.0; let _ = x.show(); }";
+        assert!(check(src).is_err(), "unimplemented-trait method call should fail");
+    }
+
+    #[test]
     fn generic_without_operator_bound_is_rejected() {
         // `a + b` requires `T: Add`, which is not declared.
         assert!(check("fn bad<T>(a: T, b: T) -> T { a + b }").is_err());
+    }
+
+    #[test]
+    fn string_literal_coerces_to_str_ref() {
+        // `fn f(s: &str)` accepts a string literal (Rust's `&str` coercion).
+        assert!(check(
+            "fn f(s: &str) -> usize { s.len() }\n\
+             fn main() { let n = f(\"hi\"); let _ = n; }"
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn str_len_method_resolves() {
+        // `s.len()` on a string-slice receiver resolves via the prelude.
+        assert!(check(
+            "fn f(s: &str) -> usize { s.len() }\n\
+             fn main() { let lit = \"abc\"; let _ = f(lit); }"
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn multi_param_generics_and_struct_swap() {
+        // Non-toy generics: two type parameters on a struct and a function,
+        // with field access through the substituted parameter types.
+        assert!(check(
+            "struct Pair<A, B> { a: A, b: B }\n\
+             fn swap<A, B>(p: Pair<A, B>) -> Pair<B, A> { Pair { a: p.b, b: p.a } }\n\
+             fn main() {\n\
+                 let p = Pair { a: 1, b: 2 };\n\
+                 let q = swap(p);\n\
+                 let _ = q.a;\n\
+                 let _ = q.b;\n\
+             }"
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn where_clause_bound_method_resolves() {
+        // A bound declared in a `where` clause drives trait-method resolution
+        // exactly like an inline `<T: Show>` bound.
+        assert!(check(
+            "impl Show for i32 { fn show(&self) -> i32 { *self } }\n\
+             fn call<T>(t: T) -> i32 where T: Show { t.show() }\n\
+             fn main() { let r = call(7i32); print_i32(r); }"
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn where_clause_bound_violation_is_rejected() {
+        // `f64` has no `Show` impl, so the call site violates the bound.
+        assert!(check(
+            "impl Show for i32 { fn show(&self) -> i32 { *self } }\n\
+             fn call<T>(t: T) -> i32 where T: Show { t.show() }\n\
+             fn main() { let r = call(1.0); print_i32(r); }"
+        )
+        .is_err());
     }
 
     #[test]
