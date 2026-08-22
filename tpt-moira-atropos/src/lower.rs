@@ -238,6 +238,13 @@ struct Lower {
     /// `{ long long tag; long long f0; }`; construction lowers to a struct
     /// literal and variant patterns lower to a tag test + field projections.
     variants: HashMap<String, (String, i128, usize)>,
+    /// Captured variables per lambda-lifted closure (lifted fn name ->
+    /// captured local names, in the order they appear as leading parameters).
+    closure_captures: HashMap<String, Vec<String>>,
+    /// Local variables bound to capturing closures: local name -> lifted fn
+    /// name. Used to rewrite direct calls `f(args)` into
+    /// `__moira_closure_N(captures…, args)`.
+    closure_bindings: HashMap<String, String>,
     /// When set, the enclosing `async fn` state-machine bookkeeping: the future
     /// struct name, the `self` parameter local name, the output C type, and the
     /// list of `(slot_name, c_type)` that must be round-tripped across a
@@ -494,6 +501,8 @@ impl Lower {
             array_lens: HashMap::new(),
             const_values: HashMap::new(),
             variants: HashMap::new(),
+            closure_captures: HashMap::new(),
+            closure_bindings: HashMap::new(),
             async_fns: std::collections::HashSet::new(),
             async_ctx: None,
             expecting_future: false,
@@ -792,31 +801,29 @@ impl Lower {
         }
     }
 
-    /// Lambda-lift a non-capturing closure `|params| body` into a fresh top-level
+    /// Lambda-lift a closure `|params| body` into a fresh top-level
     /// `mir::Function` and return a `Func` operand referencing it (the closure
     /// value). The lifted function always returns `long long` (a `()` result is
     /// returned as `0`, which callers discard) so its C signature lines up with the
     /// uniform `long long (*)(long long, …)` function-pointer type used for closure
     /// values.
     ///
-    /// Capturing closures are rejected with the same precise message the type
-    /// checker uses, because the codegen subset does not yet model an environment
-    /// struct for captured variables.
+    /// **Captures**: variables the body references from the enclosing scope are
+    /// lowered as *leading parameters* on the lifted function. Call sites that
+    /// invoke the closure through a local it was bound to are rewritten by
+    /// [`Lower::closure_bindings`] to pass the captured operands; a closure
+    /// passed to an unrelated function still lowers to its bare pointer
+    /// (invoking such a pointer with captures is not representable in the
+    /// subset and remains a documented limitation).
     fn lower_closure(&mut self, params: &[ast::Param], body: &Expr) -> Result<mir::Operand> {
         let mut param_names = std::collections::HashSet::new();
         for p in params {
             param_names.insert(pat_name(&p.pat)?);
         }
         // Structural capture analysis: any single-segment path name the body
-        // references that is neither a closure parameter nor a top-level function is
-        // a captured variable.
+        // references that is neither a closure parameter nor a top-level function
+        // is a captured variable.
         let captures = closure_captures(body, &param_names, &self.all_fn_names);
-        if !captures.is_empty() {
-            return Err(LowerError(format!(
-                "closures that capture variables are not yet supported in the codegen subset (captured: {})",
-                captures.join(", ")
-            )));
-        }
 
         let name = format!("__moira_closure_{}", self.closure_counter);
         self.closure_counter += 1;
@@ -829,6 +836,11 @@ impl Lower {
         sub.closure_counter = self.closure_counter;
         sub.func.name = name.clone();
         sub.func.ret = Some("long long".to_string());
+        // Captured variables become leading `long long` parameters.
+        for cap in &captures {
+            sub.func.params.push(cap.clone());
+            sub.func.locals.push((cap.clone(), Some("long long".to_string())));
+        }
         for p in params {
             let n = pat_name(&p.pat)?;
             // Structural lowering: closure parameters are `long long` so the lifted
@@ -856,6 +868,8 @@ impl Lower {
         sub.func.temp_types = sub.types.clone();
         self.closure_counter = sub.closure_counter;
         self.closures.push(sub.func.clone());
+        // Record the captures so call sites through a bound local can pass them.
+        self.closure_captures.insert(name.clone(), captures);
         Ok(mir::Operand::Func(name))
     }
 
@@ -942,12 +956,27 @@ impl Lower {
                 }
                 if let Some(init) = &local.init {
                     let v = self.lower_expr(init)?;
+                    // `let f = |..| ..;` binds a closure value: remember the
+                    // local -> lifted-fn mapping so later direct calls
+                    // `f(args)` pass the captured variables.
+                    if let ExprKind::Closure { .. } = &init.kind {
+                        if let mir::Operand::Func(lifted) = &v {
+                            if self.closure_captures.contains_key(lifted) {
+                                self.closure_bindings.insert(name.clone(), lifted.clone());
+                            }
+                        }
+                    }
                     self.emit(name.clone(), mir::Rvalue::Use(v));
                 }
                 Ok(())
             }
             StmtKind::Semi(e) | StmtKind::Expr(e) => {
                 self.lower_expr(e)?;
+                Ok(())
+            }
+            StmtKind::Item(item) if matches!(item.kind, ast::ItemKind::Use(_)) => {
+                // A function-local `use …` declaration introduces no runtime
+                // code (Phase 1 ignores imports).
                 Ok(())
             }
             StmtKind::Item(_) => Err(LowerError(
@@ -1294,12 +1323,25 @@ impl Lower {
                     // else is a direct call to a top-level function.
                     let op = if self.all_fn_names.contains(&name) {
                         mir::Operand::Func(callee_name)
+                    } else if let Some(lifted) = self.closure_bindings.get(&name).cloned() {
+                        // A local bound to a *capturing* closure: rewrite to the
+                        // direct lifted-fn call so captures can be passed.
+                        mir::Operand::Func(lifted)
                     } else {
                         mir::Operand::Var(name)
                     };
                     (op, result_ty)
                 };
                 let mut operands = Vec::new();
+                // Capturing closures invoked through a bound local get their
+                // captured variables as leading arguments.
+                if let mir::Operand::Func(fname) = &callee_operand {
+                    if let Some(caps) = self.closure_captures.get(fname).cloned() {
+                        for cap in caps {
+                            operands.push(mir::Operand::Var(cap));
+                        }
+                    }
+                }
                 for a in args {
                     operands.push(self.lower_expr(a)?);
                 }
@@ -1831,34 +1873,34 @@ impl Lower {
             self.current = merge;
             return Ok(mir::Operand::var(result));
         }
-        if !matches!(local.pat, ast::Pat::Ident(_)) {
-            return Err(LowerError(
-                "`if let`/`while let` with non-identifier patterns is not yet supported (enum destructuring needs `match`)"
-                    .into(),
-            ));
-        }
-        let name = pat_name(&local.pat)?;
         let init_op = match &local.init {
             Some(e) => self.lower_expr(e)?,
             None => mir::Operand::Unit,
         };
-        self.func
-            .locals
-            .push((name.clone(), Some("long long".into())));
-        self.emit(name.clone(), mir::Rvalue::Use(init_op));
+        // Variant/literal patterns (`if let Err(e) = r`) are supported via the
+        // same discriminant test the `match` lowering uses; identifier patterns
+        // are irrefutable and always taken.
+        let (cond, binds) = self.pattern_guard(&init_op, &local.pat)?;
+        let new_binds: Vec<(String, Option<String>)> = binds
+            .iter()
+            .filter(|(n, _)| !self.func.locals.iter().any(|(en, _)| en == n))
+            .map(|(n, _)| (n.clone(), Some("long long".into())))
+            .collect();
+        self.func.locals.extend(new_binds);
 
-        // Irrefutable: always taken. Lower as `if (1) { then } else { else }`.
+        // Lower as a conditional on the pattern guard (always taken when the
+        // pattern is irrefutable).
         let result = self.fresh_temp("long long");
         let then_blk = self.new_block();
         let else_blk = self.new_block();
         let merge = self.new_block();
-        self.set_term(mir::Terminator::If(
-            mir::Operand::Const(1),
-            then_blk,
-            else_blk,
-        ));
+        let cond = cond.unwrap_or(mir::Operand::Const(1));
+        self.set_term(mir::Terminator::If(cond, then_blk, else_blk));
 
         self.current = then_blk;
+        for (n, val) in &binds {
+            self.emit(n.clone(), mir::Rvalue::Use(val.clone()));
+        }
         let v_then = self.lower_block_value(then_b)?;
         self.emit(result.clone(), mir::Rvalue::Use(v_then));
         self.set_term(mir::Terminator::Goto(merge));
@@ -1880,35 +1922,30 @@ impl Lower {
     /// change across iterations for an identifier pattern) and the loop runs
     /// until a `break` inside the body.
     fn lower_while_let(&mut self, local: &ast::Local, body: &ast::Block) -> Result<mir::Operand> {
-        if !matches!(local.pat, ast::Pat::Ident(_)) {
-            return Err(LowerError(
-                "`if let`/`while let` with non-identifier patterns is not yet supported (enum destructuring needs `match`)"
-                    .into(),
-            ));
-        }
-        let name = pat_name(&local.pat)?;
         let init_op = match &local.init {
             Some(e) => self.lower_expr(e)?,
             None => mir::Operand::Unit,
         };
-        self.func
-            .locals
-            .push((name.clone(), Some("long long".into())));
-        self.emit(name.clone(), mir::Rvalue::Use(init_op));
-
+        // The pattern guard (possibly a variant discriminant test) is
+        // re-evaluated at the loop head each iteration; the initializer itself
+        // runs once.
         let head = self.new_block();
         let body_blk = self.new_block();
         let exit = self.new_block();
         self.set_term(mir::Terminator::Goto(head));
 
         self.current = head;
-        self.set_term(mir::Terminator::If(
-            mir::Operand::Const(1),
-            body_blk,
-            exit,
-        ));
+        let (cond, binds) = self.pattern_guard(&init_op, &local.pat)?;
+        let cond = cond.unwrap_or(mir::Operand::Const(1));
+        self.set_term(mir::Terminator::If(cond, body_blk, exit));
 
         self.current = body_blk;
+        for (n, val) in binds {
+            if !self.func.locals.iter().any(|(en, _)| en == &n) {
+                self.func.locals.push((n.clone(), Some("long long".into())));
+            }
+            self.emit(n, mir::Rvalue::Use(val));
+        }
         self.loops.push((exit, head));
         self.lower_block_value(body)?;
         self.loops.pop();
@@ -2753,3 +2790,4 @@ fn lookup_field_type(structs: &[mir::StructDef], base_ty: &str, field: &str) -> 
         .and_then(|s| s.fields.iter().find(|(f, _)| f == field))
         .map(|(_, t)| t.clone())
 }
+

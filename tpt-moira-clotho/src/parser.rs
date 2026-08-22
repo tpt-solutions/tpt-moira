@@ -71,7 +71,14 @@ impl Parser {
     }
 
     fn bump(&mut self) -> Token {
-        let t = self.tokens.get(self.pos).cloned().unwrap();
+        // At end-of-input, re-return the final (Eof) token instead of
+        // panicking — postfix parsing (`expr.0` at EOF) can reach here after
+        // the cursor already moved past the last token.
+        let t = self
+            .tokens
+            .get(self.pos)
+            .cloned()
+            .unwrap_or_else(|| self.tokens.last().unwrap().clone());
         if self.pos < self.tokens.len() {
             self.pos += 1;
         }
@@ -1777,11 +1784,21 @@ impl Parser {
                                 break;
                             }
                             k if *k == close => {
-                                self.bump();
+                                // A nested closing delimiter is macro *content*
+                                // (e.g. the `)` of `v.len()` inside
+                                // `println!("{}", v.len())`) — keep it in the
+                                // token stream so argument re-parsing sees the
+                                // method call's argument list.
+                                let t = self.bump();
+                                tokens.push(t);
                                 depth -= 1;
                             }
                             k if *k == open => {
-                                self.bump();
+                                // Likewise a nested opening delimiter is
+                                // content; only the macro's own pair (depth 1)
+                                // is treated as structure.
+                                let t = self.bump();
+                                tokens.push(t);
                                 depth += 1;
                             }
                             _ => {

@@ -288,6 +288,28 @@ fn println_macro_expands_to_print_calls() {
 }
 
 #[test]
+fn capturing_closure_direct_call_runs() {
+    // A capturing closure bound to a local and invoked directly: captures are
+    // lowered as leading parameters on the lifted function and the call sites
+    // pass them.
+    let out = match run_src(
+        "fn main() {\n\
+             let base = 100;\n\
+             let add = |x: i32| x + base;\n\
+             print_i32(add(5));\n\
+             print_i32(add(20));\n\
+         }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping capturing-closure run");
+            return;
+        }
+    };
+    assert_eq!(out, "105\n120", "expected 100+5 and 100+20");
+}
+
+#[test]
 fn for_over_array_literal_runs() {
     let out = match run_src(
         "fn main() {

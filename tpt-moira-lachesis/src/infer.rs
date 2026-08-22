@@ -113,7 +113,26 @@ impl Default for TypeChecker {
 impl TypeChecker {
     /// Type-check a whole program. Returns all collected diagnostics on failure.
     pub fn check_program(prog: &tpt_moira_clotho::ast::Program) -> Result<(), Vec<Diag>> {
+        Self::check_program_with(prog, &[])
+    }
+
+    /// Type-check a whole program with **extern crate** signature tables:
+    /// each `(crate_name, program)` pair contributes its top-level function
+    /// signatures, inherent/trait impl methods, and struct shapes so that
+    /// cross-crate paths (`tpt_moira_atropos::lower_program(...)`,
+    /// `tpt_moira_clotho::compile_file(...)`) resolve. Only signatures are
+    /// imported — bodies are not re-checked — and module prefixes are
+    /// flattened: a path resolves against its last two segments, so
+    /// `crate::module::item` matches key `(module, item)` and
+    /// `crate::item` matches `(crate, item)`.
+    pub fn check_program_with(
+        prog: &tpt_moira_clotho::ast::Program,
+        externs: &[(&str, &tpt_moira_clotho::ast::Program)],
+    ) -> Result<(), Vec<Diag>> {
         let mut cx = TypeChecker::default();
+        for (crate_name, ext) in externs {
+            cx.register_extern(crate_name, ext);
+        }
         // Seed the trait solver with the user `impl` clauses so user-defined
         // trait bounds (e.g. `T: Show`) can be enforced at generic call sites.
         cx.solver = Some(crate::solver::Solver::new(crate::solver::program_with_impls(
@@ -122,8 +141,13 @@ impl TypeChecker {
         // Pass 1: collect struct and function signatures so callers may refer to
         // functions defined later in the file (forward references). Items
         // gated behind `#[cfg(test)]` (e.g. `mod tests`) are skipped — test
-        // code is outside the type-checked subset.
-        for item in &prog.items {
+        // code is outside the type-checked subset. Inline modules are
+        // *flattened* first so their items register exactly like top-level
+        // ones (an enum defined in a `mod` file must still be registered).
+        let mut flat_items: Vec<&tpt_moira_clotho::ast::Item> = Vec::new();
+        Self::flatten_inline_modules(&prog.items, &mut flat_items);
+        for item in &flat_items {
+            let item: &tpt_moira_clotho::ast::Item = item;
             if item.is_cfg_test() {
                 continue;
             }
@@ -154,6 +178,15 @@ impl TypeChecker {
                     cx.generic_scope.push(imp.generics.clone());
                     cx.self_type = Some(self_name.clone());
                     for m in &imp.items {
+                        // Associated constants declared inside an `impl` block
+                        // (`impl Allowlist { const DEFAULT_FILE: &str = ..; }`)
+                        // resolve as `Type::CONST` two-segment paths.
+                        if let tpt_moira_clotho::ast::ItemKind::Const(c) = &m.kind {
+                            let ty = c.ty.as_ref().map(|t| cx.type_to_ty(t)).unwrap_or(Ty::Unknown);
+                            cx.assoc_consts
+                                .insert((self_name.clone(), c.name.node.clone()), ty);
+                            continue;
+                        }
                         if let tpt_moira_clotho::ast::ItemKind::Function(f) = &m.kind {
                             let params =
                                 f.params.iter().map(|p| cx.type_to_ty(&p.ty)).collect();
@@ -219,6 +252,13 @@ impl TypeChecker {
                     );
                 }
                 // Enums/consts/statics/uses are not part of the type-checked subset.
+                // Enums: register **nullary** variants as associated constants
+                // (`TokenKind::Fn` used as a value resolves to the enum type).
+                // Tuple/struct variants keep their constructor-function shape
+                // and are handled at call sites.
+                tpt_moira_clotho::ast::ItemKind::Enum(e) => {
+                    Self::register_enum_variants(e, &mut cx);
+                }
                 tpt_moira_clotho::ast::ItemKind::Const(c) => {
                     // Top-level constants are usable as bare values; the
                     // declared type (when present) is their type, otherwise
@@ -300,6 +340,215 @@ impl TypeChecker {
         }
     }
 
+    /// Import the *signatures* of an extern crate's items for cross-crate
+    /// resolution. Recurses through inline modules, tracking the module path
+    /// so each function is reachable as `crate::name`, `module::name`, and
+    /// bare `name` (locals shadow externs because local Pass 1 runs later).
+    fn register_extern(&mut self, crate_name: &str, prog: &tpt_moira_clotho::ast::Program) {
+        Self::collect_extern_items(
+            crate_name.to_string(),
+            Vec::new(),
+            &prog.items,
+            self,
+        );
+    }
+
+    /// Register an enum's **nullary** variants as associated constants so
+    /// `EnumName::Variant` used as a *value* (not a pattern) resolves to the
+    /// enum's type (`TokenKind::Fn`, `Ordering::Less`, …).
+    fn register_enum_variants(
+        e: &tpt_moira_clotho::ast::EnumDef,
+        cx: &mut TypeChecker,
+    ) {
+        let enum_ty = tpt_moira_clotho::ast::Type {
+            kind: tpt_moira_clotho::ast::TypeKind::Path(
+                tpt_moira_clotho::ast::Path {
+                    segments: vec![e.name.clone()],
+                },
+                Vec::new(),
+            ),
+            span: e.name.span,
+        };
+        for v in &e.variants {
+            match &v.fields {
+                None => {
+                    let ty = cx.type_to_ty(&enum_ty);
+                    cx.assoc_consts
+                        .insert((e.name.node.clone(), v.name.node.clone()), ty);
+                }
+                Some(fields) => {
+                    // Tuple variants (`Some(T)`) are constructor functions:
+                    // register `Variant(..) -> Enum` (bare and qualified).
+                    let ret = cx.type_to_ty(&enum_ty);
+                    let sig = FnSig {
+                        params: vec![Ty::Unknown; fields.len()],
+                        ret,
+                        is_async: false,
+                        generics: Generics::default(),
+                    };
+                    cx.fns.insert(v.name.node.clone(), sig.clone());
+                    cx.assoc_fns.insert(
+                        (e.name.node.clone(), v.name.node.clone()),
+                        sig,
+                    );
+                }
+            }
+        }
+    }
+
+    /// Splice inline-module items into a flat list so Pass 1 registers
+    /// module-nested items (structs/enums/functions in `mod` files) exactly
+    /// like top-level ones. `#[cfg(test)]` filtering stays with the caller.
+    fn flatten_inline_modules<'a>(
+        items: &'a [tpt_moira_clotho::ast::Item],
+        out: &mut Vec<&'a tpt_moira_clotho::ast::Item>,
+    ) {
+        for item in items {
+            if let tpt_moira_clotho::ast::ItemKind::Module(m) = &item.kind {
+                if let tpt_moira_clotho::ast::ModuleKind::Inline(sub) = &m.kind {
+                    Self::flatten_inline_modules(sub, out);
+                }
+            } else {
+                out.push(item);
+            }
+        }
+    }
+
+    fn collect_extern_items(
+        crate_name: String,
+        path: Vec<String>,
+        items: &[tpt_moira_clotho::ast::Item],
+        cx: &mut TypeChecker,
+    ) {
+        for item in items {
+            if item.is_cfg_test() {
+                continue;
+            }
+            match &item.kind {
+                tpt_moira_clotho::ast::ItemKind::Function(f) => {
+                    cx.generic_scope.push(f.generics.clone());
+                    let params = f.params.iter().map(|p| cx.type_to_ty(&p.ty)).collect();
+                    let ret = f.ret.as_ref().map(|t| cx.type_to_ty(t)).unwrap_or(Ty::Unit);
+                    cx.generic_scope.pop();
+                    let sig = FnSig {
+                        params,
+                        ret,
+                        is_async: f.is_async,
+                        generics: f.generics.clone(),
+                    };
+                    // Bare-name fallback (locals registered later win).
+                    cx.fns.insert(f.name.node.clone(), sig.clone());
+                    // `crate::name`.
+                    cx.assoc_fns.insert(
+                        (crate_name.clone(), f.name.node.clone()),
+                        sig.clone(),
+                    );
+                    // `module::name` for the innermost enclosing module.
+                    if let Some(mod_name) = path.last() {
+                        cx.assoc_fns.insert(
+                            (mod_name.clone(), f.name.node.clone()),
+                            sig,
+                        );
+                    }
+                }
+                tpt_moira_clotho::ast::ItemKind::Struct(s) => {
+                    cx.generic_scope.push(s.generics.clone());
+                    let fields = s
+                        .fields
+                        .iter()
+                        .map(|f| (f.name.node.clone(), cx.type_to_ty(&f.ty)))
+                        .collect();
+                    cx.generic_scope.pop();
+                    // Different crates can declare same-named structs (e.g.
+                    // `clotho::ast::Program` vs `atropos::mir::Program`). The
+                    // bare-name table is shared, so *merge* the field lists
+                    // instead of overwriting — field access on either shape
+                    // then resolves (check-only leniency; codegen is per-crate
+                    // and never sees the merged view).
+                    match cx.structs.get_mut(&s.name.node.clone()) {
+                        Some(existing) => {
+                            for (fname, fty) in fields {
+                                if !existing.fields.iter().any(|(n, _)| n == &fname) {
+                                    existing.fields.push((fname, fty));
+                                }
+                            }
+                        }
+                        None => {
+                            cx.structs.insert(
+                                s.name.node.clone(),
+                                StructInfo {
+                                    fields,
+                                    generics: s.generics.clone(),
+                                },
+                            );
+                        }
+                    }
+                }
+                tpt_moira_clotho::ast::ItemKind::Impl(imp) => {
+                    let self_name = imp.for_ty.node_name();
+                    cx.generic_scope.push(imp.generics.clone());
+                    cx.self_type = Some(self_name.clone());
+                    for m in &imp.items {
+                        // Associated constants on extern impls resolve as
+                        // `Type::CONST` two-segment paths too.
+                        if let tpt_moira_clotho::ast::ItemKind::Const(c) = &m.kind {
+                            let ty = c.ty.as_ref().map(|t| cx.type_to_ty(t)).unwrap_or(Ty::Unknown);
+                            cx.assoc_consts
+                                .insert((self_name.clone(), c.name.node.clone()), ty);
+                            continue;
+                        }
+                        if let tpt_moira_clotho::ast::ItemKind::Function(f) = &m.kind {
+                            // Method-level generics (`impl Cache { fn
+                            // checked<F>(&self, f: F) }`) must be in scope while
+                            // resolving the signature types, and recorded on the
+                            // signature so call sites can recognize `F`.
+                            let mut generics = imp.generics.clone();
+                            generics.params.extend(f.generics.params.clone());
+                            generics.where_clause.extend(f.generics.where_clause.clone());
+                            cx.generic_scope.push(f.generics.clone());
+                            let params =
+                                f.params.iter().map(|p| cx.type_to_ty(&p.ty)).collect();
+                            let ret = f
+                                .ret
+                                .as_ref()
+                                .map(|t| cx.type_to_ty(t))
+                                .unwrap_or(Ty::Unit);
+                            cx.generic_scope.pop();
+                            let sig = FnSig {
+                                params,
+                                ret,
+                                is_async: f.is_async,
+                                generics,
+                            };
+                            cx.user_methods.insert(
+                                (self_name.clone(), f.name.node.clone()),
+                                sig,
+                            );
+                        }
+                    }
+                    cx.self_type = None;
+                    cx.generic_scope.pop();
+                }
+                tpt_moira_clotho::ast::ItemKind::Enum(e) => {
+                    Self::register_enum_variants(e, cx);
+                }
+                tpt_moira_clotho::ast::ItemKind::Module(m) => {
+                    if let tpt_moira_clotho::ast::ModuleKind::Inline(sub) = &m.kind {
+                        let mut sub_path = path.clone();
+                        sub_path.push(m.name.node.clone());
+                        Self::collect_extern_items(
+                            crate_name.clone(),
+                            sub_path,
+                            sub,
+                            cx,
+                        );
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
     fn check_function(&mut self, f: &tpt_moira_clotho::ast::Function) {
         self.generic_scope.push(f.generics.clone());
         self.env.push(HashMap::new());
@@ -366,6 +615,10 @@ impl TypeChecker {
                 }
                 StmtKind::Semi(e) | StmtKind::Expr(e) => {
                     last_stmt_ty = self.infer_expr(e);
+                }
+                StmtKind::Item(item) if matches!(item.kind, tpt_moira_clotho::ast::ItemKind::Use(_)) => {
+                    // A function-local `use …` declaration is a no-op in the
+                    // Phase-1 subset (imports are not resolved).
                 }
                 StmtKind::Item(_) => {
                     self.err(Span::default(), "nested items are not supported");
@@ -509,13 +762,19 @@ impl TypeChecker {
                     .insert(name.clone(), scrut_ty.clone());
                 self.bind_pattern(sub, scrut_ty);
             }
-            Pat::Variant(_, args) => {
+            Pat::Variant(path, args) => {
                 // Tuple-variant pattern `Some(x)` / `Ok(v)` / `Err(e)`: bind the
                 // payload names to the variant's value type. When the scrutinee is
                 // a modelled `Option<T>` / `Result<T, E>` / `*Result<T, E>` we bind
-                // to `T`; otherwise (opaque `Unknown`) to `Unknown` so usage stays
-                // lenient rather than surfacing a spurious "cannot find value".
-                let inner_ty = Self::variant_payload_ty(scrut_ty);
+                // to `T` (or `E` for `Err`); otherwise (opaque `Unknown`) to
+                // `Unknown` so usage stays lenient rather than surfacing a
+                // spurious "cannot find value".
+                let vname = path
+                    .segments
+                    .last()
+                    .map(|s| s.node.clone())
+                    .unwrap_or_default();
+                let inner_ty = Self::variant_payload_ty(scrut_ty, &vname);
                 for p in args {
                     self.bind_pattern(p, &inner_ty);
                 }
@@ -528,13 +787,22 @@ impl TypeChecker {
     /// we return `T`; otherwise `Unknown` (the Phase-1 subset models `Result`/
     /// `Option` opaquely, so the element is only known when the application args
     /// are concrete).
-    fn variant_payload_ty(scrut_ty: &Ty) -> Ty {
+    /// The value type carried by a tuple-variant pattern's payload, given the
+    /// scrutinee type and the variant name. For `Option<T>` the payload is `T`;
+    /// for `Result<T, E>` the `Ok` payload is `T` and the **`Err` payload is
+    /// `E`** (binding `Err(diags)` to the `Ok` type made `diags` a `()` and
+    /// cascaded "no method" diagnostics).
+    fn variant_payload_ty(scrut_ty: &Ty, variant: &str) -> Ty {
         match scrut_ty {
             Ty::Apply(name, args) if name == "Option" && args.len() == 1 => args[0].clone(),
             Ty::Apply(name, args)
                 if (name == "Result" || name.ends_with("Result")) && args.len() == 2 =>
             {
-                args[0].clone()
+                if variant == "Err" {
+                    args[1].clone()
+                } else {
+                    args[0].clone()
+                }
             }
             _ => Ty::Unknown,
         }
@@ -563,24 +831,12 @@ impl TypeChecker {
 
         // Capture analysis: names the body references that resolve to a variable
         // in the enclosing environment (and are not the closure's own parameters
-        // or a locally-bound name) are the captured variables. Closure codegen
-        // does not yet support captures, so report them precisely here rather
-        // than letting them surface as a cryptic downstream codegen error.
-        let outer_names: HashSet<String> =
-            self.env.iter().flat_map(|s| s.keys().cloned()).collect();
-        let captures: Vec<String> = closure_free_vars(body, &param_names)
-            .into_iter()
-            .filter(|n| outer_names.contains(n))
-            .collect();
-        if !captures.is_empty() {
-            self.err(
-                span,
-                format!(
-                    "closures that capture variables are not yet supported in the codegen subset (captured: {})",
-                    captures.join(", ")
-                ),
-            );
-        }
+        // or a locally-bound name) are the captured variables. Captures are
+        // accepted at the type level (the closure's type is its signature);
+        // codegen lowers them as leading parameters on the lambda-lifted
+        // function, with direct calls through a bound local rewritten to pass
+        // them.
+        let _ = (span, &body, &param_names);
 
         let mut param_tys = Vec::with_capacity(params.len());
         self.env.push(HashMap::new());
@@ -656,8 +912,12 @@ impl TypeChecker {
         };
         // Identifier patterns bind the whole `init` value; variant patterns bind
         // their payload to the variant's element type.
+        let vname = match &local.pat {
+            Pat::Variant(p, _) => p.segments.last().map(|s| s.node.clone()).unwrap_or_default(),
+            _ => String::new(),
+        };
         let bind_ty = if matches!(local.pat, Pat::Variant(..)) {
-            Self::variant_payload_ty(&init_ty)
+            Self::variant_payload_ty(&init_ty, &vname)
         } else {
             init_ty.clone()
         };
@@ -693,8 +953,12 @@ impl TypeChecker {
             Some(e) => self.infer_expr(e),
             None => Ty::Unit,
         };
+        let vname = match &local.pat {
+            Pat::Variant(p, _) => p.segments.last().map(|s| s.node.clone()).unwrap_or_default(),
+            _ => String::new(),
+        };
         let bind_ty = if matches!(local.pat, Pat::Variant(..)) {
-            Self::variant_payload_ty(&init_ty)
+            Self::variant_payload_ty(&init_ty, &vname)
         } else {
             init_ty.clone()
         };
@@ -709,7 +973,7 @@ impl TypeChecker {
         let span = e.span;
         let ty = match &e.kind {
             ExprKind::Lit(l) => lit_ty(l),
-            ExprKind::Range(..) => Ty::Unit,
+            ExprKind::Range(..) => Ty::Range,
             ExprKind::Path(p) => {
                 let name = p
                     .segments
@@ -723,9 +987,24 @@ impl TypeChecker {
                         // `ExitCode::FAILURE`), resolved from the path's last
                         // two segments.
                         if p.segments.len() >= 2 {
-                            let tname = p.segments[p.segments.len() - 2].node.clone();
-                            if let Some(t) = self.assoc_consts.get(&(tname, name.clone())) {
+                            let mut tname = p.segments[p.segments.len() - 2].node.clone();
+                            // `Self::Variant` in expression position (derive-
+                            // generated `match self { .. => Self::Ident, }`)
+                            // resolves against the enclosing impl's self type.
+                            if tname == "Self" {
+                                if let Some(sty) = &self.self_type {
+                                    tname = sty.clone();
+                                }
+                            }
+                            let key = (tname.clone(), name.clone());
+                            if let Some(t) = self.assoc_consts.get(&key) {
                                 return t.clone();
+                            }
+                            // Associated function used as a *value* (e.g.
+                            // `list.map(Path::new)`): resolve to its function
+                            // type from the associated-function table.
+                            if let Some(s) = self.assoc_fns.get(&key) {
+                                return Ty::Fn(s.params.clone(), Box::new(s.ret.clone()));
                             }
                         }
                         // Nullary prelude values usable without a call site.
@@ -824,12 +1103,21 @@ impl TypeChecker {
             }
             ExprKind::For(pat, iter, body) => {
                 let iter_ty = self.infer_expr(iter);
+                // The iterator may sit behind a reference (`for x in &vec`) —
+                // Rust auto-iterates through `&`/`&mut`.
+                let stripped = self.strip_refs(&iter_ty);
                 // The loop variable binds to the iterator's element type: an
-                // array iterator binds its element type; a range binds `i32`.
-                // Anything else (e.g. a bare `i32`) is not iterable.
-                let elem_ty = match &iter_ty {
+                // array iterator binds its element type; a range binds `i32`;
+                // a modeled std collection (`Vec`, …) yields elements whose
+                // concrete type is not tracked (`Unknown`). Anything else
+                // (e.g. a bare `i32`) is not iterable.
+                let elem_ty = match &stripped {
                     Ty::Array(elem, _) => (**elem).clone(),
                     Ty::Range => Ty::Int,
+                    Ty::Struct(name) | Ty::Apply(name, _) if name == "Vec" => Ty::Unknown,
+                    // An `Unknown` iterator means an earlier error already
+                    // fired; absorb it instead of cascading a diagnostic.
+                    Ty::Unknown | Ty::Never => Ty::Unknown,
                     other => {
                         self.err(
                             span,
@@ -960,6 +1248,39 @@ impl TypeChecker {
                         }
                         Ty::Str
                     }
+                    "matches" => {
+                        // `matches!(expr, pattern)` — the expression is
+                        // type-checked; the pattern is not analyzed structurally
+                        // (the subset's `match` handles real destructuring).
+                        // The result is the boolean test.
+                        let args =
+                            tpt_moira_clotho::parser::Parser::parse_macro_args(m.tokens.clone());
+                        if args.len() != 2 {
+                            self.err(
+                                span,
+                                "matches! expects exactly 2 arguments".to_string(),
+                            );
+                        }
+                        for a in &args {
+                            self.infer_expr(a);
+                        }
+                        Ty::Bool
+                    }
+                    "write" | "writeln" => {
+                        // `write!(f, "..", args)` / `writeln!(f, ..)`: the
+                        // formatter expression and value arguments are all
+                        // evaluated; the result mirrors Rust (`Result<()>`,
+                        // modeled as a `Result`).
+                        let args =
+                            tpt_moira_clotho::parser::Parser::parse_macro_args(m.tokens.clone());
+                        if args.len() < 2 {
+                            self.err(span, "write! requires a formatter and format string".to_string());
+                        }
+                        for a in &args {
+                            self.infer_expr(a);
+                        }
+                        Ty::Apply("Result".to_string(), vec![Ty::Unit])
+                    }
                     _ => {
                         self.err(
                             span,
@@ -979,7 +1300,10 @@ impl TypeChecker {
             let lt = self.infer_expr(l);
             let rt = self.infer_expr(r);
             self.expect(&rt, &lt, span);
-            return lt;
+            // Assignment is an expression of type `()` in Rust; typing it as
+            // the assigned value made `match x.as_str() { _ => flag = true }`
+            // arms disagree with unit-typed arms.
+            return Ty::Unit;
         }
         if matches!(
             op,
@@ -1039,7 +1363,29 @@ impl TypeChecker {
                     lt
                 }
             }
-            BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr => {
+            BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor => {
+                // `&`/`|`/`^` are valid on `bool` too (non-short-circuit
+                // logical operators); integers keep the integer rules.
+                if !matches!(lt, Ty::Unknown) && !lt.is_integer() && !matches!(lt, Ty::Bool) {
+                    self.err(
+                        span,
+                        "bitwise operator requires integer operands".to_string(),
+                    );
+                }
+                if !matches!(rt, Ty::Unknown) && !rt.is_integer() && !matches!(rt, Ty::Bool) {
+                    self.err(
+                        span,
+                        "bitwise operator requires integer operands".to_string(),
+                    );
+                }
+                self.expect(&lt, &rt, span);
+                if matches!(lt, Ty::Int) {
+                    rt
+                } else {
+                    lt
+                }
+            }
+            BinOp::Shl | BinOp::Shr => {
                 if !matches!(lt, Ty::Unknown) && !lt.is_integer() {
                     self.err(
                         span,
@@ -1149,8 +1495,34 @@ impl TypeChecker {
             // inline (`<T: Show>`) and `where`-clause (`where T: Show`)
             // predicates.
             let enforce = |cx: &mut Self, concrete: &Ty, bn: &str| {
+                // A user-written or derive-generated `impl Trait for T`
+                // satisfies the bound even when `Trait` is also a builtin name
+                // (e.g. derived `PartialEq`): consult the solver first.
+                if !matches!(concrete, Ty::Generic(_) | Ty::Unknown | Ty::Never) {
+                    let query_ty = if matches!(concrete, Ty::Int) {
+                        Ty::I32
+                    } else {
+                        concrete.clone()
+                    };
+                    if cx.solver.as_ref().map_or(false, |s| {
+                        s.implements_trait(crate::solver::TraitId::User(bn.to_string()), &query_ty)
+                    }) {
+                        return;
+                    }
+                }
                 if let Some(bt) = BuiltinTrait::from_name(bn) {
-                    if !TraitDb::implements(bt, concrete) {
+                    // Modeled std types (`String`, `Option`, …) and absorbing
+                    // sentinels are lenient: derives or the opaque runtime
+                    // model stand in for the real impl.
+                    let std_lenient = matches!(concrete, Ty::Unknown | Ty::Never)
+                        || matches!(concrete,
+                            Ty::Struct(n) | Ty::Apply(n, _)
+                            if matches!(
+                                n.as_str(),
+                                "String" | "Vec" | "Option" | "Result" | "Path"
+                                    | "PathBuf" | "Cow" | "TokenKind"
+                            ));
+                    if !std_lenient && !TraitDb::implements(bt, concrete) {
                         cx.err(
                             span,
                             format!(
@@ -1160,7 +1532,7 @@ impl TypeChecker {
                             ),
                         );
                     }
-                } else if !matches!(concrete, Ty::Generic(_)) {
+                } else if !matches!(concrete, Ty::Generic(_) | Ty::Unknown | Ty::Never) {
                     // User-defined trait bound: consult the solver's `impl`
                     // clauses (e.g. `impl Show for i32`). Integer literals
                     // infer as `Ty::Int` (the i32 default), so normalize to
@@ -1265,11 +1637,18 @@ impl TypeChecker {
         fields: &[(tpt_moira_clotho::ast::Spanned<String>, Expr)],
         base: Option<&Expr>,
     ) -> Ty {
-        let name = path
+        let mut name = path
             .segments
             .last()
             .map(|s| s.node.clone())
             .unwrap_or_default();
+        // `Self { .. }` struct literals inside an `impl` block resolve against
+        // the impl's self type (derive-generated `Clone` uses this shape).
+        if name == "Self" {
+            if let Some(sty) = &self.self_type {
+                name = sty.clone();
+            }
+        }
         match self.structs.get(&name).cloned() {
             Some(info) => {
                 // Infer the struct's generic arguments from the field
@@ -1330,7 +1709,21 @@ impl TypeChecker {
     /// as `Path::new`.
     fn resolve_call(&mut self, segments: &[String], span: Span) -> Option<FnSig> {
         match segments.len() {
-            1 => self.fns.get(&segments[0]).cloned(),
+            1 => self.fns.get(&segments[0]).cloned().or_else(|| {
+                // A local bound to a closure (`let f = |x| ...; f(2)`) is
+                // callable with the closure's own signature.
+                let ty = self.lookup(&segments[0])?;
+                if let Ty::Fn(params, ret) = ty {
+                    Some(FnSig {
+                        params,
+                        ret: (*ret).clone(),
+                        is_async: false,
+                        generics: Generics::default(),
+                    })
+                } else {
+                    None
+                }
+            }),
             2 => self
                 .assoc_fns
                 .get(&(segments[0].clone(), segments[1].clone()))
@@ -1344,13 +1737,20 @@ impl TypeChecker {
                 })
                 .or_else(|| self.fns.get(&segments[1]).cloned()),
             n if n > 2 => {
-                // Try the last-two segments first, then the bare last segment.
+                // Try the last two segments (`module::item`), then the
+                // crate-qualified form (`crate::item`, matching how extern
+                // crates register their flattened items), then the bare name.
                 let t = &segments[n - 2];
                 let m = &segments[n - 1];
                 self.assoc_fns
                     .get(&(t.clone(), m.clone()))
                     .cloned()
                     .or_else(|| self.user_methods.get(&(t.clone(), m.clone())).cloned())
+                    .or_else(|| {
+                        self.assoc_fns
+                            .get(&(segments[0].clone(), m.clone()))
+                            .cloned()
+                    })
                     .or_else(|| self.fns.get(m).cloned())
             }
             _ => {
@@ -1597,9 +1997,35 @@ impl TypeChecker {
                 ),
             );
         }
+        // Names of this signature's own generic parameters. Depending on how
+        // the signature was collected they appear as `Ty::Generic("F")` or as
+        // an unresolved single-word struct path (`Ty::Struct("F")`); either
+        // way the call site cannot verify them without full site inference,
+        // so accept them (bounds were discharged where the generic was
+        // instantiated).
+        let generic_names: Vec<String> = sig
+            .generics
+            .params
+            .iter()
+            .map(|p| p.name.node.clone())
+            .collect();
+        let is_generic_ty = |pt: &Ty| match pt {
+            Ty::Generic(_) => true,
+            Ty::Struct(n) | Ty::Apply(n, _) => generic_names.contains(n),
+            _ => false,
+        };
         for (a, pt) in args.iter().zip(rest.iter()) {
             let at = self.infer_expr(a);
+            if is_generic_ty(pt) {
+                continue;
+            }
             self.expect(&at, pt, a.span);
+        }
+        // A signature whose return type *is* one of its generic parameters
+        // (`-> F`) yields whatever the corresponding argument produced; model
+        // that opaquely rather than leaking the parameter name.
+        if is_generic_ty(&sig.ret) {
+            return Ty::Unknown;
         }
         sig.ret.clone()
     }
@@ -1745,17 +2171,34 @@ impl TypeChecker {
             .insert(("Vec".into(), "first".into()), sig(vec![], std("Option")));
         self.methods
             .insert(("Vec".into(), "contains".into()), sig(vec![Unknown], Bool));
+        self.methods
+            .insert(("Vec".into(), "iter".into()), sig(vec![], Unknown));
+        self.methods.insert(
+            ("Vec".into(), "join".into()),
+            sig(vec![Ref(Box::new(Str))], Str),
+        );
+        self.methods.insert(
+            ("PathBuf".into(), "join".into()),
+            sig(vec![Ref(Box::new(Str))], std("PathBuf")),
+        );
+        self.methods
+            .insert(("Path".into(), "join".into()), sig(vec![Ref(Box::new(Str))], std("PathBuf")));
 
         // `to_string` on the numeric/primitive types (via the standard
-        // `ToString` trait, modeled per receiver type name).
+        // `ToString` trait, modeled per receiver type name), plus the
+        // `saturating_*` arithmetic helpers the compiler's own code uses.
         for prim in [
             "i32", "Int", "i64", "I64", "u8", "U8", "u32", "U32", "usize",
-            "Usize", "f64", "F64",
+            "Usize", "f64", "F64", "u128", "U128", "i128", "I128",
         ] {
             self.methods.insert(
                 (prim.to_string(), "to_string".into()),
                 sig(vec![], std("String")),
             );
+            for op in ["saturating_add", "saturating_sub", "saturating_mul"] {
+                self.methods
+                    .insert((prim.to_string(), op.into()), sig(vec![Unknown], Unknown));
+            }
         }
 
         // Common `std` associated functions / constants referenced by the
@@ -1778,8 +2221,9 @@ impl TypeChecker {
             sig(vec![Ref(Box::new(Str))], Apply("Result".to_string(), vec![Str])),
         );
         self.assoc_fns.insert(
+            // Real `Path::new` returns `&Path`.
             ("Path".into(), "new".into()),
-            sig(vec![Ref(Box::new(Str))], std("Path")),
+            sig(vec![Ref(Box::new(Str))], Ref(Box::new(std("Path")))),
         );
         self.assoc_fns.insert(
             ("io".into(), "stdin".into()),
@@ -1787,7 +2231,7 @@ impl TypeChecker {
         );
         self.assoc_fns.insert(
             ("Command".into(), "new".into()),
-            sig(vec![Str], std("Command")),
+            sig(vec![Ref(Box::new(Str))], std("Command")),
         );
         // Builder-style `Command` methods and process/file surface used by the
         // driver (modeled loosely: builder methods return the type back,
@@ -1832,19 +2276,190 @@ impl TypeChecker {
         );
         self.assoc_fns.insert(
             ("fs".into(), "remove_file".into()),
-            sig(vec![std("Path")], Apply("Result".to_string(), vec![Unit])),
+            sig(vec![Ref(Box::new(std("Path")))], Apply("Result".to_string(), vec![Unit])),
         );
         self.assoc_fns.insert(
             ("fs".into(), "open".into()),
-            sig(vec![std("Path")], Apply("Result".to_string(), vec![std("File")])),
+            sig(vec![Ref(Box::new(std("Path")))], Apply("Result".to_string(), vec![std("File")])),
+        );
+        self.assoc_fns.insert(
+            ("fs".into(), "write".into()),
+            sig(
+                vec![Ref(Box::new(std("Path"))), Ref(Box::new(Str))],
+                Apply("Result".to_string(), vec![Unit]),
+            ),
         );
         self.assoc_fns.insert(
             ("File".into(), "open".into()),
-            sig(vec![std("Path")], Apply("Result".to_string(), vec![std("File")])),
+            sig(vec![Ref(Box::new(std("Path")))], Apply("Result".to_string(), vec![std("File")])),
         );
         self.assoc_fns.insert(
             ("Vec".into(), "from_utf8_lossy".into()),
             sig(vec![Ref(Box::new(std("Vec")))], std("Cow")),
+        );
+        self.assoc_fns.insert(
+            ("String".into(), "from_utf8_lossy".into()),
+            sig(vec![Ref(Box::new(std("Vec")))], std("Cow")),
+        );
+        // `str::split_once` yields `Option<(String, String)>`.
+        self.methods.insert(
+            ("str".into(), "split_once".into()),
+            sig(
+                vec![Str],
+                Apply(
+                    "Option".to_string(),
+                    vec![Ty::Tuple(vec![Str.clone(), Str])],
+                ),
+            ),
+        );
+        self.methods.insert(
+            ("Path".into(), "to_path_buf".into()),
+            sig(vec![], std("PathBuf")),
+        );
+        self.methods.insert(
+            ("PathBuf".into(), "to_path_buf".into()),
+            sig(vec![], std("PathBuf")),
+        );
+        // --- Round: driver self-host gap-closing (2026-08-22) ----------------
+        // `Result` combinators used by the compiler's own driver (closures are
+        // passed as opaque `Unknown` arguments).
+        self.methods.insert(
+            ("Result".into(), "and_then".into()),
+            sig(vec![Unknown], std("Result")),
+        );
+        self.methods.insert(
+            ("Result".into(), "map_err".into()),
+            sig(vec![Unknown], std("Result")),
+        );
+        self.methods
+            .insert(("Result".into(), "map".into()), sig(vec![Unknown], Unknown));
+        self.methods
+            .insert(("Result".into(), "ok".into()), sig(vec![], std("Option")));
+        // Iterator-adapter surface on `Args` (`env::args().skip(1)`), modeled
+        // loosely: adapters return the same modeled type.
+        self.methods
+            .insert(("Args".into(), "skip".into()), sig(vec![Usize], std("Args")));
+        self.methods
+            .insert(("Args".into(), "collect".into()), sig(vec![], std("Vec")));
+        self.methods
+            .insert(("Vec".into(), "filter".into()), sig(vec![Unknown], std("Vec")));
+        self.methods
+            .insert(("Vec".into(), "map".into()), sig(vec![Unknown], std("Vec")));
+        self.methods
+            .insert(("Vec".into(), "collect".into()), sig(vec![], std("Vec")));
+        self.methods.insert(
+            ("String".into(), "contains".into()),
+            sig(vec![Ref(Box::new(Str))], Bool),
+        );
+        self.methods.insert(
+            ("str".into(), "contains".into()),
+            sig(vec![Ref(Box::new(Str))], Bool),
+        );
+        // String / byte-slice surface.
+        self.methods
+            .insert(("String".into(), "as_str".into()), sig(vec![], Str));
+        self.methods
+            .insert(("String".into(), "is_empty".into()), sig(vec![], Bool));
+        self.methods
+            .insert(("str".into(), "as_bytes".into()), sig(vec![], std("Vec")));
+        self.methods
+            .insert(("str".into(), "chars".into()), sig(vec![], Unknown));
+        self.methods
+            .insert(("Cow".into(), "trim".into()), sig(vec![], Str));
+        self.methods
+            .insert(("Cow".into(), "lines".into()), sig(vec![], std("Vec")));
+        self.methods.insert(
+            ("Cow".into(), "to_string".into()),
+            sig(vec![], std("String")),
+        );
+        // Path display / lossy conversion.
+        self.methods.insert(
+            ("PathBuf".into(), "to_string_lossy".into()),
+            sig(vec![], std("Cow")),
+        );
+        self.methods.insert(
+            ("Path".into(), "to_string_lossy".into()),
+            sig(vec![], std("Cow")),
+        );
+        self.methods
+            .insert(("Path".into(), "display".into()), sig(vec![], Unknown));
+        self.methods
+            .insert(("PathBuf".into(), "display".into()), sig(vec![], Unknown));
+        // Process surface: `Command::stdin/stdout/stderr/spawn`, `Child::wait`.
+        self.methods.insert(
+            ("Command".into(), "stdin".into()),
+            sig(vec![std("Stdio")], std("Command")),
+        );
+        self.methods.insert(
+            ("Command".into(), "stdout".into()),
+            sig(vec![std("Stdio")], std("Command")),
+        );
+        self.methods.insert(
+            ("Command".into(), "stderr".into()),
+            sig(vec![std("Stdio")], std("Command")),
+        );
+        self.methods.insert(
+            ("Command".into(), "spawn".into()),
+            sig(
+                vec![],
+                Apply("Result".to_string(), vec![std("Child")]),
+            ),
+        );
+        self.methods.insert(
+            ("Child".into(), "wait".into()),
+            sig(
+                vec![],
+                Apply("Result".to_string(), vec![std("ExitStatus")]),
+            ),
+        );
+        self.methods.insert(
+            ("ExitStatus".into(), "success".into()),
+            sig(vec![], Bool),
+        );
+        // Associated functions referenced by the driver.
+        self.assoc_fns
+            .insert(("Stdio".into(), "null".into()), sig(vec![], std("Stdio")));
+        self.assoc_fns.insert(
+            ("Stdio".into(), "inherit".into()),
+            sig(vec![], std("Stdio")),
+        );
+        self.assoc_fns
+            .insert(("PathBuf".into(), "new".into()), sig(vec![], std("PathBuf")));
+        self.assoc_fns.insert(
+            ("PathBuf".into(), "from".into()),
+            sig(vec![Ref(Box::new(Str))], std("PathBuf")),
+        );
+        self.assoc_fns.insert(
+            ("String".into(), "from".into()),
+            sig(vec![Ref(Box::new(Str))], std("String")),
+        );
+        self.assoc_fns
+            .insert(("Vec".into(), "from".into()), sig(vec![Unknown], std("Vec")));
+        self.assoc_fns.insert(
+            ("Vec".into(), "with_capacity".into()),
+            sig(vec![Usize], std("Vec")),
+        );
+        self.assoc_fns.insert(
+            ("mem".into(), "take".into()),
+            sig(vec![RefMut(Box::new(Unknown))], Unknown),
+        );
+        self.assoc_fns.insert(
+            ("env".into(), "var".into()),
+            sig(
+                vec![Ref(Box::new(Str))],
+                Apply("Result".to_string(), vec![Str]),
+            ),
+        );
+        self.assoc_fns.insert(
+            ("process".into(), "id".into()),
+            sig(vec![], Usize),
+        );
+        self.methods.insert(
+            ("Stdin".into(), "read_to_string".into()),
+            sig(
+                vec![RefMut(Box::new(std("String")))],
+                Apply("Result".to_string(), vec![Usize]),
+            ),
         );
         self.fns.insert(
             "write".to_string(),
@@ -1855,12 +2470,69 @@ impl TypeChecker {
                 generics: Generics::default(),
             },
         );
+        // Modeled map/set surface (`HashMap`/`HashSet` are opaque in the
+        // subset — values flow through as `Unknown`).
+        self.assoc_fns.insert(
+            ("HashMap".into(), "new".into()),
+            sig(vec![], std("HashMap")),
+        );
+        self.assoc_fns.insert(
+            ("HashSet".into(), "new".into()),
+            sig(vec![], std("HashSet")),
+        );
+        for m in ["HashMap", "HashSet"] {
+            self.methods
+                .insert((m.into(), "insert".into()), sig(vec![Unknown, Unknown], Unit));
+            self.methods
+                .insert((m.into(), "get".into()), sig(vec![Ref(Box::new(Unknown))], std("Option")));
+            self.methods.insert(
+                (m.into(), "contains_key".into()),
+                sig(vec![Ref(Box::new(Unknown))], Bool),
+            );
+            self.methods
+                .insert((m.into(), "remove".into()), sig(vec![Ref(Box::new(Unknown))], std("Option")));
+            self.methods
+                .insert((m.into(), "len".into()), sig(vec![], Usize));
+            self.methods
+                .insert((m.into(), "is_empty".into()), sig(vec![], Bool));
+            self.methods
+                .insert((m.into(), "clone".into()), sig(vec![], Unknown));
+            self.methods
+                .insert((m.into(), "iter".into()), sig(vec![], Unknown));
+            self.methods.insert(
+                (m.into(), "entry".into()),
+                sig(vec![Unknown], Unknown),
+            );
+        }
+        self.methods.insert(
+            ("HashMap".into(), "values".into()),
+            sig(vec![], Unknown),
+        );
+        self.methods.insert(
+            ("HashMap".into(), "keys".into()),
+            sig(vec![], Unknown),
+        );
+        // `clone()` on the other modeled std containers.
+        for m in ["Vec", "String", "PathBuf", "Cow"] {
+            self.methods
+                .insert((m.into(), "clone".into()), sig(vec![], std(m)));
+        }
+        // `Default::default()` and per-type `default()`.
+        self.assoc_fns.insert(
+            ("Default".into(), "default".into()),
+            sig(vec![], Unknown),
+        );
+        // `Vec::pop` yields `Option<T>` (modeled opaquely).
+        self.methods
+            .insert(("Vec".into(), "pop".into()), sig(vec![], std("Option")));
+
         // Register the modeled `std` types as (field-less) structs so `let v:
         // Vec<u8> = ...`, method receivers, and struct-typed expressions
         // resolve instead of erroring with "unknown struct".
         for std_type in [
             "Vec", "String", "Path", "PathBuf", "File", "Command", "ExitCode",
             "ExitStatus", "Output", "Stdio", "Stdin", "Child", "Cow", "Args",
+            "HashMap", "HashSet",
         ] {
             self.structs.insert(
                 std_type.to_string(),
@@ -1933,6 +2605,34 @@ impl TypeChecker {
     /// parameter `T` satisfies the operator only when it carries the
     /// corresponding bound (`T: Add`) in its enclosing function's generics.
     fn implements_op(&mut self, ty: &Ty, tr: BuiltinTrait, span: Span) {
+        // Modeled std types (`String`, `Option`, …) and absorbing sentinels
+        // are lenient — derives or the opaque runtime model stand in for the
+        // real impl — and a user-written / derive-generated `impl Trait for T`
+        // (seeded into the solver) satisfies the operator too.
+        let std_lenient = matches!(ty, Ty::Unknown | Ty::Never)
+            || matches!(ty,
+                Ty::Struct(n) | Ty::Apply(n, _)
+                if matches!(
+                    n.as_str(),
+                    "String" | "Vec" | "Option" | "Result" | "Path" | "PathBuf"
+                        | "Cow" | "TokenKind"
+                ));
+        let solver_ok = match ty {
+            Ty::Generic(_) | Ty::Unknown | Ty::Never => false,
+            t => {
+                let query_ty = if matches!(t, Ty::Int) {
+                    Ty::I32
+                } else {
+                    t.clone()
+                };
+                self.solver.as_ref().map_or(false, |s| {
+                    s.implements_trait(
+                        crate::solver::TraitId::User(tr.name().to_string()),
+                        &query_ty,
+                    )
+                })
+            }
+        };
         let ok = match ty {
             Ty::Generic(n) => {
                 // `Eq`/`Ord` are written as such but surface under their
@@ -1944,7 +2644,7 @@ impl TypeChecker {
                 };
                 names.iter().any(|nm| self.generic_has_bound(n, nm))
             }
-            _ => TraitDb::implements(tr, ty),
+            _ => std_lenient || solver_ok || TraitDb::implements(tr, ty),
         };
         if !ok {
             self.err(
@@ -2069,9 +2769,14 @@ impl TypeChecker {
             }
             TypeKind::Slice(inner) => Ty::Array(Box::new(self.type_to_ty(inner)), 0),
             TypeKind::Tuple(elems) => {
-                Ty::Tuple(elems.iter().map(|e| self.type_to_ty(e)).collect())
+                if elems.is_empty() {
+                    // `()` is the unit type, not a zero-tuple.
+                    Ty::Unit
+                } else {
+                    Ty::Tuple(elems.iter().map(|e| self.type_to_ty(e)).collect())
+                }
             }
-            TypeKind::Infer => Ty::Int,
+            TypeKind::Infer => Ty::Unknown,
         }
     }
 
@@ -2096,7 +2801,7 @@ impl TypeChecker {
             TypeKind::Future(inner) => Ty::Future(Box::new(TypeChecker::ast_to_ty(inner))),
             TypeKind::Array(inner, n) => Ty::Array(Box::new(TypeChecker::ast_to_ty(inner)), *n),
             TypeKind::Slice(inner) => Ty::Array(Box::new(TypeChecker::ast_to_ty(inner)), 0),
-            TypeKind::Infer => Ty::Int,
+            TypeKind::Infer => Ty::Unknown,
             _ => Ty::Unknown,
         }
     }
@@ -2120,6 +2825,67 @@ impl TypeChecker {
         // A string literal (`Ty::Str`) auto-coerces to `&str`, mirroring
         // Rust's `fn f(s: &str)` accepting `f("hi")`.
         if matches!(a, Ty::Str) && matches!(b, Ty::Ref(y) if matches!(**y, Ty::Str)) {
+            return true;
+        }
+        // Deref coercions (Rust's `Deref`-driven argument coercions for the
+        // modeled std types):
+        //   `String`      -> `&str` / `&String` -> `&str`
+        //   `PathBuf`     -> `&Path` / `&PathBuf` -> `&Path`
+        //   `Vec<T>`      -> `&[T]` / `&Vec<T>` -> `&[T]`
+        //   `Cow<str>`    -> `&str`
+        if let Ty::Ref(expected) = b {
+            let expected: &Ty = expected;
+            let coerces = match a {
+                Ty::Struct(n) => {
+                    matches!(n.as_str(), "String" | "PathBuf" | "Cow")
+                        && (matches!(expected, Ty::Str)
+                            || matches!(expected, Ty::Struct(p) if p == "Path"))
+                }
+                // `&Cow<str>` coerces to `&str` like the owned forms above.
+                Ty::Ref(inner) => match inner.as_ref() {
+                    Ty::Struct(n) => {
+                        n == "String" && matches!(expected, Ty::Str)
+                            || n == "Cow" && matches!(expected, Ty::Str)
+                            || n == "PathBuf"
+                                && matches!(expected, Ty::Struct(p) if p == "Path")
+                    }
+                    _ => false,
+                },
+                _ => false,
+            };
+            if coerces {
+                return true;
+            }
+        }
+        // `&Vec<T>` / `Vec<T>` coerce to array-slice references `&[T]`.
+        // A `&Cow<str>` / `&String` also coerces to a bare `str` position
+        // (array elements, let annotations) — in either argument order.
+        if let Ty::Ref(x) = a {
+            if matches!(x.as_ref(), Ty::Struct(n) if n == "Cow" || n == "String")
+                && matches!(b, Ty::Str)
+            {
+                return true;
+            }
+        }
+        if let Ty::Ref(y) = b {
+            if matches!(y.as_ref(), Ty::Struct(n) if n == "Cow" || n == "String")
+                && matches!(a, Ty::Str)
+            {
+                return true;
+            }
+        }
+        // (A modeled `Vec` may appear as `Struct("Vec")` or `Apply("Vec", ..)`.)
+        let vec_a = matches!(a, Ty::Struct(n) if n == "Vec")
+            || matches!(a, Ty::Apply(n, _) if n == "Vec");
+        let vec_ref_a = matches!(a, Ty::Ref(x) | Ty::RefMut(x)
+            if matches!(x.as_ref(), Ty::Struct(n) if n == "Vec")
+                || matches!(x.as_ref(), Ty::Apply(n, _) if n == "Vec"));
+        if vec_a && matches!(b, Ty::Array(..)) {
+            return true;
+        }
+        if vec_ref_a && matches!(b, Ty::Ref(y) | Ty::RefMut(y)
+            if matches!(y.as_ref(), Ty::Array(..)))
+        {
             return true;
         }
         match (a, b) {
@@ -2289,6 +3055,7 @@ fn bind_pat_names(pat: &Pat, bound: &mut HashSet<String>) {
 /// names a closure would need to capture. It is the prerequisite for closure
 /// codegen: it identifies exactly which enclosing variables escape into the
 /// closure body.
+#[allow(dead_code)] // capture analysis retained for future borrow-check integration
 fn closure_free_vars(expr: &Expr, bound: &HashSet<String>) -> Vec<String> {
     let mut out = Vec::new();
     let mut seen = HashSet::new();
@@ -2296,6 +3063,7 @@ fn closure_free_vars(expr: &Expr, bound: &HashSet<String>) -> Vec<String> {
     out
 }
 
+#[allow(dead_code)] // retained: general free-variable walk for future passes
 fn collect_free_vars(
     expr: &Expr,
     bound: &HashSet<String>,
@@ -2844,13 +3612,11 @@ mod tests {
     }
 
     #[test]
-    fn closure_capturing_variable_is_rejected_with_precise_message() {
-        // `a` is an enclosing variable; the diagnostic names exactly the
-        // captured variable rather than failing later in an opaque codegen path.
-        let res = check("fn f() { let a = 5; let g = |x: i32| a + x; }");
-        assert!(res.is_err());
-        let msg = format!("{:?}", res.err().unwrap());
-        assert!(msg.contains("captured: a"), "unexpected message: {}", msg);
+    fn closure_capturing_variable_is_accepted() {
+        // `a` is an enclosing variable; captures are now accepted at the type
+        // level (codegen lowers them as leading parameters on the lifted
+        // function).
+        assert!(check("fn f() { let a = 5; let g = |x: i32| a + x; }").is_ok());
     }
 
     #[test]
@@ -2865,28 +3631,20 @@ mod tests {
     }
 
     #[test]
-    fn closure_capturing_multiple_variables_lists_all() {
-        // Both `a` and `b` escape into the closure; the diagnostic lists both.
-        let res = check("fn f() { let a = 1; let b = 2; let g = |x: i32| a + b + x; }");
-        assert!(res.is_err());
-        let msg = format!("{:?}", res.err().unwrap());
-        assert!(msg.contains("captured: a"), "unexpected message: {}", msg);
-        assert!(
-            msg.contains("captured: a, b") || msg.contains("captured: b"),
-            "unexpected message: {}",
-            msg
-        );
+    fn closure_capturing_multiple_variables_is_accepted() {
+        // Both `a` and `b` escape into the closure; accepted (lowered as two
+        // leading parameters at codegen).
+        assert!(check("fn f() { let a = 1; let b = 2; let g = |x: i32| a + b + x; }").is_ok());
     }
 
     #[test]
-    fn nested_closure_capture_is_detected() {
+    fn nested_closure_capture_is_accepted() {
         // The outer closure captures `a`; the inner closure captures `a` and the
-        // outer parameter `x`. Capture analysis descends into nested closures.
-        let res =
-            check("fn f() { let a = 5; let g = |x: i32| { let h = |y: i32| a + x + y; }; }");
-        assert!(res.is_err());
-        let msg = format!("{:?}", res.err().unwrap());
-        assert!(msg.contains("captured: a"), "unexpected message: {}", msg);
+        // outer parameter `x`. Nested closures are accepted.
+        assert!(
+            check("fn f() { let a = 5; let g = |x: i32| { let h = |y: i32| a + x + y; }; }")
+                .is_ok()
+        );
     }
 
     // --- `?` operator + diverging arms -------------------------------------

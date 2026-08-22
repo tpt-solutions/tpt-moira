@@ -155,6 +155,17 @@ def probe_crate(moira: Path, crate: dict) -> ProbeResult:
         result.notes.append(f"entry point {crate['lib']} not found")
         return result
 
+    # Cross-crate signature resolution: every *other* workspace crate is
+    # passed as `--extern name=lib.rs` so paths like
+    # `tpt_moira_atropos::lower_program(...)` resolve during checking.
+    extern_args: list[str] = []
+    for other in CRATES:
+        if other["name"] == crate["name"]:
+            continue
+        other_lib = ROOT / other["lib"]
+        if other_lib.exists():
+            extern_args += ["--extern", f"{other['name']}={other_lib}"]
+
     # Parse stage: `--emit ast` only parses + macro-expands (it never runs the
     # Lachesis checker or the Atropos lowering), so a clean exit is a *pure* parse
     # signal. This lets the probe track parse pass/fail independently of type/borrow
@@ -169,8 +180,8 @@ def probe_crate(moira: Path, crate: dict) -> ProbeResult:
         # so the report still shows the parse column as `fail`.
         return result
 
-    # Check stage (Lachesis type/borrow checker).
-    res = run([str(moira), "--check", str(lib)])
+    # Check stage (Lachesis type/borrow checker), with cross-crate signatures.
+    res = run([str(moira), "--check", *extern_args, str(lib)])
     result.check_ok = res.returncode == 0
     if res.returncode != 0:
         err = (res.stderr or res.stdout).strip().splitlines()

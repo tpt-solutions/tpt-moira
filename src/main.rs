@@ -24,6 +24,8 @@ fn main() -> ExitCode {
     //   --propose      in --diff, attach the AI root-cause proposer + triage queue
     //   --allowlist    override the divergence allowlist file
     //   --update-allowlist  persist divergences seen in a run into the allowlist
+    //   --extern name=path  register another crate's source for cross-crate
+    //                  signature resolution during --check / --emit check
     let mut emit = "ast".to_string();
     let mut output: Option<String> = None;
     let mut check = false;
@@ -32,6 +34,7 @@ fn main() -> ExitCode {
     let mut propose_flag = false;
     let mut allowlist_path: Option<String> = None;
     let mut update_allowlist = false;
+    let mut externs: Vec<String> = Vec::new();
     let mut positional: Vec<String> = Vec::new();
     let mut iter = args.iter();
     while let Some(a) = iter.next() {
@@ -47,6 +50,13 @@ fn main() -> ExitCode {
                 }
             }
             "--check" => check = true,
+            "--extern" => {
+                if let Some(spec) = iter.next() {
+                    // `name=path` — the name may itself carry a hyphen that
+                    // Cargo normalizes to underscore; keep it verbatim.
+                    externs.push(spec.to_string());
+                }
+            }
             "--diff" => diff = true,
             "--parity" => parity_flag = true,
             "--propose" => propose_flag = true,
@@ -95,6 +105,46 @@ fn main() -> ExitCode {
     let input_path = positional
         .first()
         .map(|p| std::path::Path::new(p).to_path_buf());
+
+    // Parse `--extern name=path` specs into (name, path) pairs for cross-crate
+    // signature resolution. Written within the self-host subset (no
+    // iterator adapters, no `?` on `Option`, no capturing closures).
+    let mut extern_pairs: Vec<(String, String)> = Vec::new();
+    for spec in &externs {
+        match spec.split_once('=') {
+            Some(pair) => {
+                extern_pairs.push((pair.0.to_string(), pair.1.to_string()));
+            }
+            None => {}
+        }
+    }
+    let mut extern_programs: Vec<(String, tpt_moira_clotho::ast::Program)> = Vec::new();
+    for pair in &extern_pairs {
+        let name = &pair.0;
+        let path = &pair.1;
+        let compiled = tpt_moira_clotho::compile_file(std::path::Path::new(path));
+        match compiled {
+            Ok(p) => {
+                extern_programs.push((name.clone(), p));
+            }
+            Err(diag) => {
+                eprintln!(
+                    "moira: extern crate `{}` ({}): parse error: {}",
+                    name, path, diag
+                );
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+    let have_externs = !extern_programs.is_empty();
+    let check_call = |program: &tpt_moira_clotho::ast::Program| {
+        if have_externs {
+            tpt_moira_lachesis::check_with_externs(program, &extern_programs)
+        } else {
+            tpt_moira_lachesis::check(program)
+        }
+    };
+
     if diff {
         return run_diff(
             &source,
@@ -111,7 +161,7 @@ fn main() -> ExitCode {
     // Lachesis type + borrow checker before lowering/codegen. The result is read
     // through the whole-pipeline content-addressed cache when caching is on.
     if check {
-        if let Err(diags) = pipeline().checked(&source, || tpt_moira_lachesis::check(&program)) {
+        if let Err(diags) = pipeline().checked(&source, || check_call(&program)) {
             for d in &diags {
                 eprintln!("moira: {}", d);
             }
@@ -121,7 +171,7 @@ fn main() -> ExitCode {
     }
 
     match emit.as_str() {
-        "check" => match pipeline().checked(&source, || tpt_moira_lachesis::check(&program)) {
+        "check" => match pipeline().checked(&source, || check_call(&program)) {
             Ok(()) => println!("moira: type-check and borrow-check passed"),
             Err(diags) => {
                 for d in &diags {

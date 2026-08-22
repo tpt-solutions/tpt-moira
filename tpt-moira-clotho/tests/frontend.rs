@@ -230,6 +230,33 @@ fn parse_method_call_turbofish() {
 }
 
 #[test]
+// Regression: nested parentheses inside a paren-delimited macro invocation
+// (`println!("{}", v.len())`) are macro *content*, not depth markers. They
+// must be captured so `v.len()` re-parses as a method call, not a field
+// access (the type checker saw "no field `len` on type `Vec`").
+#[test]
+fn macro_tokens_keep_nested_parens() {
+    let src = "fn main() { println!(\"{}\", v.len()); }";
+    let prog = parse_source(src).unwrap();
+    let mut found = false;
+    for item in &prog.items {
+        if let ItemKind::Function(f) = &item.kind {
+            for stmt in &f.body.stmts {
+                if let StmtKind::Semi(e) | StmtKind::Expr(e) = &stmt.kind {
+                    if let ExprKind::Macro(m) = &e.kind {
+                        let has_parens = m.tokens.iter().any(|t| {
+                            matches!(t.kind, TokenKind::LParen | TokenKind::RParen)
+                        });
+                        assert!(has_parens, "nested parens dropped from macro tokens");
+                        found = true;
+                    }
+                }
+            }
+        }
+    }
+    assert!(found, "macro call not parsed");
+}
+
 fn parse_enum_struct_variants() {
     // Regression: enum struct variants `Variant { field: Type, .. }` must parse
     // (the compiler's own `ast.rs` defines several, e.g. `ExprKind::Closure {

@@ -91,18 +91,38 @@ What unblocked `moira-alloc` (2026-08-22):
 - **Solver-wired method resolution**: generic receivers bounded by a user trait
   (`T: Show`) and concrete receivers covered by an impl both resolve through
   the Chalk-like solver; `where`-clause bounds are enforced at call sites.
+- **Driver gap-closing round (2026-08-22)**: macro token capture keeps nested
+  parens (`println!("{}", v.len())` re-parses as a method call); `for x in
+  &vec`; `Ty::Range` for range expressions; broad prelude additions
+  (`Result` combinators, `Args`/`Vec` adapters, process/fs surface);
+  associated functions as values; impl-block associated consts (local +
+  extern); same-named extern structs merge field sets; extern method-level
+  generics accepted at call sites; `Err(e)` binds the error payload;
+  unannotated closure params infer `Unknown`; function-local `use` is a
+  no-op; `if let`/`while let` with variant patterns lower via the `match`
+  discriminant machinery. Driver type/borrow errors: **54 → 1**.
+- **Second gap-closing round (2026-08-22)**: nullary enum variants as
+  associated constants (with inline-module flattening in checker Pass 1);
+  `Self::Variant` expressions and `Self { .. }` literals resolve via the impl
+  self type; `matches!` supported; prelude additions (`String::is_empty`,
+  `str::chars`, `Vec::with_capacity`, `mem::take`, `saturating_*`); `()` is
+  `Unit`; operator bounds satisfied by solver-known/derive-generated impls
+  and lenient for modeled std types. Counts: clotho **1631 → 985**,
+  lachesis **1221 → 1021**, atropos **1154 → 1100**.
 
 Latest per-crate type/borrow error counts (from the 2026-08-22 probe):
-`clotho` 1721, `lachesis` 1409, `atropos` 1412, `moira` (driver) 69,
-`moira-alloc` 0 (self-hostable). The driver's remaining errors are dominated
-by **cross-crate resolution** (items from other workspace crates are invisible
-to the single-crate checker) and iterator chains; the large crates' dominant
-classes are macros beyond the print family, generics at field-access depth,
-and `for` over Vec-backed iterators. Landed this session: enum codegen
+`clotho` **985**, `lachesis` **1021**, `atropos` **1100**, `moira` (driver,
+with externs) **1** (a single codegen-subset restriction — `for` over a
+modeled `Vec` needs the heap-Vec runtime; its *type-check* pass is clean),
+`moira-alloc` 0 (self-hostable). Landed this session: enum codegen
 (tagged structs, verified end-to-end), the builtin print macros
 (`println!`/`eprintln!` with real type-checked arguments), cascade absorption
-for unknown receivers/fields, and broad std-surface prelude modeling. These
-are the Phase-4 features tracked below and in `TODO.md`.
+for unknown receivers/fields, broad std-surface prelude modeling, cross-crate
+signature resolution, Rust's deref coercions (`String`→`&str`,
+`PathBuf`→`&Path`, `Vec<T>`→`&[T]`), closure captures (leading-parameter
+lowering with direct-call rewriting, verified end-to-end), and
+assignment-expressions-are-`()` typing. These are the Phase-4 features tracked
+below and in `TODO.md`.
 
 | Crate | Role | Blocks self-host until |
 |-------|------|------------------------|

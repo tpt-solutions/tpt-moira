@@ -670,6 +670,131 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
             other workspace crates are invisible to the single-crate checker)
             and iterator chains, both of which need new infrastructure rather
             than prelude entries.
+          - **Cross-crate resolution landed (2026-08-22).** New
+            `--extern name=lib.rs` CLI flag (repeatable) plus
+            `TypeChecker::check_program_with` /
+            `lachesis::check_with_externs`: each extern crate contributes its
+            top-level function signatures, impl methods, and struct shapes
+            (recursing through inline modules; only signatures, bodies are
+            not re-checked). Multi-segment call paths now also try the
+            crate-qualified `crate::item` form, so
+            `tpt_moira_atropos::codegen_c::emit_c(...)` and
+            `tpt_moira_clotho::compile_file(...)` resolve. The self-host probe
+            passes every other workspace crate as an extern automatically.
+            With externs the driver's errors shift from resolution failures
+            ("cannot find function") to **real type mismatches** against
+            accurate signatures (`&Path` vs `PathBuf` auto-coercion, closure
+            arguments, array-ref parameter types) — 84 errors, all of them
+            genuine language-modeling gaps rather than missing symbols.
+          - **Deref coercions landed (2026-08-22).** `compatible` now models
+            Rust's `Deref`-driven argument coercions: `String`/`&String` →
+            `&str`, `PathBuf`/`&PathBuf` → `&Path`, `Vec<T>`/`&Vec<T>` →
+            `&[T]`, and `Path::new` now returns `&Path` (matching real Rust).
+            The fs/file prelude signatures take `&Path`. Driver errors with
+            externs registered: 84 → **71**. Remaining classes are generic
+            callables (`F: FnMut()` bounds on extern signatures), closure
+            capture validation, iterator chains, and match-arm aggregate
+            mismatches — each needing individual modeling work.
+          - **Closure captures landed (2026-08-22).** Capturing closures are
+            now accepted by the type checker (previously rejected outright)
+            and lowered correctly at codegen: captured variables become
+            *leading parameters* on the lambda-lifted function, and direct
+            calls through a bound local (`let add = |x| x + base; add(5);`)
+            are rewritten to pass the captured operands
+            (`__moira_closure_0(base, 5)`). Locals bound to closures are also
+            now callable in the checker (`resolve_call` synthesizes the
+            closure's own signature). Verified end-to-end:
+            `capturing_closure_direct_call_runs` compiles and runs a
+            capture-and-call program printing `105 120`. Documented
+            limitation: a capturing closure *passed to another function*
+            still lowers to its bare pointer (an environment struct is a
+            Phase-4 follow-up). Driver errors 71 → **64**; clotho 1699,
+            lachesis 1353, atropos 1346.
+          - **Assignment-is-unit fix + subset-friendly driver (2026-08-22).**
+            Assignment expressions now type as `()` (they previously typed as
+            the assigned value, making `match x.as_str() { _ => flag = true }`
+            arms disagree with unit arms — 5 errors in the driver alone).
+            `str::split_once`, `Path::to_path_buf`/`PathBuf::to_path_buf`,
+            `Stdin::read_to_string`, and `String::from_utf8_lossy` joined the
+            prelude, and the driver's own `--extern` handling was rewritten to
+            stay within the self-host subset (no iterator adapters, no `?` on
+            `Option`, no capturing closures) — dogfooding the compiler's own
+            target language. Driver errors 64 → **54**.
+          - Fixed the flaky `content_addressed_cache_round_trips` test: its
+            cache directory was keyed only by pid, so a stale prior run (or a
+            concurrent test sharing the pid) could pre-insert the asserted
+            absent key. The directory is now unique per invocation
+            (pid + nanos); two consecutive full-suite runs pass cleanly.
+          - **Driver gap-closing round (2026-08-22, this session).** Driver
+            type/borrow errors fell **54 → 1**; with externs registered,
+            lachesis 1354 → 1221, atropos 1346 → 1154, clotho 1699 → 1631.
+            Landed:
+            * **Macro token capture fix (clotho)**: nested delimiters inside a
+              paren-delimited macro (`println!("{}", v.len())`) were consumed
+              as depth markers and dropped from the captured token stream, so
+              `v.len()` re-parsed as a *field* access ("no field `len` on type
+              `Vec`"). Nested `(`/`)` are now kept as content.
+            * `for x in &vec` / `for x in vec` accepted by the checker
+              (auto-ref iteration; element typed `Unknown`), and an `Unknown`
+              iterator is absorbed instead of erroring.
+            * Ranges now infer as `Ty::Range` (were `()`), fixing `for` over
+              computed ranges.
+            * Prelude additions: `Result::{and_then, map_err, map, ok}`,
+              `Args::{skip, collect}`, `Vec::{filter, map, collect}`,
+              `String::as_str`/`contains`, `str::{as_bytes, contains}`,
+              `Cow::{trim, lines, to_string}`, `Path{,Buf}::{to_string_lossy,
+              display}`, `Command::{stdin, stdout, stderr, spawn}`,
+              `Child::wait`, `ExitStatus::success`, `Stdio::{null, inherit}`,
+              `PathBuf::{new, from}`, `String::from`, `Vec::from`,
+              `env::var`, `process::id`, `fs::write`; `Stdin::read_to_string`
+              now takes `&mut String`; `Command::new` takes `&str`.
+            * Associated functions used as values (`list.map(Path::new)`)
+              resolve to their function type.
+            * Associated constants in `impl` blocks (`Allowlist::
+              DEFAULT_FILE`) resolve, locally and from extern crates.
+            * Same-named structs across extern crates are *merged* (field-set
+              union) instead of overwritten — `clotho::ast::Program` no longer
+              clobbers/loses to `atropos::mir::Program`.
+            * Extern impl-method signatures carry the method's own generics;
+              generic parameters in extern signatures (`F`) are accepted at
+              call sites without full site inference, and a generic return
+              models as `Unknown`.
+            * `Err(e)` patterns bind `e` to the **error** type (`args[1]`),
+              not the Ok payload — `if let Err(diags) = ...` no longer types
+              `diags` as `()`.
+            * Unannotated closure params infer `Unknown` (absorbing) instead
+              of the `i32` default that caused "no method `contains` on i32".
+            * Function-local `use …` items are a no-op in the checker and
+              lowering (was "nested items are not supported").
+            * Atropos lowering: `if let` / `while let` now support variant
+              patterns via the same discriminant-test machinery as `match`
+              (`pattern_guard`); identifier patterns remain always-taken.
+            The driver's single residual diagnostic is the codegen-subset
+            restriction "`for` iterator must be a range/array" (iterating a
+            modeled `Vec` needs the heap-Vec runtime — a Phase-4 codegen
+            follow-up); its *type-check* pass is otherwise clean.
+          - **Second gap-closing round (2026-08-22, continued).** With the
+            same extern sets: clotho **1631 → 985**, lachesis **1221 →
+            1021**, atropos **1154 → 1100**. Landed:
+            * Nullary enum variants register as associated constants
+              (`TokenKind::Fn` used as a value resolves), including items
+              nested in inline modules (Pass 1 now flattens inline `mod`s).
+            * `Self::Variant` constructor expressions and `Self { .. }`
+              struct literals resolve against the enclosing impl's self type
+              (derive-generated `clone()` uses both shapes).
+            * `matches!` type-checks its arguments and yields `Bool`.
+            * Prelude: `String::is_empty`, `str::chars`, `Vec::with_capacity`,
+              `mem::take`, `saturating_add/sub/mul` on all numeric primitives
+              (`u128`/`i128` included).
+            * `()` (empty tuple type) maps to `Unit`, not a zero-tuple.
+            * Operator/derivable-trait bounds are satisfied by solver-known
+              user or derive-generated impls, and modeled std types
+              (`String`/`Option`/…) plus `Unknown` are lenient — previously
+              every `==` on a derived type errored "the trait bound …:
+              PartialEq is not satisfied".
+          - Benchmarks re-recorded after these changes (run #11): geomean
+            **6.69x**, within this host's documented single-run noise band
+            (runs #6–#10 spanned 5.56x–6.91x); no sustained regression.
     - [x] Once a crate parses + type-checks, attempt full codegen and record pass/fail per crate in `docs/SELF_HOSTING.md`
       - **Status: Resolved as a process (2026-08-22)** — the probe records
         `codegen_ok` (and the failure reason) per crate and refreshes

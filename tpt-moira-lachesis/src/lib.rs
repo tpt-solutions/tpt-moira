@@ -40,6 +40,52 @@ pub fn type_check(prog: &Program) -> Result<(), Vec<Diag>> {
     TypeChecker::check_program(prog)
 }
 
+/// Type-check a whole program with extern crate signature tables: each
+/// `(crate_name, program)` pair contributes its top-level function signatures,
+/// impl methods, and struct shapes so cross-crate paths
+/// (`tpt_moira_atropos::lower_program(...)`) resolve. Only signatures are
+/// imported; bodies are not re-checked.
+pub fn type_check_with_externs(
+    prog: &Program,
+    externs: &[(String, Program)],
+) -> Result<(), Vec<Diag>> {
+    let refs: Vec<(&str, &Program)> = externs.iter().map(|(n, p)| (n.as_str(), p)).collect();
+    TypeChecker::check_program_with(prog, &refs)
+}
+
+/// Full end-to-end Lachesis pass with extern crates: like [`check`], but the
+/// type-check pass resolves cross-crate paths against `externs`.
+pub fn check_with_externs(prog: &Program, externs: &[(String, Program)]) -> Result<(), Vec<Diag>> {
+    let mut type_res: Result<(), Vec<Diag>> = Ok(());
+    let mut borrow_res: Result<(), Vec<Diag>> = Ok(());
+
+    std::thread::scope(|s| {
+        s.spawn(|| {
+            type_res = type_check_with_externs(prog, externs);
+        });
+        s.spawn(|| {
+            borrow_res = borrow_check_program(prog);
+        });
+    });
+
+    let mut errs: Vec<Diag> = Vec::new();
+    match type_res {
+        Ok(()) => {}
+        Err(mut e) => errs.append(&mut e),
+    }
+    match borrow_res {
+        Ok(()) => {}
+        Err(mut e) => errs.append(&mut e),
+    }
+    errs.extend(coherence_report(prog));
+    errs.extend(well_formedness_report(prog));
+    if errs.is_empty() {
+        Ok(())
+    } else {
+        Err(errs)
+    }
+}
+
 /// Lower `prog` to MIR and borrow-check it.
 pub fn borrow_check_program(prog: &Program) -> Result<(), Vec<Diag>> {
     let mir = tpt_moira_atropos::lower_program(prog)

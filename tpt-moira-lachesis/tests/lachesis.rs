@@ -75,6 +75,16 @@ fn for_over_array_is_type_checked() {
     assert!(type_ok(
         "fn main() { let arr = [4, 5, 6]; let mut t = 0; for x in arr { t = t + x; } let _ = t; }"
     ));
+    // `for x in &vec` / `for x in vec` (modeled std collections) type-check;
+    // the element type is modeled as `Unknown`.
+    assert!(type_ok(
+        "fn main() { let v: Vec<String> = Vec::new(); for s in &v { let _ = s; } }"
+    ));
+    // An `Err(e)` pattern binds `e` to the *error* payload of a `Result`, not
+    // the Ok payload (`if let Err(diags) = ... { diags.iter(); }`).
+    assert!(type_ok(
+        "fn main() { let r: Result<i32, Vec<String>> = Err(Vec::new()); if let Err(d) = r { for x in &d { let _ = x; } } }"
+    ));
     // Iterating something that is neither a range nor an array is rejected.
     assert!(type_err(
         "fn main() { let x = 1; for y in x { let _ = y; } }"
@@ -228,7 +238,14 @@ fn borrow_check_runs_on_mir() {
 
 #[test]
 fn content_addressed_cache_round_trips() {
-    let dir = std::env::temp_dir().join(format!("moira_cache_test_{}", std::process::id()));
+    // A per-invocation directory (pid + nanos): a fixed pid-keyed dir made
+    // `!cache.contains(key)` flaky whenever a previous run's state (or a
+    // concurrently running test sharing the pid) had already inserted the key.
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let dir = std::env::temp_dir().join(format!("moira_cache_test_{}_{}", std::process::id(), nanos));
     let cache = Cache::open(&dir).expect("open cache");
     let key = content_hash("fn main() {}");
     assert!(!cache.contains(key));
