@@ -256,7 +256,12 @@ impl<'a> Emitter<'a> {
             Op::Call(callee, args) => {
                 let name = match callee {
                     Val::Name(n) => n.clone(),
-                    other => return Err(format!("native backend only supports calls through a named function, found {:?}", other)),
+                    other => {
+                        return Err(format!(
+                        "native backend only supports calls through a named function, found {:?}",
+                        other
+                    ))
+                    }
                 };
                 if args.len() > 6 {
                     return Err(format!(

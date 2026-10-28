@@ -49,9 +49,10 @@ impl Item {
                 .unwrap_or(false);
             // A bare `cfg(test)` has the single identifier argument `test`.
             is_cfg
-                && attr.args.iter().any(|t| {
-                    matches!(t.kind, crate::token::TokenKind::Ident(ref n) if n == "test")
-                })
+                && attr
+                    .args
+                    .iter()
+                    .any(|t| matches!(t.kind, crate::token::TokenKind::Ident(ref n) if n == "test"))
         })
     }
 }

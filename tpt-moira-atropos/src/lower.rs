@@ -8,12 +8,12 @@
 //! [`Lower::lower_async_function`] for the transformation.
 
 use crate::mir;
+use std::collections::HashMap;
+use std::fmt;
 use tpt_moira_clotho::ast::{
     self, BinOp as ABinOp, Expr, ExprKind, ItemKind, Pat, Program, Stmt, StmtKind, TypeKind,
     UnOp as AUnOp,
 };
-use std::collections::HashMap;
-use std::fmt;
 
 /// An error encountered while lowering to MIR.
 #[derive(Debug, Clone)]
@@ -112,7 +112,6 @@ pub fn lower_program(prog: &Program) -> Result<mir::Program> {
             variants.insert(vname.clone(), (ename.clone(), tag as i128, *arity));
         }
     }
-
 
     for st in &enum_structs {
         if !out.structs.iter().any(|s| s.name == st.name) {
@@ -288,7 +287,10 @@ fn func_ptr_c_type(param_count: usize) -> String {
     if param_count == 0 {
         "long long (*)(void)".to_string()
     } else {
-        format!("long long (*)({})", vec!["long long"; param_count].join(", "))
+        format!(
+            "long long (*)({})",
+            vec!["long long"; param_count].join(", ")
+        )
     }
 }
 
@@ -839,7 +841,9 @@ impl Lower {
         // Captured variables become leading `long long` parameters.
         for cap in &captures {
             sub.func.params.push(cap.clone());
-            sub.func.locals.push((cap.clone(), Some("long long".to_string())));
+            sub.func
+                .locals
+                .push((cap.clone(), Some("long long".to_string())));
         }
         for p in params {
             let n = pat_name(&p.pat)?;
@@ -1017,12 +1021,10 @@ impl Lower {
                 let name = match pat {
                     Pat::Ident(n) => n.node.clone(),
                     Pat::Wild => continue,
-                    _ => {
-                        return Err(LowerError(
-                            "only identifier/wildcard elements are supported in `let` tuple patterns"
-                                .into(),
-                        ))
-                    }
+                    _ => return Err(LowerError(
+                        "only identifier/wildcard elements are supported in `let` tuple patterns"
+                            .into(),
+                    )),
                 };
                 let v = self.lower_expr(&inits[i])?;
                 let ct = ann_elems
@@ -1048,16 +1050,15 @@ impl Lower {
         };
         let base_ty = self.temp_type_of(&name_of(&o));
         for (i, pat) in elems.iter().enumerate() {
-            let name = match pat {
-                Pat::Ident(n) => n.node.clone(),
-                Pat::Wild => continue,
-                _ => {
-                    return Err(LowerError(
+            let name =
+                match pat {
+                    Pat::Ident(n) => n.node.clone(),
+                    Pat::Wild => continue,
+                    _ => return Err(LowerError(
                         "only identifier/wildcard elements are supported in `let` tuple patterns"
                             .into(),
-                    ))
-                }
-            };
+                    )),
+                };
             let ct = ann_elems
                 .as_ref()
                 .and_then(|a| a.get(i).cloned())
@@ -1083,18 +1084,21 @@ impl Lower {
     /// Bind a `for`/loop pattern to a per-iteration element value. A single
     /// identifier binds directly; a tuple pattern `for (a, b) in arr` reads each
     /// element's `.fN` field from the tuple-typed `elem`.
-    fn lower_bind_pattern(&mut self, pat: &ast::Pat, elem: mir::Operand, elem_ct: &str) -> Result<()> {
+    fn lower_bind_pattern(
+        &mut self,
+        pat: &ast::Pat,
+        elem: mir::Operand,
+        elem_ct: &str,
+    ) -> Result<()> {
         if let ast::Pat::Tuple(elems) = pat {
             for (i, e) in elems.iter().enumerate() {
                 let name = match e {
                     ast::Pat::Ident(n) => n.node.clone(),
                     ast::Pat::Wild => continue,
-                    _ => {
-                        return Err(LowerError(
-                            "only identifier/wildcard elements are supported in `for` tuple patterns"
-                                .into(),
-                        ))
-                    }
+                    _ => return Err(LowerError(
+                        "only identifier/wildcard elements are supported in `for` tuple patterns"
+                            .into(),
+                    )),
                 };
                 let ct = self
                     .tuple_structs
@@ -1106,13 +1110,18 @@ impl Lower {
                     self.func.locals.push((name.clone(), Some(ct.clone())));
                 }
                 self.types.insert(name.clone(), ct);
-                self.emit(name, mir::Rvalue::Field(elem.clone(), format!("f{i}"), false));
+                self.emit(
+                    name,
+                    mir::Rvalue::Field(elem.clone(), format!("f{i}"), false),
+                );
             }
             return Ok(());
         }
         let name = pat_name(pat)?;
         if !self.func.locals.iter().any(|(n, _)| n == &name) {
-            self.func.locals.push((name.clone(), Some(elem_ct.to_string())));
+            self.func
+                .locals
+                .push((name.clone(), Some(elem_ct.to_string())));
         }
         self.types.insert(name.clone(), elem_ct.to_string());
         self.emit(name, mir::Rvalue::Use(elem));
@@ -1147,16 +1156,16 @@ impl Lower {
         self.emit(
             cmp.clone(),
             mir::Rvalue::Binary(
-                if inclusive { mir::BinOp::Le } else { mir::BinOp::Lt },
+                if inclusive {
+                    mir::BinOp::Le
+                } else {
+                    mir::BinOp::Lt
+                },
                 cond,
                 b_op,
             ),
         );
-        self.set_term(mir::Terminator::If(
-            mir::Operand::var(cmp),
-            body_blk,
-            exit,
-        ));
+        self.set_term(mir::Terminator::If(mir::Operand::var(cmp), body_blk, exit));
 
         self.current = body_blk;
         self.loops.push((exit, head));
@@ -1283,55 +1292,51 @@ impl Lower {
                 }
                 // A closure literal as the callee is invoked immediately: lambda-lift
                 // it into a top-level function and call that directly.
-                let (callee_operand, result_ty) = if let ExprKind::Closure {
-                    params,
-                    body,
-                    ..
-                } = &callee.kind
-                {
-                    (self.lower_closure(params, body)?, "long long".to_string())
-                } else {
-                    let name = match &callee.kind {
-                        ExprKind::Path(p) => p
-                            .segments
-                            .last()
-                            .map(|s| s.node.clone())
-                            .unwrap_or_default(),
-                        _ => return Err(LowerError("call target must be a path".into())),
-                    };
-                    // A call to an `async fn` has no bare body; it lowers either to
-                    // the future constructor (`__ctor`, used by `.await`) or to the
-                    // sync run-wrapper (`__run`, used everywhere else) which drives
-                    // the future to completion and returns its output.
-                    let is_async_call = self.async_fns.contains(&name);
-                    let callee_name = if is_async_call {
-                        if self.expecting_future {
-                            format!("{}__ctor", name)
+                let (callee_operand, result_ty) =
+                    if let ExprKind::Closure { params, body, .. } = &callee.kind {
+                        (self.lower_closure(params, body)?, "long long".to_string())
+                    } else {
+                        let name = match &callee.kind {
+                            ExprKind::Path(p) => p
+                                .segments
+                                .last()
+                                .map(|s| s.node.clone())
+                                .unwrap_or_default(),
+                            _ => return Err(LowerError("call target must be a path".into())),
+                        };
+                        // A call to an `async fn` has no bare body; it lowers either to
+                        // the future constructor (`__ctor`, used by `.await`) or to the
+                        // sync run-wrapper (`__run`, used everywhere else) which drives
+                        // the future to completion and returns its output.
+                        let is_async_call = self.async_fns.contains(&name);
+                        let callee_name = if is_async_call {
+                            if self.expecting_future {
+                                format!("{}__ctor", name)
+                            } else {
+                                format!("{}__run", name)
+                            }
                         } else {
-                            format!("{}__run", name)
-                        }
-                    } else {
-                        name.clone()
+                            name.clone()
+                        };
+                        let result_ty = if is_async_call && self.expecting_future {
+                            format!("{}__fut", name.trim_end_matches("__ctor"))
+                        } else {
+                            "long long".to_string()
+                        };
+                        // A name that is not a known top-level function is an indirect call
+                        // through a function-pointer local (a closure value); everything
+                        // else is a direct call to a top-level function.
+                        let op = if self.all_fn_names.contains(&name) {
+                            mir::Operand::Func(callee_name)
+                        } else if let Some(lifted) = self.closure_bindings.get(&name).cloned() {
+                            // A local bound to a *capturing* closure: rewrite to the
+                            // direct lifted-fn call so captures can be passed.
+                            mir::Operand::Func(lifted)
+                        } else {
+                            mir::Operand::Var(name)
+                        };
+                        (op, result_ty)
                     };
-                    let result_ty = if is_async_call && self.expecting_future {
-                        format!("{}__fut", name.trim_end_matches("__ctor"))
-                    } else {
-                        "long long".to_string()
-                    };
-                    // A name that is not a known top-level function is an indirect call
-                    // through a function-pointer local (a closure value); everything
-                    // else is a direct call to a top-level function.
-                    let op = if self.all_fn_names.contains(&name) {
-                        mir::Operand::Func(callee_name)
-                    } else if let Some(lifted) = self.closure_bindings.get(&name).cloned() {
-                        // A local bound to a *capturing* closure: rewrite to the
-                        // direct lifted-fn call so captures can be passed.
-                        mir::Operand::Func(lifted)
-                    } else {
-                        mir::Operand::Var(name)
-                    };
-                    (op, result_ty)
-                };
                 let mut operands = Vec::new();
                 // Capturing closures invoked through a bound local get their
                 // captured variables as leading arguments.
@@ -1609,7 +1614,10 @@ impl Lower {
                 // the C backend emits its `elem_ty name[len] = {..}` declaration inline.
                 let t = format!("t{}", self.temp_counter);
                 self.temp_counter += 1;
-                self.emit(t.clone(), mir::Rvalue::Array("long long".to_string(), operands));
+                self.emit(
+                    t.clone(),
+                    mir::Rvalue::Array("long long".to_string(), operands),
+                );
                 Ok(mir::Operand::var(t))
             }
             ExprKind::Unsafe(..) => Err(LowerError("`unsafe` is not in the codegen subset".into())),
@@ -1839,10 +1847,7 @@ impl Lower {
             None => mir::Operand::Unit,
         };
         // Variant / nullary-variant patterns get a real guard + payload binds.
-        if matches!(
-            local.pat,
-            ast::Pat::Variant(..) | ast::Pat::Path(_)
-        ) {
+        if matches!(local.pat, ast::Pat::Variant(..) | ast::Pat::Path(_)) {
             let (cond, binds) = self.pattern_guard(&init_op, &local.pat)?;
             let cond = cond.unwrap_or(mir::Operand::Const(1));
             let result = self.fresh_temp("long long");
@@ -1854,7 +1859,9 @@ impl Lower {
             self.current = then_blk;
             for (name, val) in binds {
                 if !self.func.locals.iter().any(|(n, _)| n == &name) {
-                    self.func.locals.push((name.clone(), Some("long long".into())));
+                    self.func
+                        .locals
+                        .push((name.clone(), Some("long long".into())));
                 }
                 self.emit(name, mir::Rvalue::Use(val));
             }
@@ -1962,11 +1969,7 @@ impl Lower {
     /// bindings (identifier in `Ident`/`Tuple`) are assigned the scrutinee (or
     /// the matching tuple element) before the body runs. The match value is the
     /// aggregated arm-body value, like `if`/`else`.
-    fn lower_match(
-        &mut self,
-        scrutinee: &Expr,
-        arms: &[(ast::Pat, Expr)],
-    ) -> Result<mir::Operand> {
+    fn lower_match(&mut self, scrutinee: &Expr, arms: &[(ast::Pat, Expr)]) -> Result<mir::Operand> {
         let scrut_op = self.lower_expr(scrutinee)?;
         let result = self.fresh_temp("long long");
         let merge = self.new_block();
@@ -2000,7 +2003,9 @@ impl Lower {
             // Emit bound pattern names (assigned the scrutinee / element value).
             for (name, val) in binds {
                 if !self.func.locals.iter().any(|(n, _)| n == &name) {
-                    self.func.locals.push((name.clone(), Some("long long".into())));
+                    self.func
+                        .locals
+                        .push((name.clone(), Some("long long".into())));
                 }
                 self.emit(name, mir::Rvalue::Use(val));
             }
@@ -2097,11 +2102,12 @@ impl Lower {
                     emit_str(&segments[0], self)?;
                     for (i, a) in placeholders.iter_mut().enumerate() {
                         let op = self.lower_expr(a)?;
-                        let printer = match self.temp_type_of(match &op {
-                            mir::Operand::Var(n) => n.as_str(),
-                            _ => "",
-                        })
-                        .as_str()
+                        let printer = match self
+                            .temp_type_of(match &op {
+                                mir::Operand::Var(n) => n.as_str(),
+                                _ => "",
+                            })
+                            .as_str()
                         {
                             t if t.contains("char*") => "print_str",
                             "double" => "print_f64",
@@ -2112,10 +2118,7 @@ impl Lower {
                         let t = self.fresh_temp("long long");
                         self.emit(
                             t.clone(),
-                            mir::Rvalue::Call(
-                                mir::Operand::Func(printer.to_string()),
-                                vec![op],
-                            ),
+                            mir::Rvalue::Call(mir::Operand::Func(printer.to_string()), vec![op]),
                         );
                         emit_str(&after, self)?;
                     }
@@ -2267,10 +2270,7 @@ impl Lower {
                     );
                     return Ok((Some(mir::Operand::var(cond)), Vec::new()));
                 }
-                Ok((
-                    None,
-                    vec![(n.node.clone(), scrut.clone())],
-                ))
+                Ok((None, vec![(n.node.clone(), scrut.clone())]))
             }
             ast::Pat::Wild => Ok((None, Vec::new())),
             ast::Pat::Ref(inner) => self.pattern_guard(scrut, inner),
@@ -2284,10 +2284,7 @@ impl Lower {
                 let cond = match (ca, cb) {
                     (Some(x), Some(y)) => {
                         let t = self.fresh_temp("long long");
-                        self.emit(
-                            t.clone(),
-                            mir::Rvalue::Binary(mir::BinOp::Or, x, y),
-                        );
+                        self.emit(t.clone(), mir::Rvalue::Binary(mir::BinOp::Or, x, y));
                         Some(mir::Operand::var(t))
                     }
                     (Some(x), None) | (None, Some(x)) => Some(x),
@@ -2335,10 +2332,7 @@ impl Lower {
                             mir::BinOp::Lt
                         };
                         let t = self.fresh_temp("long long");
-                        self.emit(
-                            t.clone(),
-                            mir::Rvalue::Binary(op, scrut.clone(), hi_op),
-                        );
+                        self.emit(t.clone(), mir::Rvalue::Binary(op, scrut.clone(), hi_op));
                         conds.push(mir::Operand::var(t));
                     } else {
                         return Err(LowerError(
@@ -2790,4 +2784,3 @@ fn lookup_field_type(structs: &[mir::StructDef], base_ty: &str, field: &str) -> 
         .and_then(|s| s.fields.iter().find(|(f, _)| f == field))
         .map(|(_, t)| t.clone())
 }
-

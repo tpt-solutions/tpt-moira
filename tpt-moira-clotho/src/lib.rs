@@ -122,4 +122,3 @@ fn flatten_items(items: Vec<ast::Item>, base: &Path) -> Result<Vec<ast::Item>, e
     }
     Ok(out)
 }
-

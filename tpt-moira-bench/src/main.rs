@@ -388,7 +388,9 @@ fn run_benchmark(
     );
     if moira_mode == MoiraMode::Check {
         println!("  note: `--full` measures Moira's complete semantic pipeline; the rustc");
-        println!("        baseline may still include native codegen/link unless `--rustc-mode full`.");
+        println!(
+            "        baseline may still include native codegen/link unless `--rustc-mode full`."
+        );
     }
     println!();
 
@@ -424,12 +426,8 @@ fn run_benchmark(
             .map(|bin| cc_pipeline(bin, &file))
             .unwrap_or((PathBuf::new(), Vec::new()));
 
-        let moira_ms = moira
-            .as_ref()
-            .and_then(|bin| time_cmd(bin, &m_args, ITERS));
-        let rustc_ms = rustc
-            .as_ref()
-            .and_then(|bin| time_cmd(bin, &r_args, ITERS));
+        let moira_ms = moira.as_ref().and_then(|bin| time_cmd(bin, &m_args, ITERS));
+        let rustc_ms = rustc.as_ref().and_then(|bin| time_cmd(bin, &r_args, ITERS));
         let cc_ms = if cc_args.is_empty() {
             None
         } else {
@@ -460,9 +458,13 @@ fn run_benchmark(
                 name,
                 moira_s,
                 cc_s,
-                cc_speedup.map(|x| format!("{x:>8.2}x")).unwrap_or_else(|| "   n/a".into()),
+                cc_speedup
+                    .map(|x| format!("{x:>8.2}x"))
+                    .unwrap_or_else(|| "   n/a".into()),
                 rustc_s,
-                rustc_speedup.map(|x| format!("{x:>8.2}x")).unwrap_or_else(|| "   n/a".into()),
+                rustc_speedup
+                    .map(|x| format!("{x:>8.2}x"))
+                    .unwrap_or_else(|| "   n/a".into()),
             );
         } else {
             println!(
@@ -470,7 +472,9 @@ fn run_benchmark(
                 name,
                 moira_s,
                 rustc_s,
-                rustc_speedup.map(|x| format!("{x:>8.2}x")).unwrap_or_else(|| "   n/a".into()),
+                rustc_speedup
+                    .map(|x| format!("{x:>8.2}x"))
+                    .unwrap_or_else(|| "   n/a".into()),
             );
         }
 
@@ -486,11 +490,7 @@ fn run_benchmark(
         // Remove the temp source and the emitted artifact(s) so repeated runs
         // and different crates don't leak temp files.
         let _ = std::fs::remove_file(&file);
-        for a in m_args
-            .iter()
-            .chain(r_args.iter())
-            .chain(cc_args.iter())
-        {
+        for a in m_args.iter().chain(r_args.iter()).chain(cc_args.iter()) {
             let _ = std::fs::remove_file(a);
         }
         let _ = std::fs::remove_file(&c_src_file);
@@ -507,9 +507,13 @@ fn run_benchmark(
             "geomean",
             "",
             "",
-            cc_geo.map(|x| format!("{x:>8.2}x")).unwrap_or_else(|| "   n/a".into()),
+            cc_geo
+                .map(|x| format!("{x:>8.2}x"))
+                .unwrap_or_else(|| "   n/a".into()),
             "",
-            rustc_geo.map(|x| format!("{x:>8.2}x")).unwrap_or_else(|| "   n/a".into()),
+            rustc_geo
+                .map(|x| format!("{x:>8.2}x"))
+                .unwrap_or_else(|| "   n/a".into()),
         );
     } else {
         println!(
@@ -517,16 +521,28 @@ fn run_benchmark(
             "geomean",
             "",
             "",
-            rustc_geo.map(|x| format!("{x:>8.2}x")).unwrap_or_else(|| "   n/a".into()),
+            rustc_geo
+                .map(|x| format!("{x:>8.2}x"))
+                .unwrap_or_else(|| "   n/a".into()),
         );
     }
 
     if let (Some(c), Some(r)) = (cc_geo, rustc_geo) {
         println!();
-        println!("  summary: Moira is {:.2}x faster than {} and {:.2}x faster than {}", c, cc_label, r, rustc_mode.label());
+        println!(
+            "  summary: Moira is {:.2}x faster than {} and {:.2}x faster than {}",
+            c,
+            cc_label,
+            r,
+            rustc_mode.label()
+        );
     } else if let Some(r) = rustc_geo {
         println!();
-        println!("  summary: Moira is {:.2}x faster than {}", r, rustc_mode.label());
+        println!(
+            "  summary: Moira is {:.2}x faster than {}",
+            r,
+            rustc_mode.label()
+        );
     }
 
     if cc_attempted && !cc_succeeded {
@@ -547,7 +563,10 @@ fn run_benchmark(
         };
         match append_run(results_dir, &run) {
             Ok(()) => {
-                println!("\n  recorded run -> {}", history_path(results_dir).display());
+                println!(
+                    "\n  recorded run -> {}",
+                    history_path(results_dir).display()
+                );
                 let hist = load_history(results_dir);
                 if hist.len() >= 2 {
                     let prev = &hist[hist.len() - 2];

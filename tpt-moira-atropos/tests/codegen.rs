@@ -244,7 +244,10 @@ fn enum_match_and_if_let_run() {
             return;
         }
     };
-    assert_eq!(out, "7\n0\n8", "expected describe(Some)=7, describe(None)=0, x+1=8");
+    assert_eq!(
+        out, "7\n0\n8",
+        "expected describe(Some)=7, describe(None)=0, x+1=8"
+    );
 }
 
 #[test]
@@ -369,7 +372,10 @@ fn array_index_and_let_bound_array_run() {
             return;
         }
     };
-    assert_eq!(out, "10\n30\n20", "expected arr[0]=10, arr[2]=30, arr[1]=20");
+    assert_eq!(
+        out, "10\n30\n20",
+        "expected arr[0]=10, arr[2]=30, arr[1]=20"
+    );
 }
 
 #[test]
@@ -423,9 +429,7 @@ fn while_let_identifier_pattern_runs() {
 fn for_over_array_lowers_to_index_loop() {
     // The array-`for` must lower to an index (`Rvalue::Index`) inside a loop,
     // not just a range counter.
-    let mir = lower_src(
-        "fn f() { let mut t = 0; for x in [1, 2, 3] { t = t + x; } let _ = t; }",
-    );
+    let mir = lower_src("fn f() { let mut t = 0; for x in [1, 2, 3] { t = t + x; } let _ = t; }");
     let f = mir.functions.iter().find(|f| f.name == "f").unwrap();
     let has_index = f.blocks.iter().any(|b| {
         b.stmts
@@ -441,11 +445,26 @@ fn tuple_lowers_to_generated_struct() {
     // / `t.1` to `.f0` / `.f1` field access on that struct.
     let mir = lower_src("fn main() { let p = (3, 4); let s = p.0 + p.1; print_i64(s); }");
     let c = tpt_moira_atropos::codegen_c::emit_c(&mir);
-    assert!(c.contains("struct __tuple_"), "tuple should lower to a struct:\n{c}");
-    assert!(c.contains(".f0 = 3"), "tuple element 0 should map to .f0:\n{c}");
-    assert!(c.contains(".f1 = 4"), "tuple element 1 should map to .f1:\n{c}");
-    assert!(c.contains("p.f0"), "tuple index 0 should lower to p.f0:\n{c}");
-    assert!(c.contains("p.f1"), "tuple index 1 should lower to p.f1:\n{c}");
+    assert!(
+        c.contains("struct __tuple_"),
+        "tuple should lower to a struct:\n{c}"
+    );
+    assert!(
+        c.contains(".f0 = 3"),
+        "tuple element 0 should map to .f0:\n{c}"
+    );
+    assert!(
+        c.contains(".f1 = 4"),
+        "tuple element 1 should map to .f1:\n{c}"
+    );
+    assert!(
+        c.contains("p.f0"),
+        "tuple index 0 should lower to p.f0:\n{c}"
+    );
+    assert!(
+        c.contains("p.f1"),
+        "tuple index 1 should lower to p.f1:\n{c}"
+    );
 }
 
 #[test]
@@ -484,7 +503,10 @@ fn tuple_destructure_from_call_lowers_and_runs() {
             return;
         }
     };
-    assert_eq!(out, "30", "expected 10+20 = 30 from destructured call result");
+    assert_eq!(
+        out, "30",
+        "expected 10+20 = 30 from destructured call result"
+    );
 }
 
 #[test]
@@ -493,8 +515,14 @@ fn tuple_destructure_literal_lowers_to_direct_assignments() {
     // assigned its component directly (no intermediate struct value).
     let mir = lower_src("fn main() { let (a, b) = (1, 2); let _ = a + b; }");
     let c = tpt_moira_atropos::codegen_c::emit_c(&mir);
-    assert!(c.contains("a = 1"), "first binding should be assigned directly:\n{c}");
-    assert!(c.contains("b = 2"), "second binding should be assigned directly:\n{c}");
+    assert!(
+        c.contains("a = 1"),
+        "first binding should be assigned directly:\n{c}"
+    );
+    assert!(
+        c.contains("b = 2"),
+        "second binding should be assigned directly:\n{c}"
+    );
 }
 
 #[test]
@@ -577,12 +605,16 @@ fn for_over_tuple_array_destructures_and_runs() {
 #[test]
 fn for_over_tuple_array_lowers_to_field_reads() {
     // The array-of-tuples element binds each component from its `.fN` field.
-    let mir = lower_src(
-        "fn f() { for (a, b) in [(1, 2), (3, 4)] { let _ = a + b; } }",
-    );
+    let mir = lower_src("fn f() { for (a, b) in [(1, 2), (3, 4)] { let _ = a + b; } }");
     let c = tpt_moira_atropos::codegen_c::emit_c(&mir);
-    assert!(c.contains("struct __tuple_"), "tuple array element needs a struct type:\n{c}");
-    assert!(c.contains(".f0"), "first component must be read via .f0:\n{c}");
+    assert!(
+        c.contains("struct __tuple_"),
+        "tuple array element needs a struct type:\n{c}"
+    );
+    assert!(
+        c.contains(".f0"),
+        "first component must be read via .f0:\n{c}"
+    );
 }
 
 #[test]
@@ -603,9 +635,12 @@ fn match_lowers_to_conditional_chain() {
     );
     let main = mir.functions.iter().find(|f| f.name == "main").unwrap();
     let has_eq = main.blocks.iter().any(|b| {
-        b.stmts
-            .iter()
-            .any(|s| matches!(s.rvalue, tpt_moira_atropos::mir::Rvalue::Binary(tpt_moira_atropos::mir::BinOp::Eq, _, _)))
+        b.stmts.iter().any(|s| {
+            matches!(
+                s.rvalue,
+                tpt_moira_atropos::mir::Rvalue::Binary(tpt_moira_atropos::mir::BinOp::Eq, _, _)
+            )
+        })
     });
     assert!(has_eq, "match literal arms should lower to Eq comparisons");
     // The wildcard arm is irrefutable — at least one `goto` (not an `if`) into an

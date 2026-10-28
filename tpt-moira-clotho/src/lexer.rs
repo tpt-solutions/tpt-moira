@@ -72,8 +72,9 @@ impl<'src> Lexer<'src> {
                 }
                 // Line comments: `//`, `///` (outer doc), and `//!` (inner doc)
                 // all start a comment that runs to end of line.
-                Some(b'/') if self.peek_byte_at(1) == Some(b'/')
-                    || self.peek_byte_at(1) == Some(b'!') => {
+                Some(b'/')
+                    if self.peek_byte_at(1) == Some(b'/') || self.peek_byte_at(1) == Some(b'!') =>
+                {
                     // line comment
                     while let Some(b) = self.peek_byte() {
                         if b == b'\n' {
@@ -127,35 +128,35 @@ impl<'src> Lexer<'src> {
             };
 
             let kind = match b {
-            b'0'..=b'9' => self.lex_number(),
-            // A `.` immediately followed by a digit is a leading-dot float
-            // literal (e.g. `.5`, `.5e3`); route it to the float lexer rather
-            // than producing a bare `Dot`/`DotDot` punctuation token.
-            b'.' if self.peek_byte_at(1).is_some_and(|c| c.is_ascii_digit()) => {
-                self.lex_leading_float()
+                b'0'..=b'9' => self.lex_number(),
+                // A `.` immediately followed by a digit is a leading-dot float
+                // literal (e.g. `.5`, `.5e3`); route it to the float lexer rather
+                // than producing a bare `Dot`/`DotDot` punctuation token.
+                b'.' if self.peek_byte_at(1).is_some_and(|c| c.is_ascii_digit()) => {
+                    self.lex_leading_float()
+                }
+                b'a'..=b'z' | b'A'..=b'Z' | b'_' => self.lex_ident_or_keyword(),
+                b'"' => self.lex_string(),
+                b'\'' => match self.lex_quote() {
+                    Some(k) => k,
+                    // A lifetime (`'a`, `'src`, `'_`, …) was consumed and dropped;
+                    // re-lex the following token.
+                    None => continue,
+                },
+                _ => self.lex_punct(),
+            };
+
+            // `Unknown` consumes a single byte so we always make forward progress.
+            if matches!(kind, TokenKind::Unknown(_)) {
+                self.bump();
             }
-            b'a'..=b'z' | b'A'..=b'Z' | b'_' => self.lex_ident_or_keyword(),
-            b'"' => self.lex_string(),
-            b'\'' => match self.lex_quote() {
-                Some(k) => k,
-                // A lifetime (`'a`, `'src`, `'_`, …) was consumed and dropped;
-                // re-lex the following token.
-                None => continue,
-            },
-            _ => self.lex_punct(),
-        };
 
-        // `Unknown` consumes a single byte so we always make forward progress.
-        if matches!(kind, TokenKind::Unknown(_)) {
-            self.bump();
-        }
-
-        let end = self.pos;
-        let _ = (start_line, start_col);
-        return Token {
-            kind,
-            span: Span::new(start, end),
-        };
+            let end = self.pos;
+            let _ = (start_line, start_col);
+            return Token {
+                kind,
+                span: Span::new(start, end),
+            };
         }
     }
 

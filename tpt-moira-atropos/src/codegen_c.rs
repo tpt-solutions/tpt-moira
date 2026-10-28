@@ -70,10 +70,7 @@ pub fn emit_c(prog: &mir::Program) -> String {
             .iter()
             .map(|f| s.spawn(|| emit_function(f, &struct_names, &void_names)))
             .collect();
-        handles
-            .into_iter()
-            .map(|h| h.join().unwrap())
-            .collect()
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
     });
     for b in bodies {
         out.push_str(&b);
@@ -154,39 +151,41 @@ fn emit_function(
     }
     out.push('\n');
 
-        for (i, block) in f.blocks.iter().enumerate() {
-            out.push_str(&format!("b{}:\n", i));
-            for s in &block.stmts {
-                match &s.rvalue {
-                    // StoreField renders its own full assignment (no destination).
-                    mir::Rvalue::StoreField(..) => {
-                        out.push_str(&format!("    {};\n", emit_rvalue(&s.rvalue)));
-                    }
-                    // An array literal is declared inline with its initializer
-                    // (`elem_ty name[len] = {..};`) — C does not allow assigning to
-                    // an array, so it cannot use the ordinary `place = rhs;` form.
-                    mir::Rvalue::Array(elem_ty, elems) => {
-                        let inits: Vec<String> = elems.iter().map(emit_operand).collect();
-                        out.push_str(&format!(
-                            "    {} {}[{}] = {{ {} }};\n",
-                            c_type(elem_ty, struct_names),
-                            s.place,
-                            elems.len(),
-                            inits.join(", ")
-                        ));
-                    }
-                    // A void call is emitted as a bare statement (no destination).
-                    mir::Rvalue::Call(callee, _) if matches!(
+    for (i, block) in f.blocks.iter().enumerate() {
+        out.push_str(&format!("b{}:\n", i));
+        for s in &block.stmts {
+            match &s.rvalue {
+                // StoreField renders its own full assignment (no destination).
+                mir::Rvalue::StoreField(..) => {
+                    out.push_str(&format!("    {};\n", emit_rvalue(&s.rvalue)));
+                }
+                // An array literal is declared inline with its initializer
+                // (`elem_ty name[len] = {..};`) — C does not allow assigning to
+                // an array, so it cannot use the ordinary `place = rhs;` form.
+                mir::Rvalue::Array(elem_ty, elems) => {
+                    let inits: Vec<String> = elems.iter().map(emit_operand).collect();
+                    out.push_str(&format!(
+                        "    {} {}[{}] = {{ {} }};\n",
+                        c_type(elem_ty, struct_names),
+                        s.place,
+                        elems.len(),
+                        inits.join(", ")
+                    ));
+                }
+                // A void call is emitted as a bare statement (no destination).
+                mir::Rvalue::Call(callee, _)
+                    if matches!(
                         callee,
                         mir::Operand::Func(n) if void_names.contains(n.as_str())
-                    ) => {
-                        out.push_str(&format!("    {};\n", emit_rvalue(&s.rvalue)));
-                    }
-                    _ => {
-                        out.push_str(&format!("    {} = {};\n", s.place, emit_rvalue(&s.rvalue)));
-                    }
+                    ) =>
+                {
+                    out.push_str(&format!("    {};\n", emit_rvalue(&s.rvalue)));
+                }
+                _ => {
+                    out.push_str(&format!("    {} = {};\n", s.place, emit_rvalue(&s.rvalue)));
                 }
             }
+        }
         out.push_str(&emit_terminator(&block.term));
         out.push('\n');
     }

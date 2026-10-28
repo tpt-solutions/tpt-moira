@@ -208,7 +208,9 @@ fn main() -> ExitCode {
             }
         },
         "asm" => {
-            match lower_and_ssa(&program).and_then(|ssa| tpt_moira_atropos::codegen_native::emit_asm(&ssa)) {
+            match lower_and_ssa(&program)
+                .and_then(|ssa| tpt_moira_atropos::codegen_native::emit_asm(&ssa))
+            {
                 Ok(asm) => emit_text(&asm, &output),
                 Err(e) => {
                     eprintln!("moira: native codegen error: {}", e);
@@ -219,7 +221,10 @@ fn main() -> ExitCode {
         "native" => match lower_and_ssa(&program) {
             Ok(ssa) => {
                 let out = output.unwrap_or_else(|| "moira_out".to_string());
-                match tpt_moira_atropos::codegen_native::compile_to_native(&ssa, std::path::Path::new(&out)) {
+                match tpt_moira_atropos::codegen_native::compile_to_native(
+                    &ssa,
+                    std::path::Path::new(&out),
+                ) {
                     Ok(()) => println!("moira: wrote native executable to `{}`", out),
                     Err(e) => {
                         eprintln!("moira: native codegen error: {}", e);
@@ -250,7 +255,9 @@ fn pipeline() -> PipelineCacheExt {
     PipelineCacheExt::new()
 }
 
-fn lower_and_ssa(program: &tpt_moira_clotho::ast::Program) -> Result<tpt_moira_atropos::SsaProgram, String> {
+fn lower_and_ssa(
+    program: &tpt_moira_clotho::ast::Program,
+) -> Result<tpt_moira_atropos::SsaProgram, String> {
     let mir = tpt_moira_atropos::lower_program(program).map_err(|e| e.to_string())?;
     let mut ssa = tpt_moira_atropos::build_ssa(&mir)?;
     ssa.optimize();

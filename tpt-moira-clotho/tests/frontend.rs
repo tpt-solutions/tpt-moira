@@ -244,9 +244,10 @@ fn macro_tokens_keep_nested_parens() {
             for stmt in &f.body.stmts {
                 if let StmtKind::Semi(e) | StmtKind::Expr(e) = &stmt.kind {
                     if let ExprKind::Macro(m) = &e.kind {
-                        let has_parens = m.tokens.iter().any(|t| {
-                            matches!(t.kind, TokenKind::LParen | TokenKind::RParen)
-                        });
+                        let has_parens = m
+                            .tokens
+                            .iter()
+                            .any(|t| matches!(t.kind, TokenKind::LParen | TokenKind::RParen));
                         assert!(has_parens, "nested parens dropped from macro tokens");
                         found = true;
                     }
@@ -318,7 +319,8 @@ fn parse_variant_pattern_with_payload() {
     // Regression: tuple-variant patterns `Some(x)` / `Ok(v)` / `Err(e)` must
     // parse with their payload retained (Previously the payload was discarded,
     // so the bound name `x` was never produced). `Pat::Variant` now carries it.
-    let src = "fn f(o: i32) -> i32 {\n    match o {\n        Some(x) => x,\n        None => 0,\n    }\n}";
+    let src =
+        "fn f(o: i32) -> i32 {\n    match o {\n        Some(x) => x,\n        None => 0,\n    }\n}";
     let prog = parse_source(src).unwrap();
     assert_eq!(prog.items.len(), 1);
 }
