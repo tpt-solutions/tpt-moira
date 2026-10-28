@@ -245,7 +245,8 @@ fn content_addressed_cache_round_trips() {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    let dir = std::env::temp_dir().join(format!("moira_cache_test_{}_{}", std::process::id(), nanos));
+    let dir =
+        std::env::temp_dir().join(format!("moira_cache_test_{}_{}", std::process::id(), nanos));
     let cache = Cache::open(&dir).expect("open cache");
     let key = content_hash("fn main() {}");
     assert!(!cache.contains(key));
@@ -525,44 +526,59 @@ fn tuple_values_type_check() {
 #[test]
 fn tuple_destructure_type_checks() {
     // `let (a, b) = tuple` binds each element to its component type.
-    assert!(type_ok(
-        "fn main() {
+    assert!(
+        type_ok(
+            "fn main() {
             let p = (3, 4);
             let (a, b) = p;
             let _ = a + b;
         }"
-    ), "bind from existing tuple var");
+        ),
+        "bind from existing tuple var"
+    );
     // Tuple-literal RHS binds each component directly.
-    assert!(type_ok(
-        "fn main() {
+    assert!(
+        type_ok(
+            "fn main() {
             let (a, b) = (1, 2);
             let _ = a + b;
         }"
-    ), "bind from tuple literal");
+        ),
+        "bind from tuple literal"
+    );
     // Mixed-element tuples destructure to the element types.
-    assert!(type_ok(
-        "fn main() {
+    assert!(
+        type_ok(
+            "fn main() {
             let (a, b, c) = (1, true, 2);
             let _ = a + c;
             let _ = b;
         }"
-    ), "bind from mixed-element tuple");
+        ),
+        "bind from mixed-element tuple"
+    );
     // An explicit tuple-type annotation is honored.
-    assert!(type_ok(
-        "fn main() {
+    assert!(
+        type_ok(
+            "fn main() {
             let p: (i32, i32) = (7, 8);
             let (a, b) = p;
             let _ = a - b;
         }"
-    ), "bind with annotated tuple type");
+        ),
+        "bind with annotated tuple type"
+    );
     // Binding a name then using it in a member call must not be rejected.
-    assert!(type_ok(
-        "fn main() {
+    assert!(
+        type_ok(
+            "fn main() {
             let (x, y) = (1, 2);
             let z = x + y;
             let _ = z;
         }"
-    ), "bind then use");
+        ),
+        "bind then use"
+    );
 }
 
 #[test]

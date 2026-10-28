@@ -520,7 +520,9 @@ pub fn builtin_trait_id(name: &str) -> Option<TraitId> {
 /// their self-types can be unified — including generic `impl`s whose self-types
 /// unify for some instantiation. Returns `(span, message)` pairs for each
 /// detected overlap.
-pub fn coherence_report(prog: &tpt_moira_clotho::ast::Program) -> Vec<(tpt_moira_clotho::token::Span, String)> {
+pub fn coherence_report(
+    prog: &tpt_moira_clotho::ast::Program,
+) -> Vec<(tpt_moira_clotho::token::Span, String)> {
     let mut impls: Vec<&tpt_moira_clotho::ast::ImplDef> = Vec::new();
     for item in &prog.items {
         if let tpt_moira_clotho::ast::ItemKind::Impl(imp) = &item.kind {
@@ -569,7 +571,9 @@ pub fn coherence_report(prog: &tpt_moira_clotho::ast::Program) -> Vec<(tpt_moira
 /// and a primitive or built-in type must actually satisfy `Bound`; otherwise the
 /// `impl` is ill-formed. Predicates over user struct types are skipped because
 /// they require full generic instantiation, which is out of scope here.
-pub fn well_formedness_report(prog: &tpt_moira_clotho::ast::Program) -> Vec<(tpt_moira_clotho::token::Span, String)> {
+pub fn well_formedness_report(
+    prog: &tpt_moira_clotho::ast::Program,
+) -> Vec<(tpt_moira_clotho::token::Span, String)> {
     let solver = Solver::new(program_with_impls(prog));
     let mut errors = Vec::new();
     for item in &prog.items {
@@ -581,7 +585,11 @@ pub fn well_formedness_report(prog: &tpt_moira_clotho::ast::Program) -> Vec<(tpt
         for (k, p) in imp.generics.params.iter().enumerate() {
             vars.insert(p.name.node.clone(), k);
         }
-        let mut predicates: Vec<(tpt_moira_clotho::ast::Type, String, tpt_moira_clotho::token::Span)> = Vec::new();
+        let mut predicates: Vec<(
+            tpt_moira_clotho::ast::Type,
+            String,
+            tpt_moira_clotho::token::Span,
+        )> = Vec::new();
         for p in &imp.generics.params {
             for bound in &p.bounds {
                 let param_ty = tpt_moira_clotho::ast::Type {

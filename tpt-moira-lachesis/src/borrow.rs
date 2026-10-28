@@ -25,9 +25,9 @@
 //!   — neither a second `&mut` nor a shared `&` — forbidding aliased mutable
 //!   borrows that Rust rejects.
 
+use std::collections::{HashMap, HashSet};
 use tpt_moira_atropos::mir::{Operand, Rvalue, Terminator};
 use tpt_moira_clotho::error::Diag;
-use std::collections::{HashMap, HashSet};
 
 /// Check every function in `prog` for borrow violations.
 pub fn borrow_check(prog: &tpt_moira_atropos::mir::Program) -> Result<(), Vec<Diag>> {
@@ -311,10 +311,11 @@ fn reachable_from(start: usize, succs: &[Vec<usize>]) -> HashSet<usize> {
 
 fn operands_of(rv: &Rvalue) -> Vec<String> {
     match rv {
-        Rvalue::Use(o) | Rvalue::Unary(_, o) | Rvalue::Ref(o, _) | Rvalue::Field(o, _, _)
-        | Rvalue::Cast(o, _) => {
-            names(o)
-        }
+        Rvalue::Use(o)
+        | Rvalue::Unary(_, o)
+        | Rvalue::Ref(o, _)
+        | Rvalue::Field(o, _, _)
+        | Rvalue::Cast(o, _) => names(o),
         Rvalue::Array(_, elems) => elems.iter().flat_map(names).collect(),
         Rvalue::Index(b, i) => {
             let mut v = names(b);

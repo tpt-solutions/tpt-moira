@@ -10,13 +10,13 @@
 
 use crate::traits::{BuiltinTrait, TraitDb};
 use crate::ty::Ty;
+use std::collections::{HashMap, HashSet};
 use tpt_moira_clotho::ast::{
     BinOp, Block, Expr, ExprKind, Generics, Lit, Local, Param, Pat, Path, StmtKind, Type,
     TypeBound, TypeKind, UnOp,
 };
 use tpt_moira_clotho::error::Diag;
 use tpt_moira_clotho::token::Span;
-use std::collections::{HashMap, HashSet};
 
 /// A struct's resolved field types.
 #[derive(Debug, Clone)]
@@ -135,9 +135,9 @@ impl TypeChecker {
         }
         // Seed the trait solver with the user `impl` clauses so user-defined
         // trait bounds (e.g. `T: Show`) can be enforced at generic call sites.
-        cx.solver = Some(crate::solver::Solver::new(crate::solver::program_with_impls(
-            prog,
-        )));
+        cx.solver = Some(crate::solver::Solver::new(
+            crate::solver::program_with_impls(prog),
+        ));
         // Pass 1: collect struct and function signatures so callers may refer to
         // functions defined later in the file (forward references). Items
         // gated behind `#[cfg(test)]` (e.g. `mod tests`) are skipped — test
@@ -182,19 +182,17 @@ impl TypeChecker {
                         // (`impl Allowlist { const DEFAULT_FILE: &str = ..; }`)
                         // resolve as `Type::CONST` two-segment paths.
                         if let tpt_moira_clotho::ast::ItemKind::Const(c) = &m.kind {
-                            let ty = c.ty.as_ref().map(|t| cx.type_to_ty(t)).unwrap_or(Ty::Unknown);
+                            let ty =
+                                c.ty.as_ref()
+                                    .map(|t| cx.type_to_ty(t))
+                                    .unwrap_or(Ty::Unknown);
                             cx.assoc_consts
                                 .insert((self_name.clone(), c.name.node.clone()), ty);
                             continue;
                         }
                         if let tpt_moira_clotho::ast::ItemKind::Function(f) = &m.kind {
-                            let params =
-                                f.params.iter().map(|p| cx.type_to_ty(&p.ty)).collect();
-                            let ret = f
-                                .ret
-                                .as_ref()
-                                .map(|t| cx.type_to_ty(t))
-                                .unwrap_or(Ty::Unit);
+                            let params = f.params.iter().map(|p| cx.type_to_ty(&p.ty)).collect();
+                            let ret = f.ret.as_ref().map(|t| cx.type_to_ty(t)).unwrap_or(Ty::Unit);
                             cx.user_methods.insert(
                                 (self_name.clone(), f.name.node.clone()),
                                 FnSig {
@@ -207,21 +205,10 @@ impl TypeChecker {
                             // Also index the method under its trait so that
                             // trait-bound method resolution (`T: Show` →
                             // `t.show()`) can find it via the solver.
-                            let params2 = f
-                                .params
-                                .iter()
-                                .map(|p| cx.type_to_ty(&p.ty))
-                                .collect();
-                            let ret2 = f
-                                .ret
-                                .as_ref()
-                                .map(|t| cx.type_to_ty(t))
-                                .unwrap_or(Ty::Unit);
+                            let params2 = f.params.iter().map(|p| cx.type_to_ty(&p.ty)).collect();
+                            let ret2 = f.ret.as_ref().map(|t| cx.type_to_ty(t)).unwrap_or(Ty::Unit);
                             cx.trait_methods.insert(
-                                (
-                                    imp.trait_name.node.clone(),
-                                    f.name.node.clone(),
-                                ),
+                                (imp.trait_name.node.clone(), f.name.node.clone()),
                                 FnSig {
                                     params: params2,
                                     ret: ret2,
@@ -263,7 +250,10 @@ impl TypeChecker {
                     // Top-level constants are usable as bare values; the
                     // declared type (when present) is their type, otherwise
                     // they absorb any use.
-                    let ty = c.ty.as_ref().map(|t| cx.type_to_ty(t)).unwrap_or(Ty::Unknown);
+                    let ty =
+                        c.ty.as_ref()
+                            .map(|t| cx.type_to_ty(t))
+                            .unwrap_or(Ty::Unknown);
                     cx.values.insert(c.name.node.clone(), ty);
                 }
                 tpt_moira_clotho::ast::ItemKind::Static(s) => {
@@ -345,21 +335,13 @@ impl TypeChecker {
     /// so each function is reachable as `crate::name`, `module::name`, and
     /// bare `name` (locals shadow externs because local Pass 1 runs later).
     fn register_extern(&mut self, crate_name: &str, prog: &tpt_moira_clotho::ast::Program) {
-        Self::collect_extern_items(
-            crate_name.to_string(),
-            Vec::new(),
-            &prog.items,
-            self,
-        );
+        Self::collect_extern_items(crate_name.to_string(), Vec::new(), &prog.items, self);
     }
 
     /// Register an enum's **nullary** variants as associated constants so
     /// `EnumName::Variant` used as a *value* (not a pattern) resolves to the
     /// enum's type (`TokenKind::Fn`, `Ordering::Less`, …).
-    fn register_enum_variants(
-        e: &tpt_moira_clotho::ast::EnumDef,
-        cx: &mut TypeChecker,
-    ) {
+    fn register_enum_variants(e: &tpt_moira_clotho::ast::EnumDef, cx: &mut TypeChecker) {
         let enum_ty = tpt_moira_clotho::ast::Type {
             kind: tpt_moira_clotho::ast::TypeKind::Path(
                 tpt_moira_clotho::ast::Path {
@@ -387,10 +369,8 @@ impl TypeChecker {
                         generics: Generics::default(),
                     };
                     cx.fns.insert(v.name.node.clone(), sig.clone());
-                    cx.assoc_fns.insert(
-                        (e.name.node.clone(), v.name.node.clone()),
-                        sig,
-                    );
+                    cx.assoc_fns
+                        .insert((e.name.node.clone(), v.name.node.clone()), sig);
                 }
             }
         }
@@ -439,16 +419,12 @@ impl TypeChecker {
                     // Bare-name fallback (locals registered later win).
                     cx.fns.insert(f.name.node.clone(), sig.clone());
                     // `crate::name`.
-                    cx.assoc_fns.insert(
-                        (crate_name.clone(), f.name.node.clone()),
-                        sig.clone(),
-                    );
+                    cx.assoc_fns
+                        .insert((crate_name.clone(), f.name.node.clone()), sig.clone());
                     // `module::name` for the innermost enclosing module.
                     if let Some(mod_name) = path.last() {
-                        cx.assoc_fns.insert(
-                            (mod_name.clone(), f.name.node.clone()),
-                            sig,
-                        );
+                        cx.assoc_fns
+                            .insert((mod_name.clone(), f.name.node.clone()), sig);
                     }
                 }
                 tpt_moira_clotho::ast::ItemKind::Struct(s) => {
@@ -492,7 +468,10 @@ impl TypeChecker {
                         // Associated constants on extern impls resolve as
                         // `Type::CONST` two-segment paths too.
                         if let tpt_moira_clotho::ast::ItemKind::Const(c) = &m.kind {
-                            let ty = c.ty.as_ref().map(|t| cx.type_to_ty(t)).unwrap_or(Ty::Unknown);
+                            let ty =
+                                c.ty.as_ref()
+                                    .map(|t| cx.type_to_ty(t))
+                                    .unwrap_or(Ty::Unknown);
                             cx.assoc_consts
                                 .insert((self_name.clone(), c.name.node.clone()), ty);
                             continue;
@@ -504,15 +483,12 @@ impl TypeChecker {
                             // signature so call sites can recognize `F`.
                             let mut generics = imp.generics.clone();
                             generics.params.extend(f.generics.params.clone());
-                            generics.where_clause.extend(f.generics.where_clause.clone());
+                            generics
+                                .where_clause
+                                .extend(f.generics.where_clause.clone());
                             cx.generic_scope.push(f.generics.clone());
-                            let params =
-                                f.params.iter().map(|p| cx.type_to_ty(&p.ty)).collect();
-                            let ret = f
-                                .ret
-                                .as_ref()
-                                .map(|t| cx.type_to_ty(t))
-                                .unwrap_or(Ty::Unit);
+                            let params = f.params.iter().map(|p| cx.type_to_ty(&p.ty)).collect();
+                            let ret = f.ret.as_ref().map(|t| cx.type_to_ty(t)).unwrap_or(Ty::Unit);
                             cx.generic_scope.pop();
                             let sig = FnSig {
                                 params,
@@ -520,10 +496,8 @@ impl TypeChecker {
                                 is_async: f.is_async,
                                 generics,
                             };
-                            cx.user_methods.insert(
-                                (self_name.clone(), f.name.node.clone()),
-                                sig,
-                            );
+                            cx.user_methods
+                                .insert((self_name.clone(), f.name.node.clone()), sig);
                         }
                     }
                     cx.self_type = None;
@@ -536,12 +510,7 @@ impl TypeChecker {
                     if let tpt_moira_clotho::ast::ModuleKind::Inline(sub) = &m.kind {
                         let mut sub_path = path.clone();
                         sub_path.push(m.name.node.clone());
-                        Self::collect_extern_items(
-                            crate_name.clone(),
-                            sub_path,
-                            sub,
-                            cx,
-                        );
+                        Self::collect_extern_items(crate_name.clone(), sub_path, sub, cx);
                     }
                 }
                 _ => {}
@@ -616,7 +585,9 @@ impl TypeChecker {
                 StmtKind::Semi(e) | StmtKind::Expr(e) => {
                     last_stmt_ty = self.infer_expr(e);
                 }
-                StmtKind::Item(item) if matches!(item.kind, tpt_moira_clotho::ast::ItemKind::Use(_)) => {
+                StmtKind::Item(item)
+                    if matches!(item.kind, tpt_moira_clotho::ast::ItemKind::Use(_)) =>
+                {
                     // A function-local `use …` declaration is a no-op in the
                     // Phase-1 subset (imports are not resolved).
                 }
@@ -654,12 +625,7 @@ impl TypeChecker {
     /// patterns of identifiers (`(a, b)` — binds each element). Unsupported
     /// patterns (enum tuple/struct variant destructuring) are rejected with a
     /// precise diagnostic.
-    fn infer_match(
-        &mut self,
-        span: Span,
-        scrutinee: &Expr,
-        arms: &[(Pat, Expr)],
-    ) -> Ty {
+    fn infer_match(&mut self, span: Span, scrutinee: &Expr, arms: &[(Pat, Expr)]) -> Ty {
         let _scrut_ty = self.infer_expr(scrutinee);
         let mut result_ty = Ty::Unknown;
         let mut first = true;
@@ -737,7 +703,10 @@ impl TypeChecker {
     fn bind_pattern(&mut self, pat: &Pat, scrut_ty: &Ty) {
         match pat {
             Pat::Ident(n) => {
-                self.env.last_mut().unwrap().insert(n.node.clone(), scrut_ty.clone());
+                self.env
+                    .last_mut()
+                    .unwrap()
+                    .insert(n.node.clone(), scrut_ty.clone());
             }
             Pat::Wild => {}
             Pat::Ref(inner) => self.bind_pattern(inner, scrut_ty),
@@ -749,7 +718,10 @@ impl TypeChecker {
                 if let Ty::Tuple(tys) = scrut_ty {
                     for (e, t) in elems.iter().zip(tys.iter()) {
                         if let Pat::Ident(n) = e {
-                            self.env.last_mut().unwrap().insert(n.node.clone(), t.clone());
+                            self.env
+                                .last_mut()
+                                .unwrap()
+                                .insert(n.node.clone(), t.clone());
                         }
                     }
                 }
@@ -913,7 +885,11 @@ impl TypeChecker {
         // Identifier patterns bind the whole `init` value; variant patterns bind
         // their payload to the variant's element type.
         let vname = match &local.pat {
-            Pat::Variant(p, _) => p.segments.last().map(|s| s.node.clone()).unwrap_or_default(),
+            Pat::Variant(p, _) => p
+                .segments
+                .last()
+                .map(|s| s.node.clone())
+                .unwrap_or_default(),
             _ => String::new(),
         };
         let bind_ty = if matches!(local.pat, Pat::Variant(..)) {
@@ -954,7 +930,11 @@ impl TypeChecker {
             None => Ty::Unit,
         };
         let vname = match &local.pat {
-            Pat::Variant(p, _) => p.segments.last().map(|s| s.node.clone()).unwrap_or_default(),
+            Pat::Variant(p, _) => p
+                .segments
+                .last()
+                .map(|s| s.node.clone())
+                .unwrap_or_default(),
             _ => String::new(),
         };
         let bind_ty = if matches!(local.pat, Pat::Variant(..)) {
@@ -1121,10 +1101,7 @@ impl TypeChecker {
                     other => {
                         self.err(
                             span,
-                            format!(
-                                "`for` iterator must be a range or array, found {}",
-                                other
-                            ),
+                            format!("`for` iterator must be a range or array, found {}", other),
                         );
                         Ty::Unknown
                     }
@@ -1150,9 +1127,7 @@ impl TypeChecker {
                 Ty::Never
             }
             ExprKind::Break | ExprKind::Continue => Ty::Never,
-            ExprKind::Match(scrutinee, arms) => {
-                self.infer_match(span, scrutinee, arms)
-            }
+            ExprKind::Match(scrutinee, arms) => self.infer_match(span, scrutinee, arms),
             ExprKind::MethodCall(recv, method, args) => self.check_method(span, recv, method, args),
             ExprKind::Array(elems) => {
                 // Every element must share a common element type; the array's
@@ -1216,9 +1191,7 @@ impl TypeChecker {
                 }
             }
             ExprKind::Unsafe(b) => self.infer_block(b),
-            ExprKind::Closure { params, ret, body } => {
-                self.check_closure(span, params, ret, body)
-            }
+            ExprKind::Closure { params, ret, body } => self.check_closure(span, params, ret, body),
             ExprKind::Macro(m) => {
                 // Builtin `println!`-family macros are type-checked with real
                 // (re-parsed) arguments; their result types mirror Rust.
@@ -1230,9 +1203,9 @@ impl TypeChecker {
                     .unwrap_or_default();
                 match name.as_str() {
                     "println" | "eprintln" | "print" | "eprint" => {
-                        for a in tpt_moira_clotho::parser::Parser::parse_macro_args(
-                            m.tokens.clone(),
-                        ) {
+                        for a in
+                            tpt_moira_clotho::parser::Parser::parse_macro_args(m.tokens.clone())
+                        {
                             self.infer_expr(&a);
                         }
                         Ty::Unit
@@ -1241,7 +1214,10 @@ impl TypeChecker {
                         let args =
                             tpt_moira_clotho::parser::Parser::parse_macro_args(m.tokens.clone());
                         if args.is_empty() {
-                            self.err(span, "format! requires at least a format string".to_string());
+                            self.err(
+                                span,
+                                "format! requires at least a format string".to_string(),
+                            );
                         }
                         for a in args {
                             self.infer_expr(&a);
@@ -1256,10 +1232,7 @@ impl TypeChecker {
                         let args =
                             tpt_moira_clotho::parser::Parser::parse_macro_args(m.tokens.clone());
                         if args.len() != 2 {
-                            self.err(
-                                span,
-                                "matches! expects exactly 2 arguments".to_string(),
-                            );
+                            self.err(span, "matches! expects exactly 2 arguments".to_string());
                         }
                         for a in &args {
                             self.infer_expr(a);
@@ -1274,7 +1247,10 @@ impl TypeChecker {
                         let args =
                             tpt_moira_clotho::parser::Parser::parse_macro_args(m.tokens.clone());
                         if args.len() < 2 {
-                            self.err(span, "write! requires a formatter and format string".to_string());
+                            self.err(
+                                span,
+                                "write! requires a formatter and format string".to_string(),
+                            );
                         }
                         for a in &args {
                             self.infer_expr(a);
@@ -1516,12 +1492,12 @@ impl TypeChecker {
                     // model stand in for the real impl.
                     let std_lenient = matches!(concrete, Ty::Unknown | Ty::Never)
                         || matches!(concrete,
-                            Ty::Struct(n) | Ty::Apply(n, _)
-                            if matches!(
-                                n.as_str(),
-                                "String" | "Vec" | "Option" | "Result" | "Path"
-                                    | "PathBuf" | "Cow" | "TokenKind"
-                            ));
+                        Ty::Struct(n) | Ty::Apply(n, _)
+                        if matches!(
+                            n.as_str(),
+                            "String" | "Vec" | "Option" | "Result" | "Path"
+                                | "PathBuf" | "Cow" | "TokenKind"
+                        ));
                     if !std_lenient && !TraitDb::implements(bt, concrete) {
                         cx.err(
                             span,
@@ -1565,7 +1541,11 @@ impl TypeChecker {
             // parameter with an inferred concrete type).
             for pred in &sig.generics.where_clause {
                 if let tpt_moira_clotho::ast::TypeKind::Path(p, _) = &pred.ty.kind {
-                    let pname = p.segments.last().map(|s| s.node.clone()).unwrap_or_default();
+                    let pname = p
+                        .segments
+                        .last()
+                        .map(|s| s.node.clone())
+                        .unwrap_or_default();
                     if let Some(concrete) = sub.get(&pname) {
                         for bound in &pred.bounds {
                             let bn = bound_trait_name_str(bound);
@@ -1589,7 +1569,12 @@ impl TypeChecker {
         }
     }
 
-    fn check_field(&mut self, span: Span, base: &Expr, field: &tpt_moira_clotho::ast::Spanned<String>) -> Ty {
+    fn check_field(
+        &mut self,
+        span: Span,
+        base: &Expr,
+        field: &tpt_moira_clotho::ast::Spanned<String>,
+    ) -> Ty {
         let bt = self.infer_expr(base);
         // Field access auto-derefs through `&`/`&mut` (so `self.x` works when
         // `self` is `&Foo`).
@@ -1870,11 +1855,12 @@ impl TypeChecker {
         method: &str,
         args: &[Expr],
     ) -> Option<Ty> {
-
         if let Ty::Generic(pname) = recv_ty {
             for tr in self.generic_bounds_of(pname) {
-                if let Some(sig) =
-                    self.trait_methods.get(&(tr.clone(), method.to_string())).cloned()
+                if let Some(sig) = self
+                    .trait_methods
+                    .get(&(tr.clone(), method.to_string()))
+                    .cloned()
                 {
                     return Some(self.check_user_method(span, recv_ty, &sig, args));
                 }
@@ -1904,14 +1890,10 @@ impl TypeChecker {
             let implemented = self
                 .solver
                 .as_ref()
-                .map(|s| {
-                    s.implements_trait(crate::solver::TraitId::User(tr.clone()), &query_ty)
-                })
+                .map(|s| s.implements_trait(crate::solver::TraitId::User(tr.clone()), &query_ty))
                 .unwrap_or(false);
             if implemented {
-                if let Some(sig) =
-                    self.trait_methods.get(&(tr.clone(), method.to_string()))
-                {
+                if let Some(sig) = self.trait_methods.get(&(tr.clone(), method.to_string())) {
                     matches.push((tr, sig.clone()));
                 }
             }
@@ -1963,13 +1945,7 @@ impl TypeChecker {
     /// The receiver must satisfy the method's first parameter (the receiver
     /// type, with auto-ref/auto-mut-ref, matching Rust's method resolution),
     /// and the remaining arguments must satisfy the rest of the signature.
-    fn check_user_method(
-        &mut self,
-        span: Span,
-        recv_ty: &Ty,
-        sig: &FnSig,
-        args: &[Expr],
-    ) -> Ty {
+    fn check_user_method(&mut self, span: Span, recv_ty: &Ty, sig: &FnSig, args: &[Expr]) -> Ty {
         // Receiver check (auto-ref: `x.foo()` where `foo(&self)`).
         if !sig.params.is_empty() {
             let recv_param = &sig.params[0];
@@ -2153,8 +2129,10 @@ impl TypeChecker {
             .insert(("str".into(), "len".into()), sig(vec![], Usize));
         self.methods
             .insert(("str".into(), "is_empty".into()), sig(vec![], Bool));
-        self.methods
-            .insert(("str".into(), "to_string".into()), sig(vec![], std("String")));
+        self.methods.insert(
+            ("str".into(), "to_string".into()),
+            sig(vec![], std("String")),
+        );
         // Methods on `RefCell<T>` (interior mutability, as used by the
         // compiler's own arena in `moira-alloc`).
         self.methods.insert(
@@ -2181,15 +2159,17 @@ impl TypeChecker {
             ("PathBuf".into(), "join".into()),
             sig(vec![Ref(Box::new(Str))], std("PathBuf")),
         );
-        self.methods
-            .insert(("Path".into(), "join".into()), sig(vec![Ref(Box::new(Str))], std("PathBuf")));
+        self.methods.insert(
+            ("Path".into(), "join".into()),
+            sig(vec![Ref(Box::new(Str))], std("PathBuf")),
+        );
 
         // `to_string` on the numeric/primitive types (via the standard
         // `ToString` trait, modeled per receiver type name), plus the
         // `saturating_*` arithmetic helpers the compiler's own code uses.
         for prim in [
-            "i32", "Int", "i64", "I64", "u8", "U8", "u32", "U32", "usize",
-            "Usize", "f64", "F64", "u128", "U128", "i128", "I128",
+            "i32", "Int", "i64", "I64", "u8", "U8", "u32", "U32", "usize", "Usize", "f64", "F64",
+            "u128", "U128", "i128", "I128",
         ] {
             self.methods.insert(
                 (prim.to_string(), "to_string".into()),
@@ -2218,17 +2198,18 @@ impl TypeChecker {
         );
         self.assoc_fns.insert(
             ("fs".into(), "read_to_string".into()),
-            sig(vec![Ref(Box::new(Str))], Apply("Result".to_string(), vec![Str])),
+            sig(
+                vec![Ref(Box::new(Str))],
+                Apply("Result".to_string(), vec![Str]),
+            ),
         );
         self.assoc_fns.insert(
             // Real `Path::new` returns `&Path`.
             ("Path".into(), "new".into()),
             sig(vec![Ref(Box::new(Str))], Ref(Box::new(std("Path")))),
         );
-        self.assoc_fns.insert(
-            ("io".into(), "stdin".into()),
-            sig(vec![], std("Stdin")),
-        );
+        self.assoc_fns
+            .insert(("io".into(), "stdin".into()), sig(vec![], std("Stdin")));
         self.assoc_fns.insert(
             ("Command".into(), "new".into()),
             sig(vec![Ref(Box::new(Str))], std("Command")),
@@ -2236,14 +2217,22 @@ impl TypeChecker {
         // Builder-style `Command` methods and process/file surface used by the
         // driver (modeled loosely: builder methods return the type back,
         // terminal ones return modeled results).
-        self.methods
-            .insert(("Command".into(), "args".into()), sig(vec![Unknown], std("Command")));
-        self.methods
-            .insert(("Command".into(), "arg".into()), sig(vec![Str], std("Command")));
-        self.methods
-            .insert(("Command".into(), "status".into()), sig(vec![], std("ExitStatus")));
-        self.methods
-            .insert(("Command".into(), "output".into()), sig(vec![], std("Output")));
+        self.methods.insert(
+            ("Command".into(), "args".into()),
+            sig(vec![Unknown], std("Command")),
+        );
+        self.methods.insert(
+            ("Command".into(), "arg".into()),
+            sig(vec![Str], std("Command")),
+        );
+        self.methods.insert(
+            ("Command".into(), "status".into()),
+            sig(vec![], std("ExitStatus")),
+        );
+        self.methods.insert(
+            ("Command".into(), "output".into()),
+            sig(vec![], std("Output")),
+        );
         self.methods.insert(
             ("Option".into(), "map".into()),
             sig(vec![Unknown], std("Option")),
@@ -2256,10 +2245,8 @@ impl TypeChecker {
             ("Option".into(), "unwrap_or_else".into()),
             sig(vec![Unknown], Unknown),
         );
-        self.methods.insert(
-            ("Option".into(), "as_deref".into()),
-            sig(vec![], Unknown),
-        );
+        self.methods
+            .insert(("Option".into(), "as_deref".into()), sig(vec![], Unknown));
         self.assoc_fns
             .insert(("Stdio".into(), "piped".into()), sig(vec![], std("Stdio")));
         self.assoc_fns.insert(
@@ -2276,11 +2263,17 @@ impl TypeChecker {
         );
         self.assoc_fns.insert(
             ("fs".into(), "remove_file".into()),
-            sig(vec![Ref(Box::new(std("Path")))], Apply("Result".to_string(), vec![Unit])),
+            sig(
+                vec![Ref(Box::new(std("Path")))],
+                Apply("Result".to_string(), vec![Unit]),
+            ),
         );
         self.assoc_fns.insert(
             ("fs".into(), "open".into()),
-            sig(vec![Ref(Box::new(std("Path")))], Apply("Result".to_string(), vec![std("File")])),
+            sig(
+                vec![Ref(Box::new(std("Path")))],
+                Apply("Result".to_string(), vec![std("File")]),
+            ),
         );
         self.assoc_fns.insert(
             ("fs".into(), "write".into()),
@@ -2291,7 +2284,10 @@ impl TypeChecker {
         );
         self.assoc_fns.insert(
             ("File".into(), "open".into()),
-            sig(vec![Ref(Box::new(std("Path")))], Apply("Result".to_string(), vec![std("File")])),
+            sig(
+                vec![Ref(Box::new(std("Path")))],
+                Apply("Result".to_string(), vec![std("File")]),
+            ),
         );
         self.assoc_fns.insert(
             ("Vec".into(), "from_utf8_lossy".into()),
@@ -2337,12 +2333,16 @@ impl TypeChecker {
             .insert(("Result".into(), "ok".into()), sig(vec![], std("Option")));
         // Iterator-adapter surface on `Args` (`env::args().skip(1)`), modeled
         // loosely: adapters return the same modeled type.
-        self.methods
-            .insert(("Args".into(), "skip".into()), sig(vec![Usize], std("Args")));
+        self.methods.insert(
+            ("Args".into(), "skip".into()),
+            sig(vec![Usize], std("Args")),
+        );
         self.methods
             .insert(("Args".into(), "collect".into()), sig(vec![], std("Vec")));
-        self.methods
-            .insert(("Vec".into(), "filter".into()), sig(vec![Unknown], std("Vec")));
+        self.methods.insert(
+            ("Vec".into(), "filter".into()),
+            sig(vec![Unknown], std("Vec")),
+        );
         self.methods
             .insert(("Vec".into(), "map".into()), sig(vec![Unknown], std("Vec")));
         self.methods
@@ -2400,22 +2400,14 @@ impl TypeChecker {
         );
         self.methods.insert(
             ("Command".into(), "spawn".into()),
-            sig(
-                vec![],
-                Apply("Result".to_string(), vec![std("Child")]),
-            ),
+            sig(vec![], Apply("Result".to_string(), vec![std("Child")])),
         );
         self.methods.insert(
             ("Child".into(), "wait".into()),
-            sig(
-                vec![],
-                Apply("Result".to_string(), vec![std("ExitStatus")]),
-            ),
+            sig(vec![], Apply("Result".to_string(), vec![std("ExitStatus")])),
         );
-        self.methods.insert(
-            ("ExitStatus".into(), "success".into()),
-            sig(vec![], Bool),
-        );
+        self.methods
+            .insert(("ExitStatus".into(), "success".into()), sig(vec![], Bool));
         // Associated functions referenced by the driver.
         self.assoc_fns
             .insert(("Stdio".into(), "null".into()), sig(vec![], std("Stdio")));
@@ -2423,8 +2415,10 @@ impl TypeChecker {
             ("Stdio".into(), "inherit".into()),
             sig(vec![], std("Stdio")),
         );
-        self.assoc_fns
-            .insert(("PathBuf".into(), "new".into()), sig(vec![], std("PathBuf")));
+        self.assoc_fns.insert(
+            ("PathBuf".into(), "new".into()),
+            sig(vec![], std("PathBuf")),
+        );
         self.assoc_fns.insert(
             ("PathBuf".into(), "from".into()),
             sig(vec![Ref(Box::new(Str))], std("PathBuf")),
@@ -2433,8 +2427,10 @@ impl TypeChecker {
             ("String".into(), "from".into()),
             sig(vec![Ref(Box::new(Str))], std("String")),
         );
-        self.assoc_fns
-            .insert(("Vec".into(), "from".into()), sig(vec![Unknown], std("Vec")));
+        self.assoc_fns.insert(
+            ("Vec".into(), "from".into()),
+            sig(vec![Unknown], std("Vec")),
+        );
         self.assoc_fns.insert(
             ("Vec".into(), "with_capacity".into()),
             sig(vec![Usize], std("Vec")),
@@ -2450,10 +2446,8 @@ impl TypeChecker {
                 Apply("Result".to_string(), vec![Str]),
             ),
         );
-        self.assoc_fns.insert(
-            ("process".into(), "id".into()),
-            sig(vec![], Usize),
-        );
+        self.assoc_fns
+            .insert(("process".into(), "id".into()), sig(vec![], Usize));
         self.methods.insert(
             ("Stdin".into(), "read_to_string".into()),
             sig(
@@ -2481,16 +2475,22 @@ impl TypeChecker {
             sig(vec![], std("HashSet")),
         );
         for m in ["HashMap", "HashSet"] {
-            self.methods
-                .insert((m.into(), "insert".into()), sig(vec![Unknown, Unknown], Unit));
-            self.methods
-                .insert((m.into(), "get".into()), sig(vec![Ref(Box::new(Unknown))], std("Option")));
+            self.methods.insert(
+                (m.into(), "insert".into()),
+                sig(vec![Unknown, Unknown], Unit),
+            );
+            self.methods.insert(
+                (m.into(), "get".into()),
+                sig(vec![Ref(Box::new(Unknown))], std("Option")),
+            );
             self.methods.insert(
                 (m.into(), "contains_key".into()),
                 sig(vec![Ref(Box::new(Unknown))], Bool),
             );
-            self.methods
-                .insert((m.into(), "remove".into()), sig(vec![Ref(Box::new(Unknown))], std("Option")));
+            self.methods.insert(
+                (m.into(), "remove".into()),
+                sig(vec![Ref(Box::new(Unknown))], std("Option")),
+            );
             self.methods
                 .insert((m.into(), "len".into()), sig(vec![], Usize));
             self.methods
@@ -2499,29 +2499,21 @@ impl TypeChecker {
                 .insert((m.into(), "clone".into()), sig(vec![], Unknown));
             self.methods
                 .insert((m.into(), "iter".into()), sig(vec![], Unknown));
-            self.methods.insert(
-                (m.into(), "entry".into()),
-                sig(vec![Unknown], Unknown),
-            );
+            self.methods
+                .insert((m.into(), "entry".into()), sig(vec![Unknown], Unknown));
         }
-        self.methods.insert(
-            ("HashMap".into(), "values".into()),
-            sig(vec![], Unknown),
-        );
-        self.methods.insert(
-            ("HashMap".into(), "keys".into()),
-            sig(vec![], Unknown),
-        );
+        self.methods
+            .insert(("HashMap".into(), "values".into()), sig(vec![], Unknown));
+        self.methods
+            .insert(("HashMap".into(), "keys".into()), sig(vec![], Unknown));
         // `clone()` on the other modeled std containers.
         for m in ["Vec", "String", "PathBuf", "Cow"] {
             self.methods
                 .insert((m.into(), "clone".into()), sig(vec![], std(m)));
         }
         // `Default::default()` and per-type `default()`.
-        self.assoc_fns.insert(
-            ("Default".into(), "default".into()),
-            sig(vec![], Unknown),
-        );
+        self.assoc_fns
+            .insert(("Default".into(), "default".into()), sig(vec![], Unknown));
         // `Vec::pop` yields `Option<T>` (modeled opaquely).
         self.methods
             .insert(("Vec".into(), "pop".into()), sig(vec![], std("Option")));
@@ -2530,9 +2522,22 @@ impl TypeChecker {
         // Vec<u8> = ...`, method receivers, and struct-typed expressions
         // resolve instead of erroring with "unknown struct".
         for std_type in [
-            "Vec", "String", "Path", "PathBuf", "File", "Command", "ExitCode",
-            "ExitStatus", "Output", "Stdio", "Stdin", "Child", "Cow", "Args",
-            "HashMap", "HashSet",
+            "Vec",
+            "String",
+            "Path",
+            "PathBuf",
+            "File",
+            "Command",
+            "ExitCode",
+            "ExitStatus",
+            "Output",
+            "Stdio",
+            "Stdin",
+            "Child",
+            "Cow",
+            "Args",
+            "HashMap",
+            "HashSet",
         ] {
             self.structs.insert(
                 std_type.to_string(),
@@ -2611,12 +2616,12 @@ impl TypeChecker {
         // (seeded into the solver) satisfies the operator too.
         let std_lenient = matches!(ty, Ty::Unknown | Ty::Never)
             || matches!(ty,
-                Ty::Struct(n) | Ty::Apply(n, _)
-                if matches!(
-                    n.as_str(),
-                    "String" | "Vec" | "Option" | "Result" | "Path" | "PathBuf"
-                        | "Cow" | "TokenKind"
-                ));
+            Ty::Struct(n) | Ty::Apply(n, _)
+            if matches!(
+                n.as_str(),
+                "String" | "Vec" | "Option" | "Result" | "Path" | "PathBuf"
+                    | "Cow" | "TokenKind"
+            ));
         let solver_ok = match ty {
             Ty::Generic(_) | Ty::Unknown | Ty::Never => false,
             t => {
@@ -2660,8 +2665,7 @@ impl TypeChecker {
     fn generic_has_bound(&self, name: &str, bound: &str) -> bool {
         for g in &self.generic_scope {
             for p in &g.params {
-                if p.name.node == name
-                    && p.bounds.iter().any(|b| bound_trait_name_str(b) == bound)
+                if p.name.node == name && p.bounds.iter().any(|b| bound_trait_name_str(b) == bound)
                 {
                     return true;
                 }
@@ -2696,9 +2700,7 @@ impl TypeChecker {
             (Ty::Struct(a), Ty::Struct(b)) => a == b,
             (Ty::Apply(a, _), Ty::Apply(b, _)) => a == b,
             (Ty::Apply(a, _), Ty::Struct(b)) | (Ty::Struct(a), Ty::Apply(b, _)) => a == b,
-            (Ty::Ref(a), Ty::Ref(b)) | (Ty::RefMut(a), Ty::RefMut(b)) => {
-                self.unify_ty(a, b, sub)
-            }
+            (Ty::Ref(a), Ty::Ref(b)) | (Ty::RefMut(a), Ty::RefMut(b)) => self.unify_ty(a, b, sub),
             (Ty::Array(a, _), Ty::Array(b, _)) => self.unify_ty(a, b, sub),
             (Ty::Int, x) if x.is_numeric() => true,
             (x, Ty::Int) if x.is_numeric() => true,
@@ -2714,9 +2716,10 @@ impl TypeChecker {
             Ty::Ref(t) => Ty::Ref(Box::new(self.apply_sub(t, sub))),
             Ty::RefMut(t) => Ty::RefMut(Box::new(self.apply_sub(t, sub))),
             Ty::Future(t) => Ty::Future(Box::new(self.apply_sub(t, sub))),
-            Ty::Apply(n, args) => {
-                Ty::Apply(n.clone(), args.iter().map(|a| self.apply_sub(a, sub)).collect())
-            }
+            Ty::Apply(n, args) => Ty::Apply(
+                n.clone(),
+                args.iter().map(|a| self.apply_sub(a, sub)).collect(),
+            ),
             other => other.clone(),
         }
     }
@@ -2753,10 +2756,7 @@ impl TypeChecker {
                         } else {
                             // A generic application (e.g. `Vec<i32>`, `Option<T>`):
                             // keep the base name and carry the resolved arguments.
-                            Ty::Apply(
-                                name,
-                                args.iter().map(|a| self.type_to_ty(a)).collect(),
-                            )
+                            Ty::Apply(name, args.iter().map(|a| self.type_to_ty(a)).collect())
                         }
                     }
                 }
@@ -2764,9 +2764,7 @@ impl TypeChecker {
             TypeKind::Ref(inner) => Ty::Ref(Box::new(self.type_to_ty(inner))),
             TypeKind::RefMut(inner) => Ty::RefMut(Box::new(self.type_to_ty(inner))),
             TypeKind::Future(inner) => Ty::Future(Box::new(self.type_to_ty(inner))),
-            TypeKind::Array(inner, n) => {
-                Ty::Array(Box::new(self.type_to_ty(inner)), *n)
-            }
+            TypeKind::Array(inner, n) => Ty::Array(Box::new(self.type_to_ty(inner)), *n),
             TypeKind::Slice(inner) => Ty::Array(Box::new(self.type_to_ty(inner)), 0),
             TypeKind::Tuple(elems) => {
                 if elems.is_empty() {
@@ -2846,8 +2844,7 @@ impl TypeChecker {
                     Ty::Struct(n) => {
                         n == "String" && matches!(expected, Ty::Str)
                             || n == "Cow" && matches!(expected, Ty::Str)
-                            || n == "PathBuf"
-                                && matches!(expected, Ty::Struct(p) if p == "Path")
+                            || n == "PathBuf" && matches!(expected, Ty::Struct(p) if p == "Path")
                     }
                     _ => false,
                 },
@@ -2875,15 +2872,16 @@ impl TypeChecker {
             }
         }
         // (A modeled `Vec` may appear as `Struct("Vec")` or `Apply("Vec", ..)`.)
-        let vec_a = matches!(a, Ty::Struct(n) if n == "Vec")
-            || matches!(a, Ty::Apply(n, _) if n == "Vec");
+        let vec_a =
+            matches!(a, Ty::Struct(n) if n == "Vec") || matches!(a, Ty::Apply(n, _) if n == "Vec");
         let vec_ref_a = matches!(a, Ty::Ref(x) | Ty::RefMut(x)
             if matches!(x.as_ref(), Ty::Struct(n) if n == "Vec")
                 || matches!(x.as_ref(), Ty::Apply(n, _) if n == "Vec"));
         if vec_a && matches!(b, Ty::Array(..)) {
             return true;
         }
-        if vec_ref_a && matches!(b, Ty::Ref(y) | Ty::RefMut(y)
+        if vec_ref_a
+            && matches!(b, Ty::Ref(y) | Ty::RefMut(y)
             if matches!(y.as_ref(), Ty::Array(..)))
         {
             return true;
@@ -2895,14 +2893,12 @@ impl TypeChecker {
             | (Ty::RefMut(x), Ty::RefMut(y)) => self.compatible(x, y),
             (Ty::Array(a, _), Ty::Array(b, _)) => self.compatible(a, b),
             (Ty::Tuple(a), Ty::Tuple(b)) => {
-                a.len() == b.len()
-                    && a.iter().zip(b).all(|(x, y)| self.compatible(x, y))
+                a.len() == b.len() && a.iter().zip(b).all(|(x, y)| self.compatible(x, y))
             }
             (Ty::Ref(_), _) | (Ty::RefMut(_), _) => false,
             (Ty::Struct(x), Ty::Struct(y)) => x == y,
             (Ty::Apply(x, _), Ty::Apply(y, _)) => x == y,
-            (Ty::Apply(x, _), Ty::Struct(y))
-            | (Ty::Struct(x), Ty::Apply(y, _)) => x == y,
+            (Ty::Apply(x, _), Ty::Struct(y)) | (Ty::Struct(x), Ty::Apply(y, _)) => x == y,
             (Ty::Fn(pa, ra), Ty::Fn(pb, rb)) => {
                 pa.len() == pb.len()
                     && pa.iter().zip(pb).all(|(x, y)| self.compatible(x, y))
@@ -3226,9 +3222,7 @@ mod tests {
 
     #[test]
     fn generic_max_with_ord_bound_is_accepted() {
-        assert!(
-            check("fn max<T: Ord>(a: T, b: T) -> T { if a > b { a } else { b } }").is_ok()
-        );
+        assert!(check("fn max<T: Ord>(a: T, b: T) -> T { if a > b { a } else { b } }").is_ok());
     }
 
     #[test]
@@ -3245,7 +3239,10 @@ mod tests {
                    impl Show for i32 { fn show(&self) -> i32 { 42 } }\n\
                    fn call<T: Show>(t: T) -> i32 { t.show() }\n\
                    fn main() { let _ = call(7); }";
-        assert!(check(src).is_ok(), "generic-bound method call should resolve");
+        assert!(
+            check(src).is_ok(),
+            "generic-bound method call should resolve"
+        );
     }
 
     #[test]
@@ -3273,7 +3270,10 @@ mod tests {
         let src = "struct Unit {}\n\
                    impl Show for i32 { fn show(&self) -> i32 { 1 } }\n\
                    fn main() { let x = 1.0; let _ = x.show(); }";
-        assert!(check(src).is_err(), "unimplemented-trait method call should fail");
+        assert!(
+            check(src).is_err(),
+            "unimplemented-trait method call should fail"
+        );
     }
 
     #[test]
@@ -3399,19 +3399,13 @@ mod tests {
     fn multi_segment_call_path_resolves_last_two_segments() {
         // `std::env::args()` resolves via its last two segments (module
         // prefixes are not modeled) against the prelude's std surface.
-        assert!(check(
-            "fn main() { let a = std::env::args(); let _ = a; }"
-        )
-        .is_ok());
+        assert!(check("fn main() { let a = std::env::args(); let _ = a; }").is_ok());
     }
 
     #[test]
     fn assoc_const_resolves_via_path() {
         // `ExitCode::FAILURE` — an associated constant on a std type.
-        assert!(check(
-            "fn f() -> ExitCode { ExitCode::FAILURE }"
-        )
-        .is_ok());
+        assert!(check("fn f() -> ExitCode { ExitCode::FAILURE }").is_ok());
     }
 
     #[test]
@@ -3446,18 +3440,13 @@ mod tests {
 
     #[test]
     fn generic_with_where_clause_bound_is_accepted() {
-        assert!(
-            check("fn add<T>(a: T, b: T) -> T where T: Add { a + b }").is_ok()
-        );
+        assert!(check("fn add<T>(a: T, b: T) -> T where T: Add { a + b }").is_ok());
     }
 
     #[test]
     fn generic_call_inconsistent_args_rejected() {
         // The same parameter `T` is inferred as both `i32` and `bool`.
-        assert!(check(
-            "fn first<T>(a: T, b: T) -> T { a }\nfn bad() { first(1, true); }"
-        )
-        .is_err());
+        assert!(check("fn first<T>(a: T, b: T) -> T { a }\nfn bad() { first(1, true); }").is_err());
     }
 
     // --- struct generics ------------------------------------------------
@@ -3504,10 +3493,7 @@ mod tests {
     #[test]
     fn unknown_user_method_rejected() {
         assert!(
-            check(
-                "struct Foo { x: i32 }\nfn f() { let foo = Foo { x: 5 }; foo.bar(); }"
-            )
-            .is_err()
+            check("struct Foo { x: i32 }\nfn f() { let foo = Foo { x: 5 }; foo.bar(); }").is_err()
         );
     }
 
@@ -3515,10 +3501,7 @@ mod tests {
     fn user_method_body_is_checked() {
         // `self.y` does not exist on `Foo`, so the impl method body is rejected.
         assert!(
-            check(
-                "struct Foo { x: i32 }\nimpl Foo { fn bad(&self) -> i32 { self.y } }"
-            )
-            .is_err()
+            check("struct Foo { x: i32 }\nimpl Foo { fn bad(&self) -> i32 { self.y } }").is_err()
         );
     }
 
@@ -3543,29 +3526,23 @@ mod tests {
 
     #[test]
     fn applied_generic_in_struct_field_is_accepted() {
-        assert!(
-            check(
-                "struct Pair<T> { a: T, b: Vec<T> }\nfn f() { let p = Pair { a: 1, b: vec_new() }; }"
-            )
-            .is_ok()
-        );
+        assert!(check(
+            "struct Pair<T> { a: T, b: Vec<T> }\nfn f() { let p = Pair { a: 1, b: vec_new() }; }"
+        )
+        .is_ok());
     }
 
     #[test]
     fn applied_generic_field_enforces_type() {
         // `W { v: Vec<i32> }` rejects a `bool` initializer.
-        assert!(
-            check("struct W { v: Vec<i32> }\nfn f() { let w = W { v: true }; }").is_err()
-        );
+        assert!(check("struct W { v: Vec<i32> }\nfn f() { let w = W { v: true }; }").is_err());
     }
 
     #[test]
     fn generic_fn_with_applied_param_is_accepted() {
         assert!(
-            check(
-                "fn len<T>(v: Vec<T>) -> usize { 0 }\nfn f() { let n = len(vec_new()); }"
-            )
-            .is_ok()
+            check("fn len<T>(v: Vec<T>) -> usize { 0 }\nfn f() { let n = len(vec_new()); }")
+                .is_ok()
         );
     }
 
@@ -3574,23 +3551,19 @@ mod tests {
     #[test]
     fn user_trait_bound_satisfied_is_accepted() {
         // `i32` implements `Show` via a user `impl`, so the call is accepted.
-        assert!(
-            check(
-                "impl Show for i32 {}\nfn display<T: Show>(x: T) {}\nfn m() { display(5); }"
-            )
-            .is_ok()
-        );
+        assert!(check(
+            "impl Show for i32 {}\nfn display<T: Show>(x: T) {}\nfn m() { display(5); }"
+        )
+        .is_ok());
     }
 
     #[test]
     fn user_trait_bound_violated_is_rejected() {
         // `str` has no `impl Show`, so the call is rejected.
-        assert!(
-            check(
-                "impl Show for i32 {}\nfn display<T: Show>(x: T) {}\nfn m() { display(\"hi\"); }"
-            )
-            .is_err()
-        );
+        assert!(check(
+            "impl Show for i32 {}\nfn display<T: Show>(x: T) {}\nfn m() { display(\"hi\"); }"
+        )
+        .is_err());
     }
 
     #[test]
@@ -3681,10 +3654,10 @@ mod tests {
     fn return_in_match_arm_does_not_force_unit() {
         // The `true => { return 1; }` arm diverges (type `!`), so it must not
         // constrain the `match` result type to `()`; the result is `i32`.
-        assert!(
-            check("fn f(b: bool) -> i32 { let r = match b { true => { return 1; }, false => 2 }; r }")
-                .is_ok()
-        );
+        assert!(check(
+            "fn f(b: bool) -> i32 { let r = match b { true => { return 1; }, false => 2 }; r }"
+        )
+        .is_ok());
     }
 
     #[test]
@@ -3723,12 +3696,10 @@ mod tests {
     #[test]
     fn match_on_result_binds_err_and_ok() {
         // Both `Ok(x)` and `Err(e)` payloads bind into their arms.
-        assert!(
-            check(
-                "fn f(r: Result<i32, String>) -> i32 { match r { Ok(x) => x, Err(_) => 0 } }"
-            )
-            .is_ok()
-        );
+        assert!(check(
+            "fn f(r: Result<i32, String>) -> i32 { match r { Ok(x) => x, Err(_) => 0 } }"
+        )
+        .is_ok());
     }
 
     #[test]
