@@ -662,3 +662,92 @@ fn range_patterns_type_check() {
         }"
     ));
 }
+
+#[test]
+fn inherent_impls_on_one_type_do_not_conflict() {
+    // Two inherent `impl` blocks for one type are not overlapping trait impls.
+    let src = "struct S { x: i32 }\n\
+               impl S { fn a(&self) -> i32 { self.x } }\n\
+               impl S { fn b(&self) -> i32 { 1 } }";
+    assert!(coherence_report(&parse(src)).is_empty());
+}
+
+#[test]
+fn duplicate_trait_impls_still_conflict() {
+    // The control: two `impl Trait for S` blocks do conflict.
+    let src = "trait T { fn f(&self); }\n\
+               struct S;\n\
+               impl T for S { fn f(&self) {} }\n\
+               impl T for S { fn f(&self) {} }";
+    assert!(!coherence_report(&parse(src)).is_empty());
+}
+
+#[test]
+fn assertion_and_panic_macros_pass_full_check() {
+    // The assertion family type-checks and lowers (to a runtime panic path), so
+    // the full type + borrow check accepts a function that uses them.
+    let src = "fn f(x: i32) -> i32 {\n\
+                   assert!(x > 0);\n\
+                   assert_eq!(x, 3);\n\
+                   if x > 5 { panic!(\"big {}\", x); }\n\
+                   x\n\
+               }";
+    assert!(full_ok(src));
+}
+
+#[test]
+fn glob_imported_unit_variants_check_as_values_and_patterns() {
+    // After `use Ty::*;` a bare `Unknown` is the variant, both as a value and as a
+    // pattern (not a binding that matches everything).
+    let src = "enum Ty { Unknown, Str }\n\
+               fn code(t: Ty) -> i32 {\n\
+                   use Ty::*;\n\
+                   let d = Str;\n\
+                   match t { Unknown => 1, Str => 2 }\n\
+               }";
+    assert!(full_ok(src));
+}
+
+#[test]
+fn vec_slice_string_and_map_indexing_type_check() {
+    // Integer indexing yields the element; range indexing yields a slice (or `str`);
+    // slice methods are found on arrays and on `Vec` through auto-deref.
+    let src = "use std::collections::HashMap;\n\
+               fn f(v: &Vec<i32>, a: &[i32], s: &str, m: &HashMap<String, i32>) -> usize {\n\
+                   let x: i32 = v[0] + a[1];\n\
+                   let tail = &v[1..];\n\
+                   let head = &s[..2];\n\
+                   let n = tail.len() + head.len() + a.len();\n\
+                   let _ = m;\n\
+                   n + (x as usize)\n\
+               }";
+    assert!(type_ok(src));
+}
+
+#[test]
+fn struct_and_nested_tuple_patterns_bind_their_names() {
+    // A struct-variant pattern binds its shorthand fields; a nested tuple pattern
+    // binds each element (also when the scrutinee's shape is not known).
+    let src = "enum E { B { x: i32, y: i32 }, C }\n\
+               fn f(e: E, items: &Vec<(i32, i32)>) -> i32 {\n\
+                   let mut s = 0;\n\
+                   match e {\n\
+                       E::B { x, y } => s = s + x + y,\n\
+                       E::C => {}\n\
+                   }\n\
+                   for (i, v) in items.iter() { s = s + i + v; }\n\
+                   s\n\
+               }";
+    assert!(type_ok(src));
+}
+
+#[test]
+fn impl_into_parameters_accept_convertible_arguments() {
+    // `impl Into<String>` accepts `&str` and `String` arguments alike.
+    let src = "fn label(name: impl Into<String>) -> usize {\n\
+                   let s: String = name.into();\n\
+                   s.len()\n\
+               }\n\
+               fn main2() -> usize { label(\"a\") + label(String::new()) }";
+    assert!(type_ok(src));
+}

@@ -30,7 +30,7 @@ use tpt_moira_atropos::mir::{Operand, Rvalue, Terminator};
 use tpt_moira_clotho::error::Diag;
 
 /// Check every function in `prog` for borrow violations.
-pub fn borrow_check(prog: &tpt_moira_atropos::mir::Program) -> Result<(), Vec<Diag>> {
+pub fn borrow_check(prog: &tpt_moira_atropos::mir::MirProgram) -> Result<(), Vec<Diag>> {
     let mut errors = Vec::new();
     for f in &prog.functions {
         check_function(f, &mut errors);
@@ -317,7 +317,13 @@ fn operands_of(rv: &Rvalue) -> Vec<String> {
         | Rvalue::Field(o, _, _)
         | Rvalue::Cast(o, _) => names(o),
         Rvalue::Array(_, elems) => elems.iter().flat_map(names).collect(),
-        Rvalue::Index(b, i) => {
+        Rvalue::StoreIndex(b, i, v) => {
+            let mut out = names(b);
+            out.extend(names(i));
+            out.extend(names(v));
+            out
+        }
+        Rvalue::Index(b, i) | Rvalue::IndexRef(b, i) => {
             let mut v = names(b);
             v.extend(names(i));
             v

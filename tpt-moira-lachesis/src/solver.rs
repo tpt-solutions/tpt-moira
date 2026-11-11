@@ -532,6 +532,11 @@ pub fn coherence_report(
     let mut errors = Vec::new();
     for i in 0..impls.len() {
         for j in (i + 1)..impls.len() {
+            // Inherent impls (`impl S { .. }`) have no trait name and never conflict
+            // through coherence; two of them on one type are not overlapping trait impls.
+            if impls[i].trait_name.node.is_empty() || impls[j].trait_name.node.is_empty() {
+                continue;
+            }
             if impls[i].trait_name.node != impls[j].trait_name.node {
                 continue;
             }

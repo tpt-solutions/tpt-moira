@@ -53,20 +53,35 @@ pub fn type_check_with_externs(
     TypeChecker::check_program_with(prog, &refs)
 }
 
+/// Type-check with extern crates, also returning the C-style type hints of
+/// every expression (see [`expr_type_hints`]).
+pub fn type_check_typed(
+    prog: &Program,
+    externs: &[(String, Program)],
+) -> (
+    Result<(), Vec<Diag>>,
+    std::collections::HashMap<(usize, usize), String>,
+) {
+    let refs: Vec<(&str, &Program)> = externs.iter().map(|(n, p)| (n.as_str(), p)).collect();
+    TypeChecker::check_program_typed(prog, &refs)
+}
+
+/// The C-style type hint of every expression in `prog`, keyed by source span
+/// `(start, end)`, as consumed by `tpt_moira_atropos::lower_program_typed`.
+pub fn expr_type_hints(
+    prog: &Program,
+    externs: &[(String, Program)],
+) -> std::collections::HashMap<(usize, usize), String> {
+    type_check_typed(prog, externs).1
+}
+
 /// Full end-to-end Lachesis pass with extern crates: like [`check`], but the
 /// type-check pass resolves cross-crate paths against `externs`.
 pub fn check_with_externs(prog: &Program, externs: &[(String, Program)]) -> Result<(), Vec<Diag>> {
-    let mut type_res: Result<(), Vec<Diag>> = Ok(());
-    let mut borrow_res: Result<(), Vec<Diag>> = Ok(());
-
-    std::thread::scope(|s| {
-        s.spawn(|| {
-            type_res = type_check_with_externs(prog, externs);
-        });
-        s.spawn(|| {
-            borrow_res = borrow_check_program(prog);
-        });
-    });
+    // The type checker's expression types become the lowering's hints, so the
+    // borrow check lowers the program with the same types as codegen will.
+    let (type_res, hints) = type_check_typed(prog, externs);
+    let borrow_res = borrow_check_program_typed(prog, &hints);
 
     let mut errs: Vec<Diag> = Vec::new();
     match type_res {
@@ -88,7 +103,15 @@ pub fn check_with_externs(prog: &Program, externs: &[(String, Program)]) -> Resu
 
 /// Lower `prog` to MIR and borrow-check it.
 pub fn borrow_check_program(prog: &Program) -> Result<(), Vec<Diag>> {
-    let mir = tpt_moira_atropos::lower_program(prog)
+    borrow_check_program_typed(prog, &std::collections::HashMap::new())
+}
+
+/// Lower `prog` to MIR with the given type hints and borrow-check it.
+pub fn borrow_check_program_typed(
+    prog: &Program,
+    hints: &std::collections::HashMap<(usize, usize), String>,
+) -> Result<(), Vec<Diag>> {
+    let mir = tpt_moira_atropos::lower_program_typed(prog, hints)
         .map_err(|e| vec![Diag::error(format!("lowering error: {e}"), None)])?;
     borrow_check(&mir)
 }
@@ -108,17 +131,8 @@ pub fn borrow_check_program(prog: &Program) -> Result<(), Vec<Diag>> {
 /// for the test suite; the coherence / well-formedness reports are appended
 /// after the two passes settle.
 pub fn check(prog: &Program) -> Result<(), Vec<Diag>> {
-    let mut type_res: Result<(), Vec<Diag>> = Ok(());
-    let mut borrow_res: Result<(), Vec<Diag>> = Ok(());
-
-    std::thread::scope(|s| {
-        s.spawn(|| {
-            type_res = type_check(prog);
-        });
-        s.spawn(|| {
-            borrow_res = borrow_check_program(prog);
-        });
-    });
+    let (type_res, hints) = type_check_typed(prog, &[]);
+    let borrow_res = borrow_check_program_typed(prog, &hints);
 
     let mut errs: Vec<Diag> = Vec::new();
     match type_res {
