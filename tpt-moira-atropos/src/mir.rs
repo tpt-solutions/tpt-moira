@@ -10,7 +10,7 @@ use std::fmt;
 
 /// A whole program in MIR.
 #[derive(Debug, Clone, Default)]
-pub struct Program {
+pub struct MirProgram {
     /// Struct type definitions: `(name, [(field_name, field_type)])`.
     pub structs: Vec<StructDef>,
     /// Top-level functions.
@@ -120,9 +120,14 @@ pub enum Rvalue {
     Array(String, Vec<Operand>),
     /// Array indexing `base[idx]` — reads `base[idx]` into the destination.
     Index(Operand, Operand),
+    /// Address of an element `&base[idx]` (a pointer into the sequence's data);
+    /// used to bind the items of `iter_mut()` and `&mut v` loops.
+    IndexRef(Operand, Operand),
+    /// Store `value` into `base[idx]` (a statement: `*p = v` is `p[0] = v`).
+    StoreIndex(Operand, Operand, Operand),
     /// Tuple literal `(e0, e1, …)` of the named tuple-struct type `tuple_ty`.
     /// Each tuple shape (arity + component C types) maps to one generated
-    /// `struct` definition in [`Program::structs`]; see [`crate::lower`].
+    /// `struct` definition in [`MirProgram::structs`]; see [`crate::lower`].
     Tuple(String, Vec<Operand>),
 }
 
@@ -222,7 +227,7 @@ pub enum Terminator {
 // These `Display` impls iterate every collection in a fixed, sorted order so
 // the MIR text is stable across runs and stages.
 
-impl fmt::Display for Program {
+impl fmt::Display for MirProgram {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for s in &self.structs {
             writeln!(f, "{}", s)?;
@@ -313,6 +318,8 @@ impl fmt::Display for Rvalue {
                 write!(f, "[{}; {}]", ty, es.join(", "))
             }
             Rvalue::Index(b, i) => write!(f, "{}[{}]", b, i),
+            Rvalue::IndexRef(b, i) => write!(f, "&{}[{}]", b, i),
+            Rvalue::StoreIndex(b, i, v) => write!(f, "{}[{}] = {}", b, i, v),
             Rvalue::Tuple(ty, elems) => {
                 let es: Vec<String> = elems.iter().map(|e| e.to_string()).collect();
                 write!(f, "tuple {} {{ {} }}", ty, es.join(", "))
@@ -338,4 +345,61 @@ impl fmt::Display for Terminator {
             Terminator::Unreachable => write!(f, "unreachable"),
         }
     }
+}
+
+/// The MIR/C type string of a growable vector `Vec<elem>`. Lowering emits this
+/// form for any `Vec<T>` type; the C backend maps it to a generated struct
+/// (see [`vec_c_name`]) and emits its helper functions.
+pub fn vec_type(elem: &str) -> String {
+    format!("Vec<{elem}>")
+}
+
+/// The element type of a `Vec<elem>` type string, if `ty` is one.
+/// `Vec<T>*` (a `&mut Vec<T>` parameter) is not matched here; see [`vec_ptr_elem`].
+pub fn vec_elem(ty: &str) -> Option<&str> {
+    ty.strip_prefix("Vec<")?.strip_suffix('>')
+}
+
+/// The element type of a `Vec<elem>*` pointer type string, if `ty` is one.
+pub fn vec_ptr_elem(ty: &str) -> Option<&str> {
+    vec_elem(ty.strip_suffix('*')?)
+}
+
+/// The MIR/C type string of a slice `&[elem]`: a value holding `data` and `len`
+/// (a reference to a slice is the slice itself, so there is no pointer form).
+pub fn slice_type(elem: &str) -> String {
+    format!("Slice<{elem}>")
+}
+
+/// The element type of a `Slice<elem>` type string, if `ty` is one.
+pub fn slice_elem(ty: &str) -> Option<&str> {
+    ty.strip_prefix("Slice<")?.strip_suffix('>')
+}
+
+/// The C struct name of `Slice<elem>`.
+pub fn slice_c_name(elem: &str) -> String {
+    format!("moira_slice_{}", mangle(elem))
+}
+
+/// The name of a generated `Slice<elem>` helper (`sub`: `data[a..b]`).
+pub fn slice_fn_name(elem: &str, method: &str) -> String {
+    format!("moira_slice_{}_{}", mangle(elem), method)
+}
+
+/// Mangle an element C type into an identifier fragment.
+fn mangle(elem: &str) -> String {
+    elem.chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect()
+}
+
+/// The C struct name of `Vec<elem>`.
+pub fn vec_c_name(elem: &str) -> String {
+    format!("moira_vec_{}", mangle(elem))
+}
+
+/// The name of a generated `Vec<elem>` helper function (`new`, `push`, `len`,
+/// `is_empty`).
+pub fn vec_fn_name(elem: &str, method: &str) -> String {
+    format!("moira_vec_{}_{}", mangle(elem), method)
 }

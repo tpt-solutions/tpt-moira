@@ -293,64 +293,92 @@ impl<'a> Emitter<'a> {
     }
 }
 
-/// Emit a whole program as x86-64 assembly (System V, Intel syntax).
-pub fn emit_asm(prog: &SsaProgram) -> Result<String, String> {
+/// Emit one function's x86-64 assembly (System V, Intel syntax).
+fn emit_function_asm(func: &SsaFunction) -> Result<String, String> {
     let mut out = String::new();
-    out.push_str(".intel_syntax noprefix\n");
-    out.push_str(".text\n");
-    out.push_str(".globl main\n");
+    let slots = compute_slots(func);
+    let mut em = Emitter {
+        slots: &slots,
+        label: 0,
+    };
+    out.push_str(&format!("\n{}:\n", func.name));
+    out.push_str("    push rbp\n    mov rbp, rsp\n");
+    out.push_str(&format!("    sub rsp, {}\n", slots.total * 8));
 
-    for func in &prog.functions {
-        let slots = compute_slots(func);
-        let mut em = Emitter {
-            slots: &slots,
-            label: 0,
-        };
-        out.push_str(&format!("\n{}:\n", func.name));
-        out.push_str("    push rbp\n    mov rbp, rsp\n");
-        out.push_str(&format!("    sub rsp, {}\n", slots.total * 8));
-
-        // Spill incoming parameters into their slots.
-        for (i, param) in func.params.iter().enumerate() {
-            if i >= REGS.len() {
-                break;
-            }
-            let slot = slots.named[param];
-            out.push_str(&format!(
-                "    mov {off}, {reg}\n",
-                off = em.off(slot),
-                reg = REGS[i]
-            ));
+    // Spill incoming parameters into their slots.
+    for (i, param) in func.params.iter().enumerate() {
+        if i >= REGS.len() {
+            break;
         }
+        let slot = slots.named[param];
+        out.push_str(&format!(
+            "    mov {off}, {reg}\n",
+            off = em.off(slot),
+            reg = REGS[i]
+        ));
+    }
 
-        for (bi, block) in func.blocks.iter().enumerate() {
-            out.push_str(&format!("b{}:\n", bi));
-            for &idx in &block.stmts {
-                let v = &func.values[idx];
-                let asm = em.emit_op(&v.op)?;
-                out.push_str(&asm);
-                let slot = em.slots.value[idx];
-                out.push_str(&format!("    pop {}\n", em.off(slot)));
-            }
-            match &block.term {
-                SsaTerm::Goto(t) => out.push_str(&format!("    jmp b{}\n", t)),
-                SsaTerm::If(c, _t, e) => {
-                    out.push_str(&em.gen_val(c));
-                    out.push_str("    pop rax\n    test rax, rax\n");
-                    out.push_str(&format!("    jz b{}\n", e));
-                }
-                SsaTerm::Return(Some(v)) => {
-                    out.push_str(&em.gen_val(v));
-                    out.push_str("    pop rax\n");
-                    out.push_str("    mov rsp, rbp\n    pop rbp\n    ret\n");
-                }
-                SsaTerm::Return(None) => {
-                    out.push_str("    xor eax, eax\n");
-                    out.push_str("    mov rsp, rbp\n    pop rbp\n    ret\n");
-                }
-                SsaTerm::Unreachable => out.push_str("    ; unreachable\n"),
-            }
+    for (bi, block) in func.blocks.iter().enumerate() {
+        out.push_str(&format!("b{}:\n", bi));
+        for &idx in &block.stmts {
+            let v = &func.values[idx];
+            let asm = em.emit_op(&v.op)?;
+            out.push_str(&asm);
+            let slot = em.slots.value[idx];
+            out.push_str(&format!("    pop {}\n", em.off(slot)));
         }
+        match &block.term {
+            SsaTerm::Goto(t) => out.push_str(&format!("    jmp b{}\n", t)),
+            SsaTerm::If(c, _t, e) => {
+                out.push_str(&em.gen_val(c));
+                out.push_str("    pop rax\n    test rax, rax\n");
+                out.push_str(&format!("    jz b{}\n", e));
+            }
+            SsaTerm::Return(Some(v)) => {
+                out.push_str(&em.gen_val(v));
+                out.push_str("    pop rax\n");
+                out.push_str("    mov rsp, rbp\n    pop rbp\n    ret\n");
+            }
+            SsaTerm::Return(None) => {
+                out.push_str("    xor eax, eax\n");
+                out.push_str("    mov rsp, rbp\n    pop rbp\n    ret\n");
+            }
+            SsaTerm::Unreachable => out.push_str("    ; unreachable\n"),
+        }
+    }
+    Ok(out)
+}
+
+/// Emit a whole program as x86-64 assembly (System V, Intel syntax).
+///
+/// Each function is emitted on its own thread and the results are joined in the
+/// original function order, so the output (and the first error reported) is
+/// deterministic regardless of scheduling.
+pub fn emit_asm(prog: &SsaProgram) -> Result<String, String> {
+    let bodies: Vec<Result<String, String>> = std::thread::scope(|s| {
+        let handles: Vec<_> = prog
+            .functions
+            .iter()
+            .map(|f| s.spawn(|| emit_function_asm(f)))
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+
+    let mut out = String::new();
+    out.push_str(
+        ".intel_syntax noprefix
+",
+    );
+    out.push_str(
+        ".text
+",
+    );
+    out.push_str(
+        ".globl main
+",
+    );
+    for body in bodies {
+        out.push_str(&body?);
     }
 
     // Built-in `print_i32` implemented via libc `printf`, so the native backend

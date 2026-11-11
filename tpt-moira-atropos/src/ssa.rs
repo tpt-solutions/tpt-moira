@@ -94,13 +94,13 @@ pub struct SsaProgram {
 
 impl SsaProgram {
     /// Lower a MIR program into SSA form.
-    pub fn from_mir(mir: &mir::Program) -> Result<SsaProgram, String> {
+    pub fn from_mir(mir: &mir::MirProgram) -> Result<SsaProgram, String> {
         build_ssa(mir)
     }
 }
 
 /// Lower a MIR program into SSA form.
-pub fn build_ssa(mir: &mir::Program) -> Result<SsaProgram, String> {
+pub fn build_ssa(mir: &mir::MirProgram) -> Result<SsaProgram, String> {
     let mut out = SsaProgram {
         structs: mir.structs.clone(),
         functions: Vec::new(),
@@ -141,52 +141,55 @@ fn build_function(f: &mir::Function) -> Result<SsaFunction, String> {
             }
         };
         for stmt in &block.stmts {
-            let op = match &stmt.rvalue {
-                mir::Rvalue::Use(o) => Op::Copy(resolve(o, &last_def)),
-                mir::Rvalue::Binary(b, l, r) => {
-                    Op::Binary(*b, resolve(l, &last_def), resolve(r, &last_def))
-                }
-                mir::Rvalue::Unary(u, o) => Op::Unary(*u, resolve(o, &last_def)),
-                mir::Rvalue::Call(callee, args) => Op::Call(
-                    resolve(callee, &last_def),
-                    args.iter().map(|a| resolve(a, &last_def)).collect(),
-                ),
-                mir::Rvalue::StructLit(name, fields) => Op::StructLit(
-                    name.clone(),
-                    fields
-                        .iter()
-                        .map(|(fld, o)| (fld.clone(), resolve(o, &last_def)))
-                        .collect(),
-                ),
-                mir::Rvalue::Field(o, fld, _deref) => Op::Field(resolve(o, &last_def), fld.clone()),
-                mir::Rvalue::Ref(o, _) => Op::Ref(resolve(o, &last_def)),
-                // `expr as Type` is an identity move in the SSA/native backend;
-                // the cast target type is recorded on the resulting temporary via
-                // `temp_types` (set during lowering), so downstream passes see the
-                // narrowed/narrowed type without altering the value bits.
-                mir::Rvalue::Cast(o, _ty) => Op::Copy(resolve(o, &last_def)),
-                // `StoreField` and the suspending `Switch` terminator belong to
-                // the `async fn` state machine, which is generated only for the
-                // Stage-0 C backend. The from-scratch native backend does not
-                // support it (it already rejects struct literals), so we reject
-                // here with a clear message rather than miscompile.
-                mir::Rvalue::StoreField(..) => {
-                    return Err(
+            let op =
+                match &stmt.rvalue {
+                    mir::Rvalue::Use(o) => Op::Copy(resolve(o, &last_def)),
+                    mir::Rvalue::Binary(b, l, r) => {
+                        Op::Binary(*b, resolve(l, &last_def), resolve(r, &last_def))
+                    }
+                    mir::Rvalue::Unary(u, o) => Op::Unary(*u, resolve(o, &last_def)),
+                    mir::Rvalue::Call(callee, args) => Op::Call(
+                        resolve(callee, &last_def),
+                        args.iter().map(|a| resolve(a, &last_def)).collect(),
+                    ),
+                    mir::Rvalue::StructLit(name, fields) => Op::StructLit(
+                        name.clone(),
+                        fields
+                            .iter()
+                            .map(|(fld, o)| (fld.clone(), resolve(o, &last_def)))
+                            .collect(),
+                    ),
+                    mir::Rvalue::Field(o, fld, _deref) => {
+                        Op::Field(resolve(o, &last_def), fld.clone())
+                    }
+                    mir::Rvalue::Ref(o, _) => Op::Ref(resolve(o, &last_def)),
+                    // `expr as Type` is an identity move in the SSA/native backend;
+                    // the cast target type is recorded on the resulting temporary via
+                    // `temp_types` (set during lowering), so downstream passes see the
+                    // narrowed/narrowed type without altering the value bits.
+                    mir::Rvalue::Cast(o, _ty) => Op::Copy(resolve(o, &last_def)),
+                    // `StoreField` and the suspending `Switch` terminator belong to
+                    // the `async fn` state machine, which is generated only for the
+                    // Stage-0 C backend. The from-scratch native backend does not
+                    // support it (it already rejects struct literals), so we reject
+                    // here with a clear message rather than miscompile.
+                    mir::Rvalue::StoreField(..) => return Err(
                         "the native backend does not support `async fn` state machines (use the \
                          C backend, `--emit c`)"
                             .to_string(),
-                    )
-                }
-                // Arrays and indexing are emitted only by the C backend; the
-                // from-scratch native backend does not model array layout.
-                mir::Rvalue::Array(..) | mir::Rvalue::Index(..) | mir::Rvalue::Tuple(..) => {
-                    return Err(
+                    ),
+                    // Arrays and indexing are emitted only by the C backend; the
+                    // from-scratch native backend does not model array layout.
+                    mir::Rvalue::Array(..)
+                    | mir::Rvalue::Index(..)
+                    | mir::Rvalue::IndexRef(..)
+                    | mir::Rvalue::StoreIndex(..)
+                    | mir::Rvalue::Tuple(..) => return Err(
                         "the native backend does not support arrays/indexing/tuples (use the C \
                           backend, `--emit c`)"
                             .to_string(),
-                    )
-                }
-            };
+                    ),
+                };
             let ty = f
                 .temp_types
                 .get(&stmt.place)

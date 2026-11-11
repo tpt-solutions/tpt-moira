@@ -152,7 +152,8 @@ fn end_to_end_runs() {
     let out = Command::new(&exe_path)
         .output()
         .expect("run generated binary");
-    let stdout = String::from_utf8_lossy(&out.stdout);
+    // Windows text-mode C stdio emits CRLF; normalise before comparing.
+    let stdout = String::from_utf8_lossy(&out.stdout).replace("\r\n", "\n");
     // s = 3+4 = 7, m = max(7,10) = 10, t = sum_to(5) = 0+1+2+3+4 = 10
     assert_eq!(stdout.trim(), "7\n10\n10", "unexpected program output");
 }
@@ -160,7 +161,7 @@ fn end_to_end_runs() {
 /// Lower an arbitrary Moira source string (rather than the demo file) so
 /// feature-specific codegen can be tested in isolation.
 fn lower_src(src: &str) -> tpt_moira_atropos::MirProgram {
-    let prog = tpt_moira_clotho::parse_source(src).expect("source should parse");
+    let prog = tpt_moira_clotho::compile_source(src).expect("source should parse");
     tpt_moira_atropos::lower_program(&prog).expect("source should lower")
 }
 
@@ -170,7 +171,10 @@ fn cast_lowers_to_c_cast() {
     // `as`-cast self-host gap for `atropos`).
     let mir = lower_src("fn f(x: i32) -> i64 { x as i64 }");
     let c = tpt_moira_atropos::codegen_c::emit_c(&mir);
-    assert!(c.contains("(i64)x"), "expected a C cast `(i64)x`:\n{c}");
+    assert!(
+        c.contains("(int64_t)x"),
+        "expected a C cast `(int64_t)x`:\n{c}"
+    );
     // The cast temporary must be declared with the narrowed target type.
     assert!(c.contains("int64_t"), "cast temp should be i64:\n{c}");
 }
@@ -212,7 +216,12 @@ fn run_src(src: &str) -> Option<String> {
     let out = Command::new(&exe_path).output().ok()?;
     let _ = std::fs::remove_file(&c_path);
     let _ = std::fs::remove_file(&exe_path);
-    Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    Some(
+        String::from_utf8_lossy(&out.stdout)
+            .replace("\r\n", "\n")
+            .trim()
+            .to_string(),
+    )
 }
 
 #[test]
@@ -650,4 +659,179 @@ fn match_lowers_to_conditional_chain() {
         .iter()
         .any(|b| matches!(b.term, tpt_moira_atropos::mir::Terminator::If(..)));
     assert!(has_if, "match should contain If terminators");
+}
+
+#[test]
+fn multi_payload_variant_constructs_and_runs() {
+    // A variant with two payload values needs one payload slot per field of
+    // the widest variant (`f0`, `f1`); a single-slot layout rejected it.
+    let out = match run_src(
+        "enum Shape {\n\
+             Pair(i32, i32),\n\
+             Solo(i32),\n\
+             Empty,\n\
+         }\n\
+         fn main() {\n\
+             let p = Shape::Pair(3, 4);\n\
+             if let Shape::Pair(a, b) = p {\n\
+                 print_i32(a + b);\n\
+             }\n\
+         }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping multi-payload variant run");
+            return;
+        }
+    };
+    assert_eq!(out.trim(), "7");
+}
+
+#[test]
+fn function_sharing_a_variant_name_is_called_normally() {
+    // `Num` is both a unit variant and a two-argument function. The call
+    // `Num(2, 5)` must reach the function, not the variant constructor (which
+    // takes no payload and previously failed with an arity error).
+    let out = match run_src(
+        "enum Tok {\n\
+             Num,\n\
+         }\n\
+         fn Num(a: i32, b: i32) -> i32 {\n\
+             a * b\n\
+         }\n\
+         fn main() {\n\
+             print_i32(Num(2, 5));\n\
+         }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping variant-name collision run");
+            return;
+        }
+    };
+    assert_eq!(out.trim(), "10");
+}
+
+#[test]
+fn expression_macro_keeps_operator_grouping() {
+    // An expression-position macro keeps its template's braces, so `2 * m!()`
+    // multiplies the whole `1 + 2` (6), not just the `1` (which would give 4).
+    let out = match run_src(
+        "macro_rules! m {\n\
+             () => { 1 + 2 };\n\
+         }\n\
+         fn main() {\n\
+             let a = 2 * m!();\n\
+             print_i32(a);\n\
+         }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping macro precedence run");
+            return;
+        }
+    };
+    assert_eq!(out.trim(), "6");
+}
+
+#[test]
+fn item_position_macro_generates_a_function() {
+    // An item-position macro expands to items (no enclosing braces) and the
+    // generated function is callable.
+    let out = match run_src(
+        "macro_rules! make_answer {\n\
+             ($name:ident) => { fn $name() -> i32 { 42 } };\n\
+         }\n\
+         make_answer!(answer);\n\
+         fn main() {\n\
+             print_i32(answer());\n\
+         }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping item macro run");
+            return;
+        }
+    };
+    assert_eq!(out.trim(), "42");
+}
+
+#[test]
+fn assert_passes_and_runs_through() {
+    // A passing `assert!`/`assert_eq!` falls through to the code after it.
+    let out = match run_src(
+        "fn f(x: i32) -> i32 {\n\
+             assert!(x > 0);\n\
+             assert_eq!(x, 3);\n\
+             x\n\
+         }\n\
+         fn main() {\n\
+             print_i32(f(3));\n\
+         }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping assert run");
+            return;
+        }
+    };
+    assert_eq!(out.trim(), "3");
+}
+
+#[test]
+fn nested_item_and_forward_call_run() {
+    // A nested helper is hoisted and called from its function; `main` also calls a
+    // function defined after it (forward reference through the C prototypes).
+    let out = match run_src(
+        "fn outer() -> i32 {\n\
+             fn helper(x: i32) -> i32 { x + 1 }\n\
+             helper(2)\n\
+         }\n\
+         fn main() {\n\
+             print_i32(outer());\n\
+             print_i32(later(4));\n\
+         }\n\
+         fn later(x: i32) -> i32 { x * 2 }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping nested item run");
+            return;
+        }
+    };
+    assert_eq!(
+        out.trim(),
+        "3\n8"
+            .replace("\n", "\n")
+            .trim()
+            .lines()
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+}
+
+#[test]
+fn glob_imported_unit_variant_pattern_runs() {
+    // `Str` after `use Ty::*;` is a tag test: the second arm runs for `Ty::Str`.
+    let out = match run_src(
+        "enum Ty { Unknown, Str }\n\
+         fn code(t: Ty) -> i32 {\n\
+             use Ty::*;\n\
+             match t {\n\
+                 Unknown => 1,\n\
+                 Str => 2,\n\
+             }\n\
+         }\n\
+         fn main() {\n\
+             print_i32(code(Ty::Str));\n\
+             print_i32(code(Ty::Unknown));\n\
+         }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping glob variant run");
+            return;
+        }
+    };
+    assert_eq!(out.trim(), "2\n1");
 }

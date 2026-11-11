@@ -8,12 +8,14 @@
 //! SSA backend ([`ssa`] + [`codegen_native`]) is the Phase-1/Phase-4 target and
 //! slots in behind the same [`lower`] + emit interface.
 
+pub mod bundle;
 pub mod codegen_c;
 pub mod codegen_native;
 pub mod lower;
 pub mod mir;
 pub mod ssa;
 
-pub use lower::{lower_program, LowerError};
-pub use mir::Program as MirProgram;
+pub use bundle::lower_bundle;
+pub use lower::{lower_program, lower_program_typed, LowerError, TypeHints};
+pub use mir::MirProgram;
 pub use ssa::{build_ssa, SsaProgram};

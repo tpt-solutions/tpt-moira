@@ -158,6 +158,7 @@ fn async_demo_runs() {
     let out = Command::new(&exe_path)
         .output()
         .expect("run generated binary");
-    let stdout = String::from_utf8_lossy(&out.stdout);
+    // Windows text-mode C stdio emits CRLF; normalise before comparing.
+    let stdout = String::from_utf8_lossy(&out.stdout).replace("\r\n", "\n");
     assert_eq!(stdout.trim(), "23", "async double(10) should print 23");
 }
