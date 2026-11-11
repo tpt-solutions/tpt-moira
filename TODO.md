@@ -367,7 +367,8 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
      generics + `where`-clause solving, trait solving wired into `infer`).
      Validated by `clotho/tests/frontend.rs`, `lachesis/src/infer.rs`, and the
      `x.py self-host` probe.
-  - [ ] **Parser: close remaining gating constructs** (blocks `clotho`/`lachesis`/`atropos` from parsing at all)
+  - [x] **Parser: close remaining gating constructs** (blocks `clotho`/`lachesis`/`atropos` from parsing at all)
+        - Status: `x.py self-host` reports every crate's parse column as `ok` (all five crates parse, including the new `cfg`/alias/macro code). Closed in this pass: `const fn`, `-> !`, `dyn`/`impl`/`fn(..)` and qualified types, `where`/`for<..>` binders, `?Sized`/defaults/const generics, turbofish and `<<` openers, array-repeat and `[]`, struct/enum/match/literal attributes and `#[cfg]`, `#[path]`, `&&T`, `&raw`, leading `::`, block-like statements.
     - [x] Tuple expressions (`(a, b)`) and tuple types — **parser resolved**:
       the tuple branch in `tpt_moira_clotho::parser::parse_atom` double-consumed the
       closing `)` (surfaced as `expected ), found ;`); fixed so the `)` is
@@ -611,6 +612,30 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
             diagnostics. Remaining blockers for the other four crates are the
             large type-check debt (hundreds of diagnostics each) plus codegen
             gaps (`for` over iterators, closures, enum destructuring).
+          - Re-run (latest, fixes to the checker and derive): still `1/5`, but the
+            diagnostic load fell: clotho 857 -> 620, atropos 702 -> 686, lachesis
+            1136 -> 985. Closed: enum `derive(Clone)` on payload variants generated
+            `Self::V => Self::V` (now shape-aware); `matches!(e, pat)` desugars to a
+            real `match` (its pattern was checked as a bitwise OR); inherent impls no
+            longer report coherence conflicts; panic-family macros diverge (`!`).
+            Remaining top classes are std API modeling (`no method`, `cannot find
+            value`, indexing) and trait bounds.
+            Also: nested items (`fn` / `struct` inside a body) are hoisted to the top
+            level when their names are unique; clashing ones are dropped (a call to
+            them is reported, not silently rebound). The C backend now emits a
+            prototype for every function, so forward calls compile. Latest counts:
+            `vec![..]` / `vec![x; n]` type as `Vec<T>` (heap storage is still not in
+            the codegen subset). Glob-imported unit variants (`use Ty::*;`) resolve as values
+            and patterns (matching codegen). Lenient prelude entries (`into`, `cloned`,
+            `as_ref`, `clone` on primitives, `String::push`) return `Unknown`, which can hide
+            real type errors. Indexing types `Vec`, slices, arrays, `String`/`str` (ranges
+            slice) and maps; slice methods also serve `Vec` through auto-deref. Latest
+            counts: clotho 269, atropos 309, lachesis 220. Bare unit-variant names prefer
+            the program's own enums over extern crates' (a `Str` no longer resolves to
+            `TokenKind`); `impl Into<T>` parameters accept convertible arguments.
+            Struct and struct-variant patterns (`E::B { x, y: p, .. }`, `ref`/`mut`
+            shorthand) parse and bind their names; tuple patterns bind nested elements;
+            the arities of the lenient prelude methods now follow the std signatures.
           - Re-run (2026-08-22, later still): `1/5` holds. Path/const
             resolution landed: multi-segment call paths
             (`std::env::args()`, `tpt_moira_clotho::compile_file(...)`)
@@ -901,10 +926,15 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
   - [ ] Iterate: fix or document each blocking gap until the target module set builds
   - [ ] Record pass/fail + divergence report for the attempted module set
 - [ ] Validate against large crates.io dependency graphs
-  - [ ] Pick a representative sample of popular crates (e.g. `serde`, `tokio`, `regex`, `clap`) spanning common language features
-  - [ ] Script bulk-compiling the sample via `moira --check`/`--diff` and collecting pass/fail per crate
-  - [ ] Triage top blocking gaps by how many crates they unblock (highest leverage first)
+  - [x] Pick a representative sample of popular crates (e.g. `serde`, `tokio`, `regex`, `clap`) spanning common language features
+        - 19 crates from the local cargo registry, sizes from `itoa` to `tokio` (`tools/crates_probe.py`, `DEFAULT_SAMPLE`).
+  - [x] Script bulk-compiling the sample via `moira --check`/`--diff` and collecting pass/fail per crate
+        - `python tools/crates_probe.py` runs `--emit ast` then `--check` per crate under a time and memory cap; output in `build/crates_probe/` (`report.md`, `results.json`).
+        - Status: parse 19/19, check 2/19 (cfg-if, clap). Remaining check gaps are type-checker work: nested items, std API modeling, macros outside `println!`-family, method and field resolution.
+  - [x] Triage top blocking gaps by how many crates they unblock (highest leverage first)
+        - The report ranks gap classes by the crates they alone block. Parser gaps closed so far: `const fn`, `-> !`, `use core::str`, brace `use {..}`, item-position macro calls, `macro_rules!` brace skipping, `vis`/`lifetime`/`meta` fragments, statement-vs-expression macro expansion, `#[cfg]` evaluation for the fixed target.
   - [ ] Track pass-rate trend over time in the same dashboard used by `moira-bench`
+        - Partial: each run appends to `build/crates_probe/history.jsonl`. Not yet shown in the `moira-bench --dashboard` view.
 - [ ] Achieve ≥5x speedup over `rustc` on production-scale codebases
   - [ ] Depends on: Linux-kernel-module and crates.io validation above producing a large-codebase corpus to benchmark
   - [ ] Extend `moira-bench` to accept an external large-codebase corpus (not just the Phase-1 synthetic battery)
@@ -932,7 +962,7 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
   - [x] Decide how long divergences from `rustc` behavior are allowed to exist before being treated as regressions (ties into the triage queue)
   - [x] Write an RFC/doc (e.g. `docs/STABILITY.md`) covering: supported-subset growth policy, breaking-change process, deprecation windows
   - [x] Define a release-cadence policy (e.g. time-based vs. milestone-based) and document it alongside the release workflow
-- [ ] Release packaging & distribution
+- [x] Release packaging & distribution
   - [x] CI release workflow (`.github/workflows/release.yml`) builds release
         artifacts for the three OSes via `x.py dist` on tag push, gates on the
         Stage-2 cross-process determinism check, and publishes a GitHub release

@@ -112,8 +112,9 @@ What unblocked `moira-alloc` (2026-08-22):
 
 Latest per-crate type/borrow error counts (from the 2026-08-22 probe):
 `clotho` **985**, `lachesis` **1021**, `atropos` **1100**, `moira` (driver,
-with externs) **1** (a single codegen-subset restriction — `for` over a
-modeled `Vec` needs the heap-Vec runtime; its *type-check* pass is clean),
+with externs) **0** — the driver now passes its own check and lowers for codegen
+(`moira-alloc` and the driver are the two self-hostable crates; see the
+`?`/`&`-pattern entries below),
 `moira-alloc` 0 (self-hostable). Landed this session: enum codegen
 (tagged structs, verified end-to-end), the builtin print macros
 (`println!`/`eprintln!` with real type-checked arguments), cascade absorption
@@ -338,7 +339,89 @@ code generator**, which still reject most of the compiler's own code:
 - [ ] Closures: parsing, capture typing, and MIR/codegen lowering
 - [ ] Generics in the type checker (the subset parses them but does not solve
       them), plus `where`-clause lowering
-- [ ] `Vec` / `Option` / `Result` + `?` propagation as real, checked types
+- [x] `Vec<T>` runtime in the C backend (annotated locals and `&mut Vec<T>`
+      parameters; element types that the backend already expresses — scalars,
+      structs, tuples). `let v: Vec<T> = Vec::new()` / `with_capacity` (the
+      capacity hint is ignored), `v.push(x)`, `v.len()`, `v.is_empty()`, `v[i]`,
+      and `for x in &v` / `for x in v` / `for x in v.iter()` (an index loop over
+      `data`/`len`). Lowered as `Vec<T>` type strings; `atropos::codegen_c` emits a
+      `moira_vec_<T>` struct and its helpers per element type. Validated by
+      `atropos/tests/vec.rs` (compiled and run with the system C compiler).
+      Not yet: `Vec<Vec<T>>`, `String`, `Option`/`Result`, slices, vectors in
+      the native ASM backend, and iteration over vectors reached through fields
+      or pattern bindings (`for x in &program.items`, `Err(diags)` → `for d in &diags`),
+      which needs element types from Lachesis because Atropos lowers untyped.
+- [x] Typed lowering: Lachesis records the type of every expression and exports
+      C-style hints (`bool`, `str`, `Vec<T>`, `&Vec<T>`) keyed by source span
+      (`lachesis::expr_type_hints`, `atropos::lower_program_typed`). Atropos uses
+      them for `for` over a vector it cannot see locally (a field, a pattern
+      binding), for `println!` of a `bool`, and for pattern-bound locals. The
+      borrow check and the driver's `mir`/`c` emit paths use the same hints. Fixed
+      in the checker: `if let`/`while let` extracted a variant's payload twice
+      (`Err(e)` was bound to `Unknown`). Validated by
+      `lachesis/tests/typed_lowering.rs`. Limits: hints apply only to the kinds
+      above; a user enum's variant payload is not typed by the checker yet
+      (`variant_payload_ty` models `Option`/`Result` only); `lower_and_ssa` is still untyped.
+- [x] `?` on `Option` / `Result` in functions returning the same enum: the error
+      variant (`None` / `Err`) returns the value unchanged, otherwise the payload
+      (`f0`) is yielded. Option and Result share one tagged layout, so no
+      conversion is needed (`From` is not applied). Also `&x` patterns in `for`.
+      Validated by `lachesis/tests/typed_lowering.rs` (runs end to end).
+      Limit: enum payload slots are still `long long` (`Option<Vec<T>>` and
+      struct payloads are not typed yet), so `?` is correct for scalar payloads only.
+- [x] Driver C check (`moira --emit c` on `src/main.rs`, then `gcc -fsyntax-only`):
+      228 → 198 errors. Fixed in this pass: scrutinees take their enum type from
+      the variant pattern (`type_enum_operand`); matches on `&Enum` read fields
+      with `->`; numeric fields are tuple indices (`fN`) even when the base type is
+      untyped; `?` types its operand; closure names are qualified by the enclosing
+      function (they collided across functions). What remains is cross-crate:
+      prototypes that name another crate's types (`Program`, `Diag`, `String`) fail,
+      so their functions become implicit `int` declarations, and calls to std or
+      other-crate methods have no definition. Only a whole-program build (all
+      crates in one C unit, or per-crate objects with shared declarations) clears
+      those.
+- [x] Whole-program build (`moira --emit c --bundle`): the root and its `--extern`
+      crates are lowered separately, then renamed and merged into one MIR program and
+      one C unit (`atropos::lower_bundle`). The root keeps its names; an extern
+      crate's functions and structs are prefixed `<crate>__`; a reference resolves to
+      its owner (the root first, then the single extern that defines it). Validated by
+      `atropos/tests/bundle.rs` (two crates with colliding `Point`s, run through gcc).
+- [x] Slices `&v[a..b]`, `&arr[a..b]`, `&slice[..]` (all range forms), with `len`,
+      indexing and `for` over them; `&slice` passes the slice value. Ranges now bind
+      looser than `+` (`comma + 1..` was misparsed).
+- [x] `for` over iterator adapters on sequences: `.iter()`, `.iter_mut()`, `.rev()`,
+      `.enumerate()` and `&mut v` lower to index loops (`iter_mut` binds pointers via
+      `Rvalue::IndexRef`). The checker types the items (`Vec<T>` items are `T`).
+- [x] Assignments through a field, an index, or a dereference store into the place
+      (`StoreField` / `StoreIndex`). Before, they silently wrote a temporary.
+- [x] `continue` in counted loops advances the counter (it used to loop forever).
+- [x] `matches!(expr, pattern)`; reads through `&Struct` parameters use `->`.
+- [x] Iterator chains over sequences and ranges: `iter()`/`into_iter()` on a `Vec`,
+      slice or array, or a range `(lo..hi)`, followed by `map`, `filter`, `enumerate`,
+      `cloned`/`copied`, and a terminal `collect`, `any`, `all`, `find`, `count`, `sum`
+      or `for_each`. One index loop; closures are lifted once and called with their
+      captures. An `enumerate` item is passed to a closure with an `(index, item)`
+      pattern as two arguments (closure parameters may be pairs). The checker types
+      the chain (`Iter<T>`), so `collect` yields `Vec<T>` and `find` yields `Option<T>`.
+      Also: `vec![..]` and `vec![v; n]`; `for c in s.chars()` / `s.bytes()` over a
+      string (bytes, exact for ASCII); `for x in (lo..hi).rev()`; nested `Vec<Vec<T>>`;
+      `matches!`; struct patterns `Name { field: pat, .. }`; enum-qualified variant
+      lookup (`TokenKind::Dollar` no longer clashes with another enum's `Dollar`);
+      `as` casts to C scalar types; closures see the enum variant table.
+      Validated by `atropos/tests/vec.rs` (untyped runs) and
+      `lachesis/tests/typed_lowering.rs` (hinted runs).
+- [ ] Remaining blockers for the whole-program build (`moira --emit c --bundle`):
+      - clotho `match_rep`: iterates a `HashMap` (`for (k, v) in map`). Needs a
+        hash-map runtime.
+      - atropos `rename_rvalue`: `for a in args` where `args` is bound by a `match` on a
+        user enum. The checker types only `Option`/`Result` payloads. Typing user enum
+        payloads needs typed per-variant payload slots in the backend too: enum payloads
+        are `long long` today, so a `Vec` payload would be wrong in C.
+      - lachesis: patterns on another crate's enum (`ItemKind::Use`); the bundle does not
+        yet share enum variant tables across crates.
+- [ ] Iterators over `chars()`, `lines()`, `values()`, `char_indices()` need string and
+      hash-map runtimes; not started.
+- [ ] `Option` / `Result` as real, instantiated types (typed payload slots per instantiation)
 - [ ] Library codegen: emit `.rlib`/object archives, not just executables
 - [ ] Full trait solving (the Chalk-like solver exists but is not wired into
       `infer` for these crates yet)
