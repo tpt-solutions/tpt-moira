@@ -196,7 +196,11 @@ def probe_crate(moira: Path, crate: dict) -> ProbeResult:
     # Codegen probe (C backend) — independent of check; reports whether the
     # subset lowers + emits at all.
     safe = "".join(c if c.isalnum() or c in "-._" else "_" for c in crate["name"])
-    res_c = run([str(moira), "--emit", "c", "-o", str(BUILD_DIR / f"{safe}.c"), str(lib)])
+    # The emit step gets the same cross-crate signatures as the check step: the
+    # typed lowering takes its expression types from the checker.
+    res_c = run(
+        [str(moira), "--emit", "c", *extern_args, "-o", str(BUILD_DIR / f"{safe}.c"), str(lib)]
+    )
     result.codegen_ok = res_c.returncode == 0
     if res_c.returncode != 0:
         err = (res_c.stderr or res_c.stdout).strip().splitlines()

@@ -35,6 +35,8 @@ fn main() -> ExitCode {
     let mut allowlist_path: Option<String> = None;
     let mut update_allowlist = false;
     let mut externs: Vec<String> = Vec::new();
+    // `--bundle`: with `--emit c`, lower the root and its extern crates as one program.
+    let mut bundle = false;
     let mut positional: Vec<String> = Vec::new();
     let mut iter = args.iter();
     while let Some(a) = iter.next() {
@@ -57,6 +59,7 @@ fn main() -> ExitCode {
                     externs.push(spec.to_string());
                 }
             }
+            "--bundle" => bundle = true,
             "--diff" => diff = true,
             "--parity" => parity_flag = true,
             "--propose" => propose_flag = true,
@@ -186,7 +189,10 @@ fn main() -> ExitCode {
                 println!("  - {:?} {:?}", item.visibility, item.kind);
             }
         }
-        "mir" => match tpt_moira_atropos::lower_program(&program) {
+        "mir" => match tpt_moira_atropos::lower_program_typed(
+            &program,
+            &tpt_moira_lachesis::expr_type_hints(&program, &extern_programs),
+        ) {
             Ok(mir) => println!("{mir}"),
             Err(e) => {
                 eprintln!("moira: lowering error: {}", e);
@@ -200,7 +206,7 @@ fn main() -> ExitCode {
                 return ExitCode::FAILURE;
             }
         },
-        "c" => match tpt_moira_atropos::lower_program(&program) {
+        "c" => match lower_for_emit(&program, &extern_programs, bundle) {
             Ok(mir) => emit_text(&tpt_moira_atropos::codegen_c::emit_c(&mir), &output),
             Err(e) => {
                 eprintln!("moira: lowering error: {}", e);
@@ -253,6 +259,40 @@ fn main() -> ExitCode {
 /// `MOIRA_NO_CACHE` is set (used by cross-process determinism checks).
 fn pipeline() -> PipelineCacheExt {
     PipelineCacheExt::new()
+}
+
+/// Lower for code generation: the root program alone, or (`--bundle`) the root and
+/// its extern crates as one program, each crate prefixed by its name.
+fn lower_for_emit(
+    program: &tpt_moira_clotho::ast::Program,
+    externs: &[(String, tpt_moira_clotho::ast::Program)],
+    bundle: bool,
+) -> Result<tpt_moira_atropos::MirProgram, tpt_moira_atropos::LowerError> {
+    if bundle && !externs.is_empty() {
+        let root_hints = tpt_moira_lachesis::expr_type_hints(program, externs);
+        let mut units = Vec::new();
+        let mut i: usize = 0;
+        while i < externs.len() {
+            // Each extern is typed against the other externs it can see.
+            let mut others: Vec<(String, tpt_moira_clotho::ast::Program)> = Vec::new();
+            for j in 0..externs.len() {
+                if j != i {
+                    others.push(externs[j].clone());
+                }
+            }
+            let name = externs[i].0.clone();
+            let prog = externs[i].1.clone();
+            let hints = tpt_moira_lachesis::expr_type_hints(&prog, &others);
+            units.push((name, prog, hints));
+            i += 1;
+        }
+        tpt_moira_atropos::lower_bundle(program, &root_hints, &units)
+    } else {
+        tpt_moira_atropos::lower_program_typed(
+            program,
+            &tpt_moira_lachesis::expr_type_hints(program, externs),
+        )
+    }
 }
 
 fn lower_and_ssa(
