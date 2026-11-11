@@ -128,6 +128,8 @@ pub struct Field {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnumDef {
     pub name: Spanned<String>,
+    /// Generic parameters, e.g. `enum Either<L, R>`.
+    pub generics: Generics,
     pub variants: Vec<Variant>,
     /// Attributes applied to this enum (e.g. `#[derive(..)]`, `#[repr(..)]`).
     pub attributes: Vec<Attribute>,
@@ -324,6 +326,8 @@ pub enum ExprKind {
     Ref(Box<Expr>, bool),
     Deref(Box<Expr>),
     Array(Vec<Expr>),
+    /// Repeat array `[value; count]`.
+    ArrayRepeat(Box<Expr>, Box<Expr>),
     /// A struct literal: `Path { field: value, ..base }`.
     Struct(Path, Vec<(Spanned<String>, Expr)>, Option<Box<Expr>>),
     Block(Block),
@@ -460,6 +464,7 @@ impl Type {
             TypeKind::Slice(inner) => format!("[{}]", inner.node_name()),
             TypeKind::Tuple(_) => "<tuple>".to_string(),
             TypeKind::Infer => "_".to_string(),
+            TypeKind::Never => "!".to_string(),
             TypeKind::Future(inner) => format!("impl Future<Output = {}>", inner.node_name()),
         }
     }
@@ -474,6 +479,8 @@ pub enum TypeKind {
     Slice(Box<Type>),
     Tuple(Vec<Type>),
     Infer,
+    /// The never type `!` (e.g. `fn abort() -> !`). It coerces to any type.
+    Never,
     /// `impl Future<Output = T>` — the anonymous return type of an `async fn`
     /// (and the type of an `.await`-able expression). The inner type is the
     /// future's resolved output.

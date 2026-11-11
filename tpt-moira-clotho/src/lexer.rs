@@ -545,12 +545,31 @@ impl<'src> Lexer<'src> {
                 Some(other) => other as char,
                 None => '\0',
             },
-            Some(other) => other as char,
+            Some(other) => self.finish_utf8(other),
         };
         if self.peek_byte() == Some(b'\'') {
             self.bump();
         }
         Some(TokenKind::Char(c))
+    }
+
+    /// Finish decoding a character whose first UTF-8 byte was just read: a `'𝛃'`
+    /// literal is four bytes, and the lexer reads bytes, so the rest are read here.
+    fn finish_utf8(&mut self, first: u8) -> char {
+        let len = match first {
+            0xC0..=0xDF => 2,
+            0xE0..=0xEF => 3,
+            0xF0..=0xF7 => 4,
+            _ => return first as char,
+        };
+        let mut buf = [first, 0, 0, 0];
+        for slot in buf.iter_mut().take(len).skip(1) {
+            *slot = self.bump().unwrap_or(0);
+        }
+        std::str::from_utf8(&buf[..len])
+            .ok()
+            .and_then(|s| s.chars().next())
+            .unwrap_or('\u{FFFD}')
     }
 
     fn read_hex_escape(&mut self, count: usize) -> u32 {

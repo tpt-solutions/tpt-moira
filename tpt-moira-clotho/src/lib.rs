@@ -12,7 +12,9 @@
 //! assert_eq!(prog.items.len(), 1);
 //! ```
 
+pub mod alias;
 pub mod ast;
+pub mod cfg;
 pub mod derive;
 pub mod error;
 pub mod lexer;
@@ -55,8 +57,15 @@ pub fn compile_file(path: &Path) -> Result<ast::Program, error::Diag> {
         .parent()
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| PathBuf::from("."));
-    let prog = pipeline::compile(&src)?;
+    let prog = pipeline::compile(&src).map_err(|d| in_file(d, path))?;
     flatten_modules(prog, &base)
+}
+
+/// Name the file a diagnostic came from: front-end errors carry only byte offsets,
+/// which are meaningless without the file (a `mod` file is a different text).
+fn in_file(mut d: error::Diag, path: &Path) -> error::Diag {
+    d.message = format!("{} (in `{}`)", d.message, path.display());
+    d
 }
 
 /// Recursively inline module items into a flat item list, loading the source
@@ -84,15 +93,21 @@ fn flatten_items(items: Vec<ast::Item>, base: &Path) -> Result<Vec<ast::Item>, e
                     ast::ModuleKind::Inline(sub) => flatten_items(sub.clone(), base)?,
                     ast::ModuleKind::External => {
                         let candidate = base.join(format!("{}.rs", m.name.node));
-                        let (sub_path, sub_base) = if candidate.is_file() {
-                            (
-                                candidate.clone(),
-                                candidate.parent().unwrap_or(base).to_path_buf(),
-                            )
-                        } else {
-                            let mod_rs = base.join(&m.name.node).join("mod.rs");
-                            (mod_rs, base.join(&m.name.node))
-                        };
+                        let (sub_path, sub_base) =
+                            if let Some(file) = cfg::module_path(&item.attributes) {
+                                // `#[path = "file.rs"]` names the module's file explicitly.
+                                let sub_path = base.join(&file);
+                                let sub_base = sub_path.parent().unwrap_or(base).to_path_buf();
+                                (sub_path, sub_base)
+                            } else if candidate.is_file() {
+                                (
+                                    candidate.clone(),
+                                    candidate.parent().unwrap_or(base).to_path_buf(),
+                                )
+                            } else {
+                                let mod_rs = base.join(&m.name.node).join("mod.rs");
+                                (mod_rs, base.join(&m.name.node))
+                            };
                         let sub_src = std::fs::read_to_string(&sub_path).map_err(|e| {
                             error::Diag::error(
                                 format!(
@@ -104,7 +119,8 @@ fn flatten_items(items: Vec<ast::Item>, base: &Path) -> Result<Vec<ast::Item>, e
                                 None,
                             )
                         })?;
-                        let sub_prog = pipeline::compile(&sub_src)?;
+                        let sub_prog =
+                            pipeline::compile(&sub_src).map_err(|d| in_file(d, &sub_path))?;
                         flatten_items(sub_prog.items, &sub_base)?
                     }
                 };

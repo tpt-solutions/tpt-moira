@@ -81,6 +81,12 @@ pub enum Frag {
     Item,
     Literal,
     Path,
+    /// `vis`: an optional visibility (`pub`, `pub(crate)`); may match nothing.
+    Vis,
+    /// `lifetime`: the lexer erases lifetimes, so this matches nothing.
+    Lifetime,
+    /// `meta`: an attribute body (`path`, `path(..)`, or `path = value`).
+    Meta,
 }
 
 /// The repetition kind of a `$(...)*` / `+` / `?`.
@@ -131,6 +137,10 @@ type Bindings = HashMap<String, Binding>;
 struct Arm {
     matcher: Vec<Matcher>,
     template: Vec<TmplEl>,
+    /// The template without its outer delimiters (`=> { .. }` -> `..`), when the
+    /// template is a single delimited group. Used for statement-like calls, where
+    /// Rust never keeps the delimiters (an item macro must expand to items).
+    unwrapped: Option<Vec<TmplEl>>,
 }
 
 /// A parsed `macro_rules!` definition (a set of arms).
@@ -142,14 +152,22 @@ pub struct MacroRulesDef {
 impl MacroRulesDef {
     /// Try each arm against the call-site body (including its delimiters),
     /// returning the rendered token stream on the first successful match.
-    fn expand_to_tokens(&self, body: &[Token]) -> Option<Vec<Token>> {
+    ///
+    /// `stmt_like` calls (followed by `;`, or written with braces) expand without
+    /// the template's outer delimiters; expression calls keep them, so a block
+    /// expression still groups its operators (`2 * m!()`).
+    fn expand_to_tokens(&self, body: &[Token], stmt_like: bool) -> Option<Vec<Token>> {
         for arm in &self.arms {
             let mut binds = HashMap::new();
             let mut pos = 0;
             let mut rep_acc: Option<HashMap<String, Vec<Vec<Token>>>> = None;
             let matched = match_m(&arm.matcher, body, &mut pos, &mut binds, &mut rep_acc);
             if matched && pos == body.len() {
-                return Some(render(&arm.template, &binds));
+                let template = match (&arm.unwrapped, stmt_like) {
+                    (Some(inner), true) => inner,
+                    _ => &arm.template,
+                };
+                return Some(render(template, &binds));
             }
         }
         None
@@ -222,6 +240,9 @@ pub fn extract_macro_rules(tokens: &[Token]) -> ParseResult<(MacroRulesTable, Ve
                     ));
                 }
             }
+            // Attributes written before the definition (`#[cfg(..)] macro_rules!`)
+            // belong to it: drop them too, or they would precede whatever follows.
+            strip_trailing_attributes(&mut out);
             let body = tokens[i + 4..j].to_vec();
             let def = parse_def(&name, &body)?;
             table.defs.insert(name, def);
@@ -232,6 +253,32 @@ pub fn extract_macro_rules(tokens: &[Token]) -> ParseResult<(MacroRulesTable, Ve
         i += 1;
     }
     Ok((table, out))
+}
+
+/// Remove `#[..]` attribute groups that end `out` (the tokens emitted so far).
+fn strip_trailing_attributes(out: &mut Vec<Token>) {
+    while matches!(out.last().map(|t| &t.kind), Some(TokenKind::RBracket)) {
+        // Find the `[` matching the trailing `]`.
+        let mut depth = 0i32;
+        let mut open = None;
+        for k in (0..out.len()).rev() {
+            match out[k].kind {
+                TokenKind::RBracket => depth += 1,
+                TokenKind::LBracket => {
+                    depth -= 1;
+                    if depth == 0 {
+                        open = Some(k);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        match open {
+            Some(k) if k > 0 && matches!(out[k - 1].kind, TokenKind::Hash) => out.truncate(k - 1),
+            _ => break,
+        }
+    }
 }
 
 fn parse_def(name: &str, body: &[Token]) -> ParseResult<MacroRulesDef> {
@@ -252,7 +299,20 @@ fn parse_def(name: &str, body: &[Token]) -> ParseResult<MacroRulesDef> {
         };
         let matcher = parse_matcher(&matcher_tts)?;
         let template = parse_tmpl(&template_tts);
-        arms.push(Arm { matcher, template });
+        let unwrapped = match template_tts.first() {
+            Some(t)
+                if delim_of_open(&t.kind).is_some()
+                    && balanced_len(&template_tts, 0) == template_tts.len() =>
+            {
+                Some(parse_tmpl(&template_tts[1..template_tts.len() - 1]))
+            }
+            _ => None,
+        };
+        arms.push(Arm {
+            matcher,
+            template,
+            unwrapped,
+        });
     }
     Ok(MacroRulesDef { arms })
 }
@@ -315,6 +375,9 @@ fn parse_frag(s: &str) -> Option<Frag> {
         "item" => Some(Frag::Item),
         "literal" => Some(Frag::Literal),
         "path" => Some(Frag::Path),
+        "vis" => Some(Frag::Vis),
+        "lifetime" => Some(Frag::Lifetime),
+        "meta" => Some(Frag::Meta),
         _ => None,
     }
 }
@@ -527,10 +590,18 @@ fn parse_tmpl(tts: &[Token]) -> Vec<TmplEl> {
                 }
                 if let Some(Token {
                     kind: TokenKind::Ident(name),
-                    ..
+                    span,
                 }) = tts.get(i + 1)
                 {
-                    out.push(TmplEl::Var(name.clone()));
+                    if name == "crate" {
+                        // `$crate::path` names the crate root; keep it as `crate::path`.
+                        out.push(TmplEl::TT(Token {
+                            kind: TokenKind::Ident("crate".to_string()),
+                            span: *span,
+                        }));
+                    } else {
+                        out.push(TmplEl::Var(name.clone()));
+                    }
                     i += 2;
                     continue;
                 }
@@ -665,11 +736,32 @@ fn frag_stoppers(frag: Frag) -> &'static [TokenKind] {
 /// Capture `frag` from `input` starting at `*pos`, returning the number of
 /// tokens consumed (advancing `*pos` on success).
 fn capture_frag(frag: Frag, input: &[Token], pos: &mut usize) -> Option<usize> {
+    // Fragments that may match nothing are handled before the end-of-input check.
+    match frag {
+        Frag::Lifetime => return Some(0),
+        Frag::Vis => {
+            return Some(match input.get(*pos).map(|t| &t.kind) {
+                Some(TokenKind::Pub) => {
+                    let mut n = 1;
+                    if matches!(
+                        input.get(*pos + 1).map(|t| &t.kind),
+                        Some(TokenKind::LParen)
+                    ) {
+                        n += balanced_len(input, *pos + 1);
+                    }
+                    n
+                }
+                _ => 0,
+            })
+        }
+        _ => {}
+    }
     if *pos >= input.len() {
         return None;
     }
     let k = &input[*pos].kind;
     match frag {
+        Frag::Meta => return meta_len(input, *pos),
         Frag::Tt => {
             // A `tt` captures a single token, or a whole delimited group as one
             // tree when the cursor sits on an opening delimiter.
@@ -731,6 +823,44 @@ fn capture_frag(frag: Frag, input: &[Token], pos: &mut usize) -> Option<usize> {
             }
         }
     }
+}
+
+/// Length of an attribute body starting at `pos`: a path (`a::b`), followed by
+/// an optional delimited group or `= value` (the value runs to the next
+/// top-level comma). `None` if the input does not start with an identifier.
+fn meta_len(input: &[Token], pos: usize) -> Option<usize> {
+    if !matches!(input.get(pos).map(|t| &t.kind), Some(TokenKind::Ident(_))) {
+        return None;
+    }
+    let mut j = pos + 1;
+    while matches!(input.get(j).map(|t| &t.kind), Some(TokenKind::ColonColon))
+        && matches!(input.get(j + 1).map(|t| &t.kind), Some(TokenKind::Ident(_)))
+    {
+        j += 2;
+    }
+    match input.get(j).map(|t| &t.kind) {
+        Some(k) if delim_of_open(k).is_some() => j += balanced_len(input, j),
+        Some(TokenKind::Eq) => {
+            j += 1;
+            let mut depth = 0i32;
+            while j < input.len() {
+                match input[j].kind {
+                    TokenKind::LParen | TokenKind::LBrace | TokenKind::LBracket => depth += 1,
+                    TokenKind::RParen | TokenKind::RBrace | TokenKind::RBracket => {
+                        if depth == 0 {
+                            break;
+                        }
+                        depth -= 1;
+                    }
+                    TokenKind::Comma if depth == 0 => break,
+                    _ => {}
+                }
+                j += 1;
+            }
+        }
+        _ => {}
+    }
+    Some(j - pos)
 }
 
 /// Length of the balanced delimited group starting at `pos` (which must be an
@@ -861,6 +991,10 @@ fn match_rep(
                         local.entry(k).or_default().push(one);
                     }
                 }
+            }
+            // A zero-length iteration (e.g. `$($v:vis)*`) would repeat forever.
+            if *pos == save {
+                break;
             }
         } else {
             *pos = save;
@@ -994,7 +1128,18 @@ pub fn expand_macro_rules_calls(tokens: &[Token], table: &MacroRulesTable) -> Ve
                     }
                     // Body includes the call-site delimiters.
                     let body = tokens[i + 2..j].to_vec();
-                    if let Some(produced) = def.expand_to_tokens(&body) {
+                    // Statement-like: a call that starts a statement (or item) and
+                    // is followed by `;`, or any brace-delimited call. A `;` after
+                    // an expression call (`let a = 2 * m!();`) does not count.
+                    let at_stmt_start = i == 0
+                        || matches!(
+                            tokens[i - 1].kind,
+                            TokenKind::Semicolon | TokenKind::RBrace | TokenKind::LBrace
+                        );
+                    let stmt_like = (at_stmt_start
+                        && matches!(tokens.get(j).map(|t| &t.kind), Some(TokenKind::Semicolon)))
+                        || matches!(tokens[i + 2].kind, TokenKind::LBrace);
+                    if let Some(produced) = def.expand_to_tokens(&body, stmt_like) {
                         // Recursively expand any macro calls emitted in output.
                         let produced2 = expand_macro_rules_calls(&produced, table);
                         out.extend(produced2);

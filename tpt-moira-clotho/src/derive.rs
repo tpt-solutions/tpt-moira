@@ -153,14 +153,63 @@ fn derive_struct(trait_name: &str, s: &StructDef) -> Option<String> {
 }
 
 /// Generate the `impl` source for a derive trait on an enum.
+/// The payload shape of an enum variant, as the derive generator sees it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Shape {
+    /// `V`
+    Unit,
+    /// `V(T, ..)` with this many fields.
+    Tuple(usize),
+    /// `V { x: T, .. }`
+    Struct,
+}
+
+fn variant_shape(v: &Variant) -> Shape {
+    match &v.fields {
+        None => Shape::Unit,
+        Some(fs) if fs.iter().all(|f| f.name.node.is_empty()) => Shape::Tuple(fs.len()),
+        Some(_) => Shape::Struct,
+    }
+}
+
+/// A pattern for `Self::V` that matches any payload without binding it.
+fn variant_wildcard_pattern(v: &Variant) -> String {
+    match variant_shape(v) {
+        Shape::Unit => format!("Self::{}", v.name.node),
+        Shape::Tuple(n) => {
+            let wild: Vec<&str> = (0..n).map(|_| "_").collect();
+            format!("Self::{}({})", v.name.node, wild.join(", "))
+        }
+        Shape::Struct => format!("Self::{} {{ .. }}", v.name.node),
+    }
+}
+
 fn derive_enum(trait_name: &str, e: &EnumDef) -> Option<String> {
     let name = &e.name.node;
     let variants = &e.variants;
     let src = match trait_name {
         "Clone" => {
+            // A struct variant's fields cannot be bound by the pattern subset yet, so
+            // its clone is not generated (the enum then has no `clone`).
+            if variants.iter().any(|v| variant_shape(v) == Shape::Struct) {
+                return None;
+            }
             let arms = variants
                 .iter()
-                .map(|v| format!("Self::{v} => Self::{v},", v = v.name.node))
+                .map(|v| match variant_shape(v) {
+                    Shape::Tuple(n) => {
+                        let binds: Vec<String> = (0..n).map(|i| format!("a{i}")).collect();
+                        let clones: Vec<String> =
+                            binds.iter().map(|b| format!("{b}.clone()")).collect();
+                        format!(
+                            "Self::{v}({bs}) => Self::{v}({cs}),",
+                            v = v.name.node,
+                            bs = binds.join(", "),
+                            cs = clones.join(", ")
+                        )
+                    }
+                    _ => format!("Self::{v} => Self::{v},", v = v.name.node),
+                })
                 .collect::<Vec<_>>()
                 .join(" ");
             format!(
@@ -177,7 +226,7 @@ fn derive_enum(trait_name: &str, e: &EnumDef) -> Option<String> {
             let arms: Vec<String> = variants
                 .iter()
                 .enumerate()
-                .map(|(i, v)| format!("Self::{v} => {i},", v = v.name.node, i = i))
+                .map(|(i, v)| format!("{pat} => {i},", pat = variant_wildcard_pattern(v), i = i))
                 .collect();
             let arms = arms.join(" ");
             format!(

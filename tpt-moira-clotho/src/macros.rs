@@ -127,7 +127,7 @@ pub fn extract_macros(tokens: &[Token]) -> ParseResult<(MacroTable, Vec<Token>)>
                 ));
             }
             let body_tokens: Vec<Token> = tokens[body_start..j].to_vec();
-            let body = Parser::new(body_tokens).parse_expr()?;
+            let body = Parser::segment(body_tokens).parse_expr()?;
 
             table.defs.insert(name, MacroDef { params, body });
             // Skip the terminating `;`.

@@ -407,3 +407,222 @@ fn parse_closures() {
         assert_eq!(prog.items.len(), 1);
     }
 }
+
+/// Regression: a tuple-index access inside a comma-separated macro argument
+/// (`s.1, x`) used to make the macro-argument parser spin forever, because the
+/// comma-split segment had no terminating `Eof` and the cursor never advanced.
+/// The parse runs on a thread with a timeout so a reintroduced hang fails the
+/// test instead of stalling the suite.
+#[test]
+fn macro_args_with_tuple_index_terminate() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+    use tpt_moira_clotho::lexer::tokenize;
+    use tpt_moira_clotho::parser::Parser;
+
+    for src in ["s.0", "s.1, x", "s.0, s.1, s.x", "a, b.2"] {
+        let (tx, rx) = mpsc::channel();
+        let owned = src.to_string();
+        std::thread::spawn(move || {
+            let n = Parser::parse_macro_args(tokenize(&owned)).len();
+            let _ = tx.send(n);
+        });
+        let n = rx
+            .recv_timeout(Duration::from_secs(10))
+            .unwrap_or_else(|_| panic!("parse_macro_args hung on `{src}`"));
+        let expected = src.split(',').count();
+        assert_eq!(n, expected, "wrong argument count for `{src}`");
+    }
+}
+
+/// Type aliases expand to their body, with generic parameters substituted, and
+/// chained aliases resolve transitively. Qualified paths are never treated as
+/// alias uses (so `type Result<T> = std::result::Result<T, E>` cannot recurse).
+#[test]
+fn alias_table_expands_generic_and_chained_aliases() {
+    use tpt_moira_clotho::alias::AliasTable;
+    use tpt_moira_clotho::ast::{ItemKind, TypeKind};
+
+    let src = "type Id = i32; type Pair<T> = (T, T); type Id2 = Id; \
+               type Res<T> = std::result::Result<T, String>; \
+               fn f(a: Id2, p: Pair<bool>, r: Res<u8>) {}";
+    let prog = parse_source(src).expect("parses");
+    let table = AliasTable::from_program(&prog);
+    let f = prog
+        .items
+        .iter()
+        .find_map(|it| match &it.kind {
+            ItemKind::Function(f) if f.name.node == "f" => Some(f),
+            _ => None,
+        })
+        .expect("fn f");
+
+    // `Id2` -> `Id` -> `i32`.
+    let a = table.expand(&f.params[0].ty);
+    assert!(matches!(&a.kind, TypeKind::Path(p, _) if p.segments[0].node == "i32"));
+
+    // `Pair<bool>` -> `(bool, bool)`.
+    let p = table.expand(&f.params[1].ty);
+    match &p.kind {
+        TypeKind::Tuple(elems) => {
+            assert_eq!(elems.len(), 2);
+            for e in elems {
+                assert!(matches!(&e.kind, TypeKind::Path(q, _) if q.segments[0].node == "bool"));
+            }
+        }
+        other => panic!("expected tuple, got {other:?}"),
+    }
+
+    // `Res<u8>` -> `std::result::Result<u8, String>` (the qualified path is kept).
+    let r = table.expand(&f.params[2].ty);
+    match &r.kind {
+        TypeKind::Path(q, args) => {
+            assert_eq!(q.segments.len(), 3);
+            assert_eq!(args.len(), 2);
+        }
+        other => panic!("expected path, got {other:?}"),
+    }
+}
+
+/// A self-referential alias must terminate (bounded expansion), not loop.
+#[test]
+fn cyclic_alias_terminates() {
+    use tpt_moira_clotho::alias::AliasTable;
+    use tpt_moira_clotho::ast::ItemKind;
+
+    let prog = parse_source("type A = A; fn f(x: A) {}").expect("parses");
+    let table = AliasTable::from_program(&prog);
+    let f = prog
+        .items
+        .iter()
+        .find_map(|it| match &it.kind {
+            ItemKind::Function(f) => Some(f),
+            _ => None,
+        })
+        .expect("fn f");
+    let _ = table.expand(&f.params[0].ty);
+}
+
+/// Constructs that real crates use and the front end must accept: `const fn`,
+/// the never type, string-valued attributes, `core::str` paths, brace-grouped
+/// `use`, item-position macro calls, and braced `macro_rules!` followed by items.
+#[test]
+fn real_crate_item_forms_parse() {
+    let cases = [
+        "pub const fn new() -> i32 { 1 }",
+        "fn abort() -> ! { loop {} }",
+        "#[cfg(feature = \"x\")]\nuse core::str;",
+        "use { a::b, c };",
+        "compile_error!(\"no\");",
+        "cfg_if! { if #[cfg(a)] { fn x() {} } }",
+        "#[cfg(not(docsrs))]\nmacro_rules! crate_root {\n () => { 1 };\n}\nfn after() {}",
+    ];
+    for src in cases {
+        if let Err(e) = parse_source(src) {
+            panic!("`{src}` should parse, got: {e:?}");
+        }
+    }
+    // The dropped forms leave no item behind; the real ones are kept.
+    let prog = parse_source("compile_error!(\"no\"); fn kept() {}").expect("parses");
+    assert_eq!(prog.items.len(), 1);
+}
+
+/// `vis`, `lifetime` and `meta` fragments, and a `vis` that matches nothing.
+#[test]
+fn macro_fragments_vis_lifetime_meta_match() {
+    let src = "macro_rules! make {
+        ($v:vis fn $n:ident) => { $v fn $n() -> i32 { 1 } };
+    }
+    make!(pub fn a);
+    make!(fn b);";
+    let prog = tpt_moira_clotho::compile_source(src).expect("expands and parses");
+    let names: Vec<&str> = prog
+        .items
+        .iter()
+        .filter_map(|it| match &it.kind {
+            ItemKind::Function(f) => Some(f.name.node.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(names, vec!["a", "b"]);
+}
+
+/// `#[cfg(..)]` is evaluated for the fixed target (64-bit Windows, no features,
+/// test off): satisfied items are kept, unsatisfied ones are dropped at parse.
+#[test]
+fn cfg_predicates_select_items_for_the_target() {
+    let src = r#"
+        #[cfg(feature = "std")] fn feature_on() {}
+        #[cfg(not(feature = "std"))] fn no_std() {}
+        #[cfg(windows)] fn on_windows() {}
+        #[cfg(unix)] fn on_unix() {}
+        #[cfg(not(unix))] fn not_unix() {}
+        #[cfg(all(windows, target_pointer_width = "64"))] fn win64() {}
+        #[cfg(any(unix, target_os = "linux"))] fn linuxish() {}
+        #[cfg(test)] fn test_only() {}
+        #[cfg(feature = "std")] mod missing_file;
+    "#;
+    let prog = parse_source(src).expect("parses");
+    let names: Vec<&str> = prog
+        .items
+        .iter()
+        .filter_map(|it| match &it.kind {
+            ItemKind::Function(f) => Some(f.name.node.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(names, vec!["no_std", "on_windows", "not_unix", "win64"]);
+}
+
+/// `matches!(e, pat)` parses as a `match` whose pattern is a real pattern (so
+/// `A | B` is an or-pattern, not a bitwise OR of two paths).
+#[test]
+fn matches_macro_desugars_to_a_match() {
+    let prog =
+        tpt_moira_clotho::compile_source("fn f(e: E) -> bool { matches!(e, E::A | E::B(_)) }")
+            .expect("parses");
+    let body = match &prog.items[0].kind {
+        ItemKind::Function(f) => f.body.tail.as_ref().expect("tail").kind.clone(),
+        other => panic!("expected fn, got {other:?}"),
+    };
+    match body {
+        ExprKind::Match(_, arms) => {
+            assert_eq!(arms.len(), 2);
+            assert!(matches!(arms[0].0, tpt_moira_clotho::ast::Pat::Or(_, _)));
+        }
+        other => panic!("expected a match, got {other:?}"),
+    }
+}
+
+/// An item declared inside a function body is hoisted to the top level; nested
+/// items whose names clash are not hoisted.
+#[test]
+fn nested_items_are_hoisted_and_clashes_rejected() {
+    let prog =
+        parse_source("fn outer() -> i32 { fn helper() -> i32 { 1 } helper() }").expect("parses");
+    let names: Vec<&str> = prog
+        .items
+        .iter()
+        .filter_map(|it| match &it.kind {
+            ItemKind::Function(f) => Some(f.name.node.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(names, vec!["outer", "helper"]);
+
+    // Two nested items with one name are both dropped (neither binds the other's
+    // calls); the functions around them still parse.
+    let clash = parse_source(
+        "fn a() -> i32 { fn h() -> i32 { 1 } h() } fn b() -> i32 { fn h() -> i32 { 2 } h() }",
+    )
+    .expect("parses");
+    let clash_names: Vec<&str> = clash
+        .items
+        .iter()
+        .filter_map(|it| match &it.kind {
+            ItemKind::Function(f) => Some(f.name.node.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(clash_names, vec!["a", "b"]);
+}

@@ -91,3 +91,17 @@ fn attributes_are_retained_on_item() {
         .map(|s| s.node == "inline")
         .unwrap_or(false)));
 }
+
+#[test]
+fn derive_clone_handles_tuple_and_unit_variants() {
+    // A payload variant needs a payload pattern and constructor; `Self::B => Self::B`
+    // (the old form) is only valid for unit variants.
+    let prog =
+        tpt_moira_clotho::compile_source("#[derive(Clone, PartialEq)] enum E { A, B(i32, i32) }")
+            .expect("derive expands and parses");
+    let has_clone = prog.items.iter().any(|it| match &it.kind {
+        tpt_moira_clotho::ast::ItemKind::Impl(imp) => imp.trait_name.node == "Clone",
+        _ => false,
+    });
+    assert!(has_clone, "a Clone impl is generated");
+}
