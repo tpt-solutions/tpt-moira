@@ -69,10 +69,25 @@ fn derives_of(item: &Item) -> Vec<String> {
     out
 }
 
+/// Where the spans of derived code start, and the room given to each derived impl.
+const DERIVE_SPAN_BASE: usize = 1 << 40;
+const DERIVE_SPAN_STRIDE: usize = 1 << 20;
+
 /// Parse a generated `impl` source and append it (preserving the original
 /// item's visibility attributes are not carried onto impls).
 fn append_impl(items: &mut Vec<Item>, src: &str) {
-    let mut p = Parser::from_source(src);
+    // The generated text has its own byte offsets; they are moved to a region of their own,
+    // so that no span of a derived impl equals a span of the user's source (spans key the
+    // type hints of the lowering).
+    static NEXT_BASE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = NEXT_BASE.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let base = DERIVE_SPAN_BASE + n * DERIVE_SPAN_STRIDE;
+    let mut tokens = crate::lexer::tokenize(src);
+    for t in tokens.iter_mut() {
+        t.span.start += base;
+        t.span.end += base;
+    }
+    let mut p = Parser::new(tokens);
     match p.parse_item() {
         Ok(impl_item) => items.push(impl_item),
         Err(_) => {
