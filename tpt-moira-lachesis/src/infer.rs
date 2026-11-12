@@ -93,6 +93,9 @@ pub struct TypeChecker {
     /// variant name prefers these owners.
     own_enums: std::collections::HashSet<String>,
     env: Vec<HashMap<String, Ty>>,
+    /// Locals bound (without an annotation) to `Vec::new()`, by name, with the span of the
+    /// initializer: the first `push` onto one gives the vector its element type.
+    pending_vec: HashMap<String, Span>,
     /// Stack of the generic parameter lists of the functions currently being
     /// checked. The top entry scopes the generic type parameters so that a bare
     /// type-name in a signature/body resolves to [`Ty::Generic`] and so that
@@ -335,6 +338,7 @@ impl Default for TypeChecker {
             variant_field_names: HashMap::new(),
             own_enums: std::collections::HashSet::new(),
             env: Vec::new(),
+            pending_vec: HashMap::new(),
             generic_scope: Vec::new(),
             ret: Ty::Unit,
             ret_span: Span::default(),
@@ -877,6 +881,17 @@ impl TypeChecker {
             .unwrap_or(Ty::Unit);
         self.ret_span = f.ret.as_ref().map(|t| t.span).unwrap_or(f.name.span);
         let body_ty = self.infer_block(&f.body);
+        // A tail whose type the context decides (`collect()`, an unsuffixed literal) takes
+        // the return type.
+        if let Some(tail) = &f.body.tail {
+            if !matches!(self.ret, Ty::Unit)
+                && has_default_int(&body_ty)
+                && !matches!(self.ret, Ty::Unknown)
+            {
+                self.expr_types
+                    .insert((tail.span.start, tail.span.end), self.ret.clone());
+            }
+        }
         if !matches!(self.ret, Ty::Unit) && !self.compatible(&body_ty, &self.ret) {
             self.err(
                 self.ret_span,
@@ -908,7 +923,16 @@ impl TypeChecker {
                         }
                         ann_ty
                     } else if let Some(init) = &l.init {
-                        self.infer_expr(init)
+                        let it = self.infer_expr(init);
+                        if let Pat::Ident(n) = &l.pat {
+                            if matches!(&it, Ty::Apply(v, a) if v == "Vec" && matches!(a.as_slice(), [Ty::Unknown]))
+                            {
+                                self.pending_vec.insert(n.node.clone(), init.span);
+                            } else {
+                                self.pending_vec.remove(&n.node);
+                            }
+                        }
+                        it
                     } else {
                         Ty::Unit
                     };
@@ -1103,7 +1127,10 @@ impl TypeChecker {
                 let st = self.strip_refs(scrut_ty);
                 let variant = match &st {
                     Ty::Struct(n) | Ty::Apply(n, _) => {
-                        let names = self.variant_field_names.get(&(n.clone(), vname.clone())).cloned();
+                        let names = self
+                            .variant_field_names
+                            .get(&(n.clone(), vname.clone()))
+                            .cloned();
                         let tys = self
                             .enum_variants
                             .get(n)
@@ -1950,7 +1977,9 @@ impl TypeChecker {
         let name = segments.last().cloned().unwrap_or_default();
         // `Some(x)` is an `Option` of `x`'s type; `Ok(x)` / `Err(x)` a `Result` with that
         // side typed (the other side is unknown until the context fixes it).
-        if segments.len() == 1 && args.len() == 1 && matches!(name.as_str(), "Some" | "Ok" | "Err")
+        if segments.len() == 1
+            && args.len() == 1
+            && matches!(name.as_str(), "Some" | "Ok" | "Err")
             && self.lookup(&name).is_none()
         {
             let t = self.infer_expr(&args[0]);
@@ -2237,7 +2266,10 @@ impl TypeChecker {
                 if segs.len() >= 2 {
                     let en = segs[segs.len() - 2].clone();
                     let vn = segs[segs.len() - 1].clone();
-                    let names = self.variant_field_names.get(&(en.clone(), vn.clone())).cloned();
+                    let names = self
+                        .variant_field_names
+                        .get(&(en.clone(), vn.clone()))
+                        .cloned();
                     let tys = self
                         .enum_variants
                         .get(&en)
@@ -2246,7 +2278,11 @@ impl TypeChecker {
                     if let (Some(names), Some(tys)) = (names, tys) {
                         for (fname, fexpr) in fields {
                             let at = self.infer_expr(fexpr);
-                            match names.iter().position(|n| n == &fname.node).and_then(|i| tys.get(i)) {
+                            match names
+                                .iter()
+                                .position(|n| n == &fname.node)
+                                .and_then(|i| tys.get(i))
+                            {
                                 Some(ft) => self.expect(&at, ft, fexpr.span),
                                 None => self.err(
                                     span,
@@ -2256,7 +2292,10 @@ impl TypeChecker {
                         }
                         for n in &names {
                             if !fields.iter().any(|(f, _)| f.node == *n) {
-                                self.err(span, format!("missing field `{}` for variant `{}`", n, vn));
+                                self.err(
+                                    span,
+                                    format!("missing field `{}` for variant `{}`", n, vn),
+                                );
                             }
                         }
                         return Ty::Struct(en);
@@ -2343,6 +2382,32 @@ impl TypeChecker {
         args: &[Expr],
     ) -> Ty {
         let recv_ty = self.infer_expr(recv);
+        // `v.push(x)` on a vector whose element type is still open: `x` is its element type.
+        if method.node == "push" && args.len() == 1 {
+            if let ExprKind::Path(p) = &recv.kind {
+                if p.segments.len() == 1 {
+                    let name = p.segments[0].node.clone();
+                    if let Some(init_span) = self.pending_vec.get(&name).copied() {
+                        if matches!(&recv_ty, Ty::Apply(v, a) if v == "Vec" && matches!(a.as_slice(), [Ty::Unknown]))
+                        {
+                            let et = self.infer_expr(&args[0]);
+                            if !matches!(et, Ty::Unknown) {
+                                let vt = Ty::Apply("Vec".to_string(), vec![et]);
+                                for scope in self.env.iter_mut().rev() {
+                                    if let Some(slot) = scope.get_mut(&name) {
+                                        *slot = vt.clone();
+                                        break;
+                                    }
+                                }
+                                self.expr_types.insert((init_span.start, init_span.end), vt);
+                                self.pending_vec.remove(&name);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let recv_ty = self.lookup_recv_after_push(recv, recv_ty);
         // An `Unknown` receiver (possibly behind refs — an earlier error
         // already fired) absorbs this call silently instead of cascading a
         // wall of "no method" diagnostics.
@@ -2369,7 +2434,8 @@ impl TypeChecker {
             let m = method.node.as_str();
             if (n == "Option" || n == "Result")
                 && !targs.is_empty()
-                && ((args.is_empty() && (m == "unwrap" || m == "expect" || m == "unwrap_or_default"))
+                && ((args.is_empty()
+                    && (m == "unwrap" || m == "expect" || m == "unwrap_or_default"))
                     || (args.len() == 1 && (m == "unwrap_or" || m == "unwrap_or_else")))
             {
                 for a in args {
@@ -2807,7 +2873,8 @@ impl TypeChecker {
                 Some(Ty::Unit)
             }
             ("count", 0) => Some(Ty::Usize),
-            ("collect", 0) => Some(Ty::Apply("Vec".to_string(), vec![item])),
+            // The collection is the context's (an annotation or a return type names it).
+            ("collect", 0) => Some(Ty::Unknown),
             ("sum", 0) => Some(deref_item(item)),
             ("next", 0) => Some(Ty::Apply("Option".to_string(), vec![item])),
             _ => None,
@@ -2845,7 +2912,9 @@ impl TypeChecker {
                 Ty::Tuple(vec![args[0].clone(), args[1].clone()])
             }
             // A set yields its keys.
-            Ty::Apply(name, args) if (name == "HashSet" || name == "BTreeSet") && args.len() == 1 => {
+            Ty::Apply(name, args)
+                if (name == "HashSet" || name == "BTreeSet") && args.len() == 1 =>
+            {
                 args[0].clone()
             }
             Ty::Apply(name, args) if name == "BTreeMap" && args.len() == 2 => {
@@ -2895,7 +2964,9 @@ impl TypeChecker {
         self.fns.insert("None".into(), sig(vec![], std("Option")));
         // `None` is also usable as a bare nullary value (a unit variant), unlike
         // `Some` which always takes an argument.
-        self.values.insert("None".into(), std("Option"));
+        // `None` is an `Option` whose payload the context decides.
+        self.values
+            .insert("None".into(), Apply("Option".into(), vec![Unknown]));
         self.fns
             .insert("Ok".into(), sig(vec![Unknown], std("Result")));
         self.fns
@@ -2907,12 +2978,16 @@ impl TypeChecker {
             .insert("box_new".into(), sig(vec![Unknown], std("Box")));
 
         // Associated functions `Type::fn()`.
-        self.assoc_fns
-            .insert(("Vec".into(), "new".into()), sig(vec![], Apply("Vec".into(), vec![Unknown])));
+        self.assoc_fns.insert(
+            ("Vec".into(), "new".into()),
+            sig(vec![], Apply("Vec".into(), vec![Unknown])),
+        );
         self.assoc_fns
             .insert(("String".into(), "new".into()), sig(vec![], std("String")));
-        self.assoc_fns
-            .insert(("String".into(), "from".into()), sig(vec![Unknown], std("String")));
+        self.assoc_fns.insert(
+            ("String".into(), "from".into()),
+            sig(vec![Unknown], std("String")),
+        );
         self.assoc_fns
             .insert(("Box".into(), "new".into()), sig(vec![Unknown], std("Box")));
         self.assoc_fns.insert(
@@ -3263,8 +3338,10 @@ impl TypeChecker {
             .insert(("String".into(), "as_str".into()), sig(vec![], Str));
         self.methods
             .insert(("String".into(), "is_empty".into()), sig(vec![], Bool));
-        self.methods
-            .insert(("str".into(), "as_bytes".into()), sig(vec![], Apply("Vec".into(), vec![U8])));
+        self.methods.insert(
+            ("str".into(), "as_bytes".into()),
+            sig(vec![], Apply("Vec".into(), vec![U8])),
+        );
         self.methods
             .insert(("str".into(), "chars".into()), sig(vec![], Unknown));
         self.methods
@@ -3480,10 +3557,30 @@ impl TypeChecker {
             ("HashSet", "contains", vec![Unknown], Bool),
             ("String", "ends_with", vec![Unknown], Bool),
             ("String", "starts_with", vec![Unknown], Bool),
-            ("String", "strip_suffix", vec![Unknown], Apply("Option".into(), vec![Str])),
-            ("String", "strip_prefix", vec![Unknown], Apply("Option".into(), vec![Str])),
-            ("str", "strip_suffix", vec![Unknown], Apply("Option".into(), vec![Str])),
-            ("str", "strip_prefix", vec![Unknown], Apply("Option".into(), vec![Str])),
+            (
+                "String",
+                "strip_suffix",
+                vec![Unknown],
+                Apply("Option".into(), vec![Str]),
+            ),
+            (
+                "String",
+                "strip_prefix",
+                vec![Unknown],
+                Apply("Option".into(), vec![Str]),
+            ),
+            (
+                "str",
+                "strip_suffix",
+                vec![Unknown],
+                Apply("Option".into(), vec![Str]),
+            ),
+            (
+                "str",
+                "strip_prefix",
+                vec![Unknown],
+                Apply("Option".into(), vec![Str]),
+            ),
             // `str` methods of the C string runtime (`moira_str_*`).
             ("str", "trim", vec![], Str),
             ("str", "trim_start", vec![], Str),
@@ -3496,8 +3593,20 @@ impl TypeChecker {
             ("str", "to_owned", vec![], Str),
             ("str", "to_ascii_lowercase", vec![], Str),
             ("str", "replace", vec![Unknown, Unknown], Str),
-            ("str", "find", vec![Unknown], Apply("Option".into(), vec![Usize])),
-            ("String", "find", vec![Unknown], Apply("Option".into(), vec![Usize])),
+            ("str", "replacen", vec![Unknown, Unknown, Unknown], Str),
+            ("Vec", "join", vec![Unknown], Str),
+            (
+                "str",
+                "find",
+                vec![Unknown],
+                Apply("Option".into(), vec![Usize]),
+            ),
+            (
+                "String",
+                "find",
+                vec![Unknown],
+                Apply("Option".into(), vec![Usize]),
+            ),
             ("char", "is_ascii_alphanumeric", vec![], Bool),
             ("char", "is_ascii_digit", vec![], Bool),
             ("char", "is_ascii_alphabetic", vec![], Bool),
@@ -3554,6 +3663,18 @@ impl TypeChecker {
                 generics: Generics::default(),
             },
         );
+    }
+
+    /// The receiver's type after a `push` may have fixed its element type.
+    fn lookup_recv_after_push(&self, recv: &Expr, fallback: Ty) -> Ty {
+        if let ExprKind::Path(p) = &recv.kind {
+            if p.segments.len() == 1 {
+                if let Some(t) = self.lookup(&p.segments[0].node) {
+                    return t;
+                }
+            }
+        }
+        fallback
     }
 
     fn lookup(&self, name: &str) -> Option<Ty> {
