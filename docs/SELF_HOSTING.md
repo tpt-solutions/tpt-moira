@@ -410,13 +410,62 @@ code generator**, which still reject most of the compiler's own code:
       `as` casts to C scalar types; closures see the enum variant table.
       Validated by `atropos/tests/vec.rs` (untyped runs) and
       `lachesis/tests/typed_lowering.rs` (hinted runs).
+- [x] Typed user-enum payloads. Each user enum's struct has one typed slot per payload
+      field (`v{tag}_{i}`, C type from the declaration); generic payloads stay `long
+      long`. Pattern bindings take the payload's type (through a reference when the
+      match is on a reference, as in Rust). The checker types the payloads too.
+      Structs are emitted in by-value dependency order. `Option`/`Result` keep their
+      untyped `f{i}` payload. Validated by `lachesis/tests/typed_lowering.rs`
+      (`typed_enum_payloads_run`). Also: `Box<T>` is modelled as `T`; scalar operators
+      accept references to scalars (`i32 + &i32`).
+      Effect on the probe: the checker now types what it used to absorb as `Unknown`,
+      so the counts rose: atropos 356 → 585, clotho 243 → 274, lachesis 231 → 305. Those
+      are checker gaps that were hidden before, not new breakage: the remaining errors are
+      listed by kind with `moira --check` (for example `no method` on std types, and
+      `String` against `str`).
+- [x] Checker triage (same probe, fewer false errors). Fixed modelling mistakes: extern
+      structs were overwritten by the prelude (`Path`, `Block`, `Stmt` lost their fields);
+      tuple-struct constructors (`LowerError(..)`) are functions; `str` methods that
+      return `String` are found on `String`; `String` and `str` are compatible; generic
+      struct fields take the instance's type arguments; `&A` implements an operator
+      trait when `A` does; iteration items are references (`for x in &v`, `iter()`), so
+      `*x` works; calls through a closure-typed local resolve; `HashSet::insert` takes
+      one argument; more `Option`/`Result`/`String` methods. Counts (probe): atropos
+      585 → 248, clotho 274 → 184, lachesis 305 → 176.
+- [x] Typed prelude values. `Option<T>` and `Result<T,E>` are instance structs
+      (`Option_T`, `Result_T_E`; `Result`'s error payload is `e0`); a `Some(x)` or `Ok(x)`
+      takes its type from its context; `?` converts the error to the return type's
+      instance; `take()` on an `Option` local. Tuples are `Tuple<..>` type strings with
+      instance structs. Struct literals of the prelude enums take their struct from the
+      destination type.
+- [x] Hash maps and sets in the backend (`Map<K,V>`; `HashSet<K>` is `Map<K,bool>`).
+      Insertion-ordered (Rust's order is unspecified, so programs cannot rely on it):
+      `insert` returns the replaced value as an `Option`, `get`, `contains_key`/`contains`,
+      `len`, `is_empty`, `for (k, v) in &m`, `m.keys()`, `m.values()`, and `for x in &set`.
+      Keys compare as strings (`strcmp`), structs (`memcmp`), or with `==`. Not yet:
+      `entry`, `remove`, `iter_mut`, `get_mut`, and maps as struct fields built with
+      `HashMap::new()` outside an annotated `let`.
+- [x] Loops over `zip` and `chain` of two sequences; `v.drain(..)` (empties the vector);
+      `vec![..]`, `vec![v; n]`; cross-crate enum patterns: a unit learns the other units'
+      enums (variants and payload types; their structs are emitted once, by the owner).
+      A struct or enum the program defines is hinted by its name.
+- [x] Checker: `HashMap`/`HashSet` methods and iteration types, `Option::take`, `&pat`
+      patterns strip one reference, `Box<T>` is `T`.
 - [ ] Remaining blockers for the whole-program build (`moira --emit c --bundle`):
+      - clotho `compile_concurrent`: loops over the result of `std::thread::scope`. The
+        backend has no threads; the compiler's pipeline uses them for parallel
+        compilation, so this needs a decision (a sequential version, or thread support).
+      - atropos `emit_c`: loops over a `BTreeSet` (sorted iteration). A sorted set is a
+        different runtime from the insertion-ordered map; sorted iteration matters for the
+        determinism tests.
+      - lachesis: loops whose sources the checker does not type (for example a `HashSet`
+        from `Option::cloned().unwrap_or_default()`), and the checker's remaining gaps:
+        the probe counts are atropos 291, clotho 181, lachesis 191.
       - clotho `match_rep`: iterates a `HashMap` (`for (k, v) in map`). Needs a
         hash-map runtime.
-      - atropos `rename_rvalue`: `for a in args` where `args` is bound by a `match` on a
-        user enum. The checker types only `Option`/`Result` payloads. Typing user enum
-        payloads needs typed per-variant payload slots in the backend too: enum payloads
-        are `long long` today, so a `Vec` payload would be wrong in C.
+      - atropos `rename_program`: `for (_, ty) in &mut s.fields`, a `Vec` of tuples. The
+        element type of a tuple is not expressible as a hint yet (the backend names tuple
+        structs from their component C types, which the checker does not reproduce).
       - lachesis: patterns on another crate's enum (`ItemKind::Use`); the bundle does not
         yet share enum variant tables across crates.
 - [ ] Iterators over `chars()`, `lines()`, `values()`, `char_indices()` need string and

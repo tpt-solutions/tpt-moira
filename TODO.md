@@ -29,13 +29,13 @@ Target: compile a strict subset of Rust (no complex trait resolution, no async/a
 ### Core Infrastructure
 - [x] Region-based memory allocator for compiler-internal data structures (`moira-alloc` arena)
 - [x] Stage 0 bootstrap transpiler (macro-free Moira subset → C → native binary)
-- [x] Benchmark harness comparing Moira vs. `rustc` on the Phase-1 subset (`moira-bench`)
+- [x] Benchmark harness comparing Moira vs. `rustc` on the Phase-1 subset (`tpt-moira-bench`)
 - [ ] Validate 10x speedup target for the subset
   - Status: harness extended and re-run; **10x is not yet met for the canonical
     front-end + SSA mid-end vs `rustc --emit=metadata` measurement (~7.0x
     geomean), but a full `rustc` build+link baseline shows ~17.9x geomean**, so
     the gap is in Moira's own mid-end/codegen rather than end-to-end wall time.
-    Three measurements now exist, all recorded via `moira-bench --record`:
+    Three measurements now exist, all recorded via `tpt-moira-bench --record`:
     * **front-end + SSA mid-end** vs `rustc --emit=metadata` → **~7.0x** geomean
       (5 programs: small/medium/large/xlarge/nested; battery grown with two
       larger synthetic programs to check the ratio vs. size — it holds ~6.7–7.2x
@@ -44,14 +44,14 @@ Target: compile a strict subset of Rust (no complex trait resolution, no async/a
       `moira --emit check`) vs `rustc --emit=metadata` → **~7.36x** geomean.
     * **full Moira pipeline** vs a **complete `rustc` build+link** (new
       `--rustc-mode full`) → **~17.9x** geomean.
-    Run `moira-bench` (default = first row), `moira-bench --full` (second), and
-    `moira-bench --full --rustc-mode full` (third). The 10x target remains open
+    Run `tpt-moira-bench` (default = first row), `tpt-moira-bench --full` (second), and
+    `tpt-moira-bench --full --rustc-mode full` (third). The 10x target remains open
     for the canonical front-end+mid-end number; closing it depends on the
     Phase-4 final optimization pass (parallel codegen, arena tuning).
-  - [x] Extend `moira-bench` to time the *full* pipeline (type-check +
+  - [x] Extend `tpt-moira-bench` to time the *full* pipeline (type-check +
         borrow-check + incremental cache), not just front-end + SSA mid-end
         — `--full` now times `moira --emit check`; the table prints which
-        pipeline is measured and `moira-bench --dashboard` tracks it.
+        pipeline is measured and `tpt-moira-bench --dashboard` tracks it.
   - [x] Add a `rustc` comparison mode that runs a full `cargo build`/`rustc`
         (not just `--emit=metadata`) so the baseline matches what Moira measures
         — `--rustc-mode {metadata,full}`; `full` runs `rustc -o <tmp> <file>`
@@ -60,7 +60,7 @@ Target: compile a strict subset of Rust (no complex trait resolution, no async/a
         see how the speedup ratio trends with size — added `xlarge` (200×200
         nested loops + float `mandel`) and `nested` (deep call nesting), so the
         battery spans small→xlarge. The ratio stays ~7x across the range.
-  - [x] Re-run and record the geomean via `moira-bench --record`; update this
+  - [x] Re-run and record the geomean via `tpt-moira-bench --record`; update this
         entry with the final measured ratio against the 10x target — recorded
         runs live in `moira-bench-results/history.mbh`; see above for ratios.
   - Note: while wiring this, found and fixed a cache-poisoning bug in
@@ -836,7 +836,7 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
   - [ ] Verify behavior parity of the self-compiled binary
     - [ ] Once Moira can compile itself, build the Stage-1 `moira` binary
     - [ ] Run the existing `clotho`/`lachesis`/`atropos` test suites through the Stage-1 binary and diff results against the Stage-0 (rustc-built) binary
-    - [ ] Run `moira-bench` and `tests/determinism.rs` against the Stage-1 binary
+    - [ ] Run `tpt-moira-bench` and `tests/determinism.rs` against the Stage-1 binary
     - [ ] Document any behavioral divergences and file them as follow-up bugs
 - [ ] **Stage 2 self-host: Moira-compiled-Moira compiles itself again**
   - [x] **Deterministic MIR/SSA output across stages**
@@ -896,7 +896,7 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
           backend (`emit_asm`) follows the same shape but is not yet threaded; its
           SSA program is still built and emitted sequentially.
   - [ ] Tune `moira-alloc` arena sizing/reuse based on profile data from real (not synthetic) compiles
-  - [ ] Re-run `moira-bench --dashboard` after each optimization to confirm no regressions
+  - [ ] Re-run `tpt-moira-bench --dashboard` after each optimization to confirm no regressions
       - Latest run recorded 2026-08-22: geomean **6.91x** vs
         `rustc --emit=metadata` (small 6.53x / medium 7.60x / large 6.77x /
         xlarge 6.93x / nested 6.78x); no regressions vs the previous run
@@ -933,12 +933,12 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
         - Status: parse 19/19, check 2/19 (cfg-if, clap). Remaining check gaps are type-checker work: nested items, std API modeling, macros outside `println!`-family, method and field resolution.
   - [x] Triage top blocking gaps by how many crates they unblock (highest leverage first)
         - The report ranks gap classes by the crates they alone block. Parser gaps closed so far: `const fn`, `-> !`, `use core::str`, brace `use {..}`, item-position macro calls, `macro_rules!` brace skipping, `vis`/`lifetime`/`meta` fragments, statement-vs-expression macro expansion, `#[cfg]` evaluation for the fixed target.
-  - [ ] Track pass-rate trend over time in the same dashboard used by `moira-bench`
-        - Partial: each run appends to `build/crates_probe/history.jsonl`. Not yet shown in the `moira-bench --dashboard` view.
+  - [ ] Track pass-rate trend over time in the same dashboard used by `tpt-moira-bench`
+        - Partial: each run appends to `build/crates_probe/history.jsonl`. Not yet shown in the `tpt-moira-bench --dashboard` view.
 - [ ] Achieve ≥5x speedup over `rustc` on production-scale codebases
   - [ ] Depends on: Linux-kernel-module and crates.io validation above producing a large-codebase corpus to benchmark
-  - [ ] Extend `moira-bench` to accept an external large-codebase corpus (not just the Phase-1 synthetic battery)
-  - [ ] Measure and record geomean speedup on that corpus via `moira-bench --record`
+  - [ ] Extend `tpt-moira-bench` to accept an external large-codebase corpus (not just the Phase-1 synthetic battery)
+  - [ ] Measure and record geomean speedup on that corpus via `tpt-moira-bench --record`
   - [ ] If short of 5x, profile and address the largest remaining bottleneck (see "Final cross-subsystem optimization pass" above)
 - [x] Error message parity audit against `rustc`
   - **Status: Resolved.** `tpt_moira_lachesis::diff::parity` scores diagnostic fidelity
@@ -997,7 +997,7 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
 - [x] Contributor guide (`CONTRIBUTING.md`)
 - [x] Test suite growth alongside `rustc` compatibility work (added `lachesis` integration tests: type inference, trait resolution, borrow checking, incremental cache)
 - [x] Performance regression tracking / dashboards
-  - Status: `moira-bench` now supports `--record` (appends a run to
+  - Status: `tpt-moira-bench` now supports `--record` (appends a run to
     `moira-bench-results/history.mbh` with commit + timestamp) and `--dashboard`
     (prints the run history and a per-run geomean). After each recorded run it
     compares against the previous run and flags any Moira compile-time increase
