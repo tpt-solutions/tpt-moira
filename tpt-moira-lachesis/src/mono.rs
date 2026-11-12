@@ -718,6 +718,10 @@ fn subst_ty(t: &Ty, sub: &HashMap<String, Ty>) -> Ty {
         Ty::RefMut(inner) => Ty::RefMut(Box::new(subst_ty(inner, sub))),
         Ty::Apply(n, args) => Ty::Apply(n.clone(), args.iter().map(|a| subst_ty(a, sub)).collect()),
         Ty::Tuple(elems) => Ty::Tuple(elems.iter().map(|a| subst_ty(a, sub)).collect()),
+        Ty::Fn(params, ret) => Ty::Fn(
+            params.iter().map(|a| subst_ty(a, sub)).collect(),
+            Box::new(subst_ty(ret, sub)),
+        ),
         other => other.clone(),
     }
 }

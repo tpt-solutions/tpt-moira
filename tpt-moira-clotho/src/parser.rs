@@ -2790,31 +2790,25 @@ impl Parser {
                 // keeps the compiler's own source parseable.
                 self.bump();
                 let path = self.parse_path(true)?;
+                let is_fn_trait = path
+                    .segments
+                    .last()
+                    .map_or(false, |s| matches!(s.node.as_str(), "Fn" | "FnMut" | "FnOnce"));
+                let mut fn_args: Vec<Type> = Vec::new();
                 if self.eat(&TokenKind::LParen) {
-                    // `impl FnMut(&str) -> Ret (+ Bound)*`-style closure/trait
-                    // types: consume the balanced paren list, the optional return
-                    // type, and any trailing `+ Bound` so the closure/trait-object
-                    // types in the compiler's own source parse (represented
-                    // opaquely as the leading path). Parse-only; ignored.
-                    let mut depth = 1;
-                    while depth > 0 {
-                        match self.peek_kind() {
-                            TokenKind::LParen => {
-                                self.bump();
-                                depth += 1;
-                            }
-                            TokenKind::RParen => {
-                                self.bump();
-                                depth -= 1;
-                            }
-                            TokenKind::Eof => break,
-                            _ => {
-                                self.bump();
-                            }
-                        }
-                    }
+                    // `impl FnMut(&str) -> Ret (+ Bound)*`: a closure type. Its parameter
+                    // and return types are kept: the function type `fn(A..) -> R` is what
+                    // lets a generic parameter be solved from a closure's result. Other
+                    // trait sugar is parsed and dropped.
+                    fn_args = self.parse_delimited(TokenKind::RParen, |s| s.parse_type())?;
                     if self.eat(&TokenKind::Arrow) {
-                        self.parse_type()?;
+                        fn_args.push(self.parse_type()?);
+                    } else {
+                        let span = path.segments[0].span;
+                        fn_args.push(Type {
+                            kind: TypeKind::Tuple(Vec::new()),
+                            span,
+                        });
                     }
                     while self.eat(&TokenKind::Plus) {
                         // A dropped lifetime bound (`+ 'static`) leaves a dangling
@@ -2826,7 +2820,18 @@ impl Parser {
                         self.parse_path(true)?;
                     }
                 }
-                TypeKind::Path(path, Vec::new())
+                if is_fn_trait && !fn_args.is_empty() {
+                    let span = path.segments[0].span;
+                    let fn_path = Path {
+                        segments: vec![Spanned {
+                            node: "fn".to_string(),
+                            span,
+                        }],
+                    };
+                    TypeKind::Path(fn_path, fn_args)
+                } else {
+                    TypeKind::Path(path, Vec::new())
+                }
             }
             // `dyn Trait` / `dyn Fn(..) -> R + Send`: the trait path stands for the
             // object type; the argument list and extra bounds are parsed and dropped.

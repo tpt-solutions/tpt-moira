@@ -134,6 +134,9 @@ pub struct TypeChecker {
     expected_call_ty: Option<Ty>,
     /// The type parameters a method declares itself (not its impl's), by (type, method).
     method_own_generics: HashMap<(String, String), Vec<String>>,
+    /// The parameter types a closure argument is expected to take, from the `Fn` type
+    /// of the parameter it is passed to. Consumed by the next closure checked.
+    closure_expected: Option<Vec<Ty>>,
 }
 
 /// The C-style name of a scalar, string or struct type, used inside a
@@ -192,6 +195,10 @@ fn generalize_params(t: &Ty, names: &[String]) -> Ty {
             args.iter().map(|a| generalize_params(a, names)).collect(),
         ),
         Ty::Tuple(elems) => Ty::Tuple(elems.iter().map(|a| generalize_params(a, names)).collect()),
+        Ty::Fn(params, ret) => Ty::Fn(
+            params.iter().map(|a| generalize_params(a, names)).collect(),
+            Box::new(generalize_params(ret, names)),
+        ),
         other => other.clone(),
     }
 }
@@ -438,6 +445,7 @@ impl Default for TypeChecker {
             generic_calls: Vec::new(),
             expected_call_ty: None,
             method_own_generics: HashMap::new(),
+            closure_expected: None,
         }
     }
 }
@@ -1369,10 +1377,14 @@ impl TypeChecker {
         // them.
         let _ = (span, &body, &param_names);
 
+        let expected = self.closure_expected.take();
         let mut param_tys = Vec::with_capacity(params.len());
         self.env.push(HashMap::new());
-        for p in params {
-            let pt = self.type_to_ty(&p.ty);
+        for (i, p) in params.iter().enumerate() {
+            let pt = match (&p.ty.kind, expected.as_ref().and_then(|e| e.get(i))) {
+                (TypeKind::Infer, Some(t)) if !matches!(t, Ty::Generic(_) | Ty::Unknown) => t.clone(),
+                _ => self.type_to_ty(&p.ty),
+            };
             param_tys.push(pt.clone());
             let name = pat_name(&p.pat);
             self.env.last_mut().unwrap().insert(name, pt);
@@ -2955,7 +2967,11 @@ impl TypeChecker {
         };
         let mut arg_tys: Vec<(Ty, Ty)> = Vec::new();
         for (a, pt) in args.iter().zip(rest.iter()) {
+            if let (ExprKind::Closure { .. }, Ty::Fn(ps, _)) = (&a.kind, pt) {
+                self.closure_expected = Some(ps.clone());
+            }
             let at = self.infer_expr(a);
+            self.closure_expected = None;
             arg_tys.push((pt.clone(), at.clone()));
             if is_generic_ty(pt) {
                 continue;
@@ -2964,12 +2980,14 @@ impl TypeChecker {
         }
         // Solve the method's own type parameters from the arguments, and record the call
         // so monomorphization can specialize the method.
+        let mut solved_sub: HashMap<String, Ty> = HashMap::new();
         if let (Some((owner, method, name_span)), false) = (&call, own.is_empty()) {
             let mut sub: HashMap<String, Ty> = HashMap::new();
             for (pt, at) in &arg_tys {
                 let g = generalize_params(pt, &own);
                 self.unify_ty(&g, at, &mut sub);
             }
+            solved_sub = sub.clone();
             let solved: Vec<(String, Ty)> = own
                 .iter()
                 .map(|n| (n.clone(), sub.get(n).cloned().unwrap_or(Ty::Unknown)))
@@ -2986,10 +3004,18 @@ impl TypeChecker {
         // A signature whose return type *is* one of its generic parameters
         // (`-> F`) yields whatever the corresponding argument produced; model
         // that opaquely rather than leaking the parameter name.
-        if is_generic_ty(&sig.ret) {
+        // A method's own parameters in the result are the ones its arguments solved
+        // (`-> ParseResult<Vec<T>>` with `T = Expr` is `ParseResult<Vec<Expr>>`).
+        let ret = if own.is_empty() {
+            sig.ret.clone()
+        } else {
+            let g = generalize_params(&sig.ret, &own);
+            self.apply_sub(&g, &solved_sub)
+        };
+        if is_generic_ty(&ret) {
             return Ty::Unknown;
         }
-        sig.ret.clone()
+        ret
     }
 
     /// The base type name of a value type, following `&`/`&mut` to its referent
@@ -4092,7 +4118,19 @@ impl TypeChecker {
                     true
                 }
             }
+            // An unknown type says nothing about the other side.
+            (_, Ty::Unknown) | (Ty::Unknown, _) => true,
             (Ty::Struct(a), Ty::Struct(b)) => a == b,
+            // Function types unify parameter by parameter and then their results. A
+            // parameter that does not solve does not stop the result from solving.
+            (Ty::Fn(pa, ra), Ty::Fn(pb, rb)) => {
+                if pa.len() == pb.len() {
+                    for (x, y) in pa.iter().zip(pb.iter()) {
+                        let _ = self.unify_ty(x, y, sub);
+                    }
+                }
+                self.unify_ty(ra, rb, sub)
+            }
             // Two applications unify argument by argument (`Pair<T>` with `Pair<i64>`).
             (Ty::Apply(a, xs), Ty::Apply(b, ys)) => {
                 a == b
@@ -4119,6 +4157,10 @@ impl TypeChecker {
             Ty::Apply(n, args) => Ty::Apply(
                 n.clone(),
                 args.iter().map(|a| self.apply_sub(a, sub)).collect(),
+            ),
+            Ty::Fn(params, ret) => Ty::Fn(
+                params.iter().map(|a| self.apply_sub(a, sub)).collect(),
+                Box::new(self.apply_sub(ret, sub)),
             ),
             other => other.clone(),
         }
