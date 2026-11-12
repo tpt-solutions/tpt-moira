@@ -27,6 +27,8 @@ char* moira_str_to_ascii_lowercase(char* s) { char* r = moira_str_dup(s); for (c
 long long moira_str_push_str(char** s, char* t) { size_t a = strlen(*s), b = strlen(t); *s = (char*)realloc(*s, a + b + 1); memcpy(*s + a, t, b + 1); return 0; }
 long long moira_str_push_char(char** s, long long c) { size_t a = strlen(*s); *s = (char*)realloc(*s, a + 2); (*s)[a] = (char)c; (*s)[a + 1] = 0; return 0; }
 char* moira_str_after(char* s, long long n) { return moira_str_dup(s + n); }
+char* moira_bool_str(long long b) { return moira_str_dup(b ? "true" : "false"); }
+long long moira_str_cmp(char* a, char* b) { int r = strcmp(a, b); return r < 0 ? -1 : (r > 0 ? 1 : 0); }
 char* moira_char_str(long long c) { char* r = (char*)malloc(2); r[0] = (char)c; r[1] = 0; return r; }
 long long moira_str_find(char* s, char* p) { char* m = strstr(s, p); return m ? (long long)(m - s) : -1; }
 long long moira_char_is_ascii_alphanumeric(long long c) { return isalnum((int)c) != 0; }
@@ -43,6 +45,20 @@ char* moira_str_before(char* s, long long n) { return moira_str_dup_n(s, (size_t
 long long moira_str_starts_with_char(char* s, long long c) { return s[0] != 0 && s[0] == (char)c; }
 long long moira_str_ends_with_char(char* s, long long c) { size_t n = strlen(s); return n > 0 && s[n - 1] == (char)c; }
 long long moira_str_contains_char(char* s, long long c) { return strchr(s, (int)c) != NULL; }
+char* moira_str_replacen(char* s, char* from, char* to, long long limit) {
+    size_t fl = strlen(from), tl = strlen(to);
+    if (fl == 0) return moira_str_dup(s);
+    size_t cap = strlen(s) + 1, n = 0;
+    char* out = (char*)malloc(cap + (size_t)limit * tl);
+    char* w = out; char* p = s; char* m;
+    while (n < (size_t)limit && (m = strstr(p, from)) != NULL) {
+        memcpy(w, p, (size_t)(m - p)); w += m - p;
+        memcpy(w, to, tl); w += tl;
+        p = m + fl; n++;
+    }
+    strcpy(w, p);
+    return out;
+}
 char* moira_str_replace(char* s, char* from, char* to) {
     size_t fl = strlen(from), tl = strlen(to), cnt = 0;
     if (fl == 0) return moira_str_dup(s);
@@ -90,7 +106,9 @@ pub fn emit_c(prog: &mir::MirProgram) -> String {
     out.push_str("void __moira_w_i64(long long x) { printf(\"%lld\", x); }\n");
     out.push_str("void __moira_w_usize(unsigned long long x) { printf(\"%llu\", x); }\n");
     out.push_str("void __moira_w_f64(double x) { printf(\"%f\", x); }\n");
-    out.push_str("void __moira_w_bool(long long x) { printf(\"%s\", x ? \"true\" : \"false\"); }\n");
+    out.push_str(
+        "void __moira_w_bool(long long x) { printf(\"%s\", x ? \"true\" : \"false\"); }\n",
+    );
     out.push_str("void __moira_w_str(char* x) { printf(\"%s\", x); }\n");
     // Failed `assert!`/`panic!`: report on stderr and exit with status 101.
     out.push_str("void __moira_panic(void) { fputs(\"moira: panic\\n\", stderr); exit(101); }\n\n");
@@ -190,7 +208,7 @@ pub fn emit_c(prog: &mir::MirProgram) -> String {
         out.push_str(&slice_helpers(elem, &struct_names));
     }
     for (k, v) in &map_types {
-        out.push_str(&map_helpers(k, v, &struct_names));
+        out.push_str(&map_helpers(k, v, &struct_names, &prog.structs));
     }
 
     // Prototypes first: a function may be called before it is defined (forward
@@ -377,12 +395,17 @@ fn emit_function(
                 }
                 // `Box::new(v)` (lowered to `moira_box_new(v)`): a fresh heap copy of `v`,
                 // typed by the destination's pointee.
-                mir::Rvalue::Call(mir::Operand::Func(n), args) if n == "moira_box_new" && args.len() == 1 => {
+                mir::Rvalue::Call(mir::Operand::Func(n), args)
+                    if n == "moira_box_new" && args.len() == 1 =>
+                {
                     let pointee = dest_type(f, &s.place)
                         .and_then(|d| d.strip_suffix('*').map(|p| p.to_string()))
                         .unwrap_or_else(|| "long long".to_string());
                     let ct = c_type(&pointee, struct_names);
-                    out.push_str(&format!("    {} = ({}*)malloc(sizeof({}));\n", s.place, ct, ct));
+                    out.push_str(&format!(
+                        "    {} = ({}*)malloc(sizeof({}));\n",
+                        s.place, ct, ct
+                    ));
                     out.push_str(&format!("    *{} = {};\n", s.place, emit_operand(&args[0])));
                 }
                 _ => {
@@ -703,7 +726,11 @@ fn emit_rvalue(rv: &mir::Rvalue) -> String {
                 .map(|(i, e)| format!(".f{} = {}", i, emit_operand(e)))
                 .collect();
             // A generic tuple (`Tuple<A,B>`) is named by its instance struct.
-            let name = if ty.contains('<') { mir::inst_c_name(ty) } else { ty.clone() };
+            let name = if ty.contains('<') {
+                mir::inst_c_name(ty)
+            } else {
+                ty.clone()
+            };
             format!("(struct {}){{ {} }}", name, inits.join(", "))
         }
         mir::Rvalue::Cast(o, ty) => format!("({}){}", ty, emit_operand(o)),
@@ -880,9 +907,58 @@ fn map_typedef(k: &str, v: &str, struct_names: &std::collections::HashSet<&str>)
     )
 }
 
+/// The struct of a key type (a generic instance is named by its instance struct).
+fn key_struct<'a>(ty: &str, structs: &'a [mir::StructDef]) -> Option<&'a mir::StructDef> {
+    let name = if ty.contains('<') { mir::inst_c_name(ty) } else { ty.to_string() };
+    structs.iter().find(|s| s.name == name)
+}
+
+/// `a < b` for keys of type `ty`: strings compare with `strcmp`, a struct lexicographically
+/// over its fields (in declaration order), anything else with `<`.
+fn key_less(ty: &str, a: &str, b: &str, structs: &[mir::StructDef]) -> String {
+    if ty == "char*" || ty == "str" {
+        return format!("(strcmp({a}, {b}) < 0)");
+    }
+    if let Some(sd) = key_struct(ty, structs) {
+        let mut expr = "0".to_string();
+        for (f, ft) in sd.fields.iter().rev() {
+            let fa = format!("{a}.{f}");
+            let fb = format!("{b}.{f}");
+            let lt = key_less(ft, &fa, &fb, structs);
+            let eq = key_equal(ft, &fa, &fb, structs);
+            expr = format!("({lt} || ({eq} && {expr}))");
+        }
+        return expr;
+    }
+    format!("({a} < {b})")
+}
+
+/// `a == b` for keys of type `ty` (see `key_less`).
+fn key_equal(ty: &str, a: &str, b: &str, structs: &[mir::StructDef]) -> String {
+    if ty == "char*" || ty == "str" {
+        return format!("(strcmp({a}, {b}) == 0)");
+    }
+    if let Some(sd) = key_struct(ty, structs) {
+        let mut parts: Vec<String> = Vec::new();
+        for (f, ft) in &sd.fields {
+            parts.push(key_equal(ft, &format!("{a}.{f}"), &format!("{b}.{f}"), structs));
+        }
+        if parts.is_empty() {
+            return "1".to_string();
+        }
+        return format!("({})", parts.join(" && "));
+    }
+    format!("({a} == {b})")
+}
+
 /// The helpers of the hash map `Map<k, v>`. Keys are compared with `strcmp` for strings,
 /// `memcmp` for struct keys, and `==` otherwise; iteration is in insertion order.
-fn map_helpers(k: &str, v: &str, struct_names: &std::collections::HashSet<&str>) -> String {
+fn map_helpers(
+    k: &str,
+    v: &str,
+    struct_names: &std::collections::HashSet<&str>,
+    structs: &[mir::StructDef],
+) -> String {
     let name = mir::map_c_name(k, v);
     let kc = c_type(k, struct_names);
     let vc = c_type(v, struct_names);
@@ -947,13 +1023,11 @@ fn map_helpers(k: &str, v: &str, struct_names: &std::collections::HashSet<&str>)
         "static long long {is_empty}({name}* m) {{ return m->len == 0; }}\n"
     ));
     // `rank(m, i)`: the slot of the i-th smallest key (sorted maps iterate through it).
-    let less = if kc == "char*" {
-        "strcmp(a, b) < 0".to_string()
-    } else {
-        "a < b".to_string()
-    };
+    let less = key_less(k, "a", "b", structs);
     let rank = mir::map_fn_name(k, v, "rank");
-    s.push_str(&format!("static long long {rank}({name}* m, long long i) {{\n"));
+    s.push_str(&format!(
+        "static long long {rank}({name}* m, long long i) {{\n"
+    ));
     s.push_str("    for (long long j = 0; j < m->len; j++) {\n");
     s.push_str("        long long below = 0;\n");
     s.push_str("        for (long long t = 0; t < m->len; t++) {\n");
