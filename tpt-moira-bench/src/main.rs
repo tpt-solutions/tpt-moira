@@ -596,7 +596,7 @@ fn print_dashboard(results_dir: &Path) {
     println!("Moira benchmark history  (dir: {})", results_dir.display());
     println!("recorded runs: {}", hist.len());
     if hist.is_empty() {
-        println!("\nno runs recorded yet — run `moira-bench --record` first.");
+        println!("\nno runs recorded yet — run `tpt-moira-bench --record` first.");
         return;
     }
 

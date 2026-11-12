@@ -65,7 +65,7 @@ jobs:
       - name: Build workspace
         run: cargo build --workspace
       - name: Run benchmark harness
-        run: cargo run -p moira-bench --quiet
+        run: cargo run -p tpt-moira-bench --quiet
 
   # Phase 3 compatibility suite: run the curated Phase-1-subset slice through
   # Moira's acceptance tests, then scan the slice with `moira --diff` against

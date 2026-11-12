@@ -57,15 +57,15 @@ into a `tpt_moira_lachesis::ty::Ty` for that purpose.
 
 ## Performance regression tracking
 
-`moira-bench` measures Moira vs. `rustc` compile time on the Phase-1 battery
+`tpt-moira-bench` measures Moira vs. `rustc` compile time on the Phase-1 battery
 and reports the geometric-mean speedup:
 
-- `cargo run -p moira-bench` — print the table for this run only.
-- `cargo run -p moira-bench -- --record` — also append the run to
+- `cargo run -p tpt-moira-bench` — print the table for this run only.
+- `cargo run -p tpt-moira-bench -- --record` — also append the run to
   `moira-bench-results/history.mbh` (with git commit + timestamp) and compare
   against the previous run, flagging any Moira compile-time increase ≥10% or
   geometric-mean speedup drop ≥10%.
-- `cargo run -p moira-bench -- --dashboard` — print the full recorded history
+- `cargo run -p tpt-moira-bench -- --dashboard` — print the full recorded history
   and the latest regression analysis.
 - `--results <dir>` overrides the history directory.
 
@@ -82,7 +82,7 @@ compiler grows.
 | `lachesis` | Type inference, trait resolution, NLL-style borrow checker, incremental cache |
 | `atropos` | MIR lowering, SSA backend, C and native codegen |
 | `moira-alloc` | Region-based arena allocator used internally by the compiler |
-| `moira-bench` | Benchmark harness comparing Moira vs. `rustc` on the Phase-1 battery |
+| `tpt-moira-bench` | Benchmark harness comparing Moira vs. `rustc` on the Phase-1 battery |
 | `examples/`, `demos/` | Sample Phase-1 sources |
 
 ## The pipeline

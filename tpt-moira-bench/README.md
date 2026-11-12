@@ -1,10 +1,10 @@
-# moira-bench
+# tpt-moira-bench
 
 Benchmark harness comparing [Moira](https://github.com/tpt-solutions/tpt-moira)
 compile times against other compilers (`rustc`, `gcc`, `clang`) on the Phase-1
 language subset.
 
-`moira-bench` compiles a fixed battery of Phase-1 programs (which are also valid
+`tpt-moira-bench` compiles a fixed battery of Phase-1 programs (which are also valid
 stock Rust) and reports the median end-to-end compile time for each:
 
 - **Moira** — the full Clotho front-end + Atropos mid-end (`--emit ssa`, which
@@ -32,26 +32,26 @@ compiler grows and as incremental caching (Phase 2) and parallelization land.
 cargo build --release
 
 # Run the benchmark battery (median over 30 iterations per program).
-cargo run -p moira-bench
+cargo run -p tpt-moira-bench
 
 # Add a gcc/clang cross-compiler column (compiles Moira's emitted C).
-cargo run -p moira-bench -- --cc gcc
-cargo run -p moira-bench -- --cc clang
+cargo run -p tpt-moira-bench -- --cc gcc
+cargo run -p tpt-moira-bench -- --cc clang
 
 # Record a run and compare against the previous one (regression detection).
-cargo run -p moira-bench -- --record
+cargo run -p tpt-moira-bench -- --record
 
 # Time Moira's full semantic pipeline instead (type-check + borrow-check + cache).
-cargo run -p moira-bench -- --full
+cargo run -p tpt-moira-bench -- --full
 
 # Compare rustc including native codegen + linking.
-cargo run -p moira-bench -- --rustc-mode full
+cargo run -p tpt-moira-bench -- --rustc-mode full
 
 # Print the recorded-run dashboard.
-cargo run -p moira-bench -- --dashboard
+cargo run -p tpt-moira-bench -- --dashboard
 
 # Persist results to a custom directory.
-cargo run -p moira-bench -- --record --results ./bench-results
+cargo run -p tpt-moira-bench -- --record --results ./bench-results
 ```
 
 ## Output

@@ -10,7 +10,7 @@ into three cooperating subsystems, named after the Moirai:
 * **Atropos** — the backend: MIR lowering, a custom lightweight SSA mid-end with
   optimization passes, and native/x86-64 + Stage-0 C codegen.
 
-A small `moira-alloc` region allocator and the `moira-bench` harness round out
+A small `moira-alloc` region allocator and the `tpt-moira-bench` harness round out
 the workspace.
 
 ## Compilation pipeline
@@ -77,6 +77,6 @@ cached result. `IncrementalCache::compute_if_absent` mirrors a memoized query
 
 ## Benchmark harness
 
-`moira-bench` compiles a fixed battery of Phase-1-subset programs with Moira
+`tpt-moira-bench` compiles a fixed battery of Phase-1-subset programs with Moira
 (`--emit ssa`) and `rustc --emit=metadata`, reporting median compile times and a
 geometric-mean speedup. It runs in CI so the speedup is tracked over time.

@@ -128,7 +128,7 @@ Every tagged release:
 * publishes a GitHub release with checksums and (when configured) signed
   artifacts,
 * generates a changelog from commit history / PR labels via `x.py changelog`,
-* and updates the benchmark dashboard (`moira-bench --dashboard`).
+* and updates the benchmark dashboard (`tpt-moira-bench --dashboard`).
 
 ## 6. Relationship to other docs
 
