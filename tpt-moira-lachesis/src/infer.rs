@@ -247,16 +247,27 @@ fn hint_compound(ty: &Ty) -> Option<String> {
         // pointer with that signature. A `()` result is a zero value (`long long`).
         Ty::Fn(params, ret) => {
             let mut parts = Vec::new();
+            // A reference to a scalar is a pointer to it (`i64*`).
+            let part = |t: &Ty| -> Option<String> {
+                match t {
+                    Ty::Unit => Some("long long".to_string()),
+                    Ty::Ref(inner) | Ty::RefMut(inner)
+                        if matches!(
+                            **inner,
+                            Ty::Int | Ty::I8 | Ty::I16 | Ty::I32 | Ty::I64 | Ty::I128 | Ty::Isize
+                                | Ty::U8 | Ty::U16 | Ty::U32 | Ty::U64 | Ty::U128 | Ty::Usize
+                                | Ty::F32 | Ty::F64 | Ty::Bool | Ty::Char
+                        ) =>
+                    {
+                        hint_elem_name(inner).map(|h| format!("{h}*"))
+                    }
+                    other => hint_elem_name(other),
+                }
+            };
             for p in params {
-                parts.push(match p {
-                    Ty::Unit => "long long".to_string(),
-                    other => hint_elem_name(other)?,
-                });
+                parts.push(part(p)?);
             }
-            parts.push(match &**ret {
-                Ty::Unit => "long long".to_string(),
-                other => hint_elem_name(other)?,
-            });
+            parts.push(part(ret)?);
             Some(format!("Fn<{}>", parts.join(",")))
         }
         Ty::Apply(name, args) if name == "BTreeSet" && args.len() == 1 => {

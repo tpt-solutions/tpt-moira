@@ -2086,6 +2086,9 @@ impl Lower {
                         // A compound value (`let f = v.first();`, `let v = Vec::new();`)
                         // is typed by the checker's hint for its initializer.
                         _ if self.user_call_ret(init).is_some() => self.user_call_ret(init),
+                        // A local bound to a variable that holds a pointer (`let q = p;` with
+                        // `p: &i64`) is a pointer too.
+                        _ if self.pointer_local_type(init).is_some() => self.pointer_local_type(init),
                         _ => self.hint_of_expr(init).filter(|h| {
                             h == "str"
                                 || self.struct_names.contains(h)
@@ -6133,6 +6136,28 @@ impl Lower {
     }
 
     /// The type hint of `e`, if Lachesis recorded one.
+    /// The pointer type of the variable a single-name expression names, if it is a pointer.
+    fn pointer_local_type(&self, e: &Expr) -> Option<String> {
+        let ExprKind::Path(p) = &e.kind else {
+            return None;
+        };
+        if p.segments.len() != 1 {
+            return None;
+        }
+        let n = self.var_name(&p.segments[0].node);
+        self.types
+            .get(&n)
+            .cloned()
+            .or_else(|| {
+                self.func
+                    .locals
+                    .iter()
+                    .find(|(l, _)| *l == n)
+                    .and_then(|(_, t)| t.clone())
+            })
+            .filter(|t| t.ends_with('*'))
+    }
+
     fn hint_of_expr(&self, e: &Expr) -> Option<String> {
         self.hints.get(&(e.span.start, e.span.end)).cloned()
     }
