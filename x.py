@@ -207,6 +207,19 @@ def probe_crate(moira: Path, crate: dict) -> ProbeResult:
         snippet = err[-1] if err else "(no diagnostic)"
         result.notes.append(f"codegen failed: {snippet}")
 
+    # The emitted C must also compile: a probe that only checks emission would pass
+    # lowering that produces ill-typed C. Skipped (not failed) without a C compiler.
+    c_file = BUILD_DIR / f"{safe}.c"
+    cc = next((c for c in ("gcc", "clang", "cc") if shutil.which(c)), None)
+    if result.codegen_ok and cc and c_file.exists():
+        res_cc = run([cc, "-w", "-fsyntax-only", str(c_file)])
+        if res_cc.returncode != 0:
+            result.codegen_ok = False
+            err = (res_cc.stderr or res_cc.stdout).strip().splitlines()
+            errors = [l for l in err if "error:" in l]
+            snippet = errors[0] if errors else "(no diagnostic)"
+            result.notes.append(f"emitted C does not compile: {snippet}")
+
     return result
 
 
@@ -261,7 +274,7 @@ def self_host(release: bool, strict: bool) -> int:
         c = "ok" if r.check_ok else "fail"
         g = "ok" if r.codegen_ok else "fail"
         status = "SELF-HOSTABLE" if r.self_hostable else "blocked"
-        lines.append(f"| {r.crate} | {p} | {g} | {status} |")
+        lines.append(f"| {r.crate} | {p} | {c} | {g} | {status} |")
     lines += ["", "## Notes", ""]
     for r in results:
         for n in r.notes:
