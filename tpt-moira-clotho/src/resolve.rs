@@ -45,6 +45,8 @@ struct Scope {
     modules: HashMap<String, usize>,
     /// `use path::*;`: the crates glob-imported.
     globs: Vec<usize>,
+    /// `use path::Name as Alias;` where `Name` is colliding: alias to (crate, name).
+    aliases: HashMap<String, (usize, String)>,
 }
 
 struct Resolver {
@@ -68,6 +70,7 @@ impl Resolver {
                     direct: HashMap::new(),
                     modules: HashMap::new(),
                     globs: Vec::new(),
+                    aliases: HashMap::new(),
                 }
             })
             .collect();
@@ -107,6 +110,9 @@ impl Resolver {
                 if local.starts_with(|c: char| c.is_ascii_lowercase()) {
                     scopes[u].modules.insert(local, d);
                 } else if colliding.contains(&last) && scopes[d].defines.contains(&last) {
+                    if local != last {
+                        scopes[u].aliases.insert(local.clone(), (d, last.clone()));
+                    }
                     scopes[u].direct.insert(local, d);
                 }
             }
@@ -197,6 +203,13 @@ impl Resolver {
             // A segment after an uppercase type is a variant or associated item, not a crate item.
             if i >= 1 && names[i - 1].starts_with(|c: char| c.is_ascii_uppercase()) {
                 continue;
+            }
+            // An alias of a colliding type (`use a::Function as F;`) names its definition.
+            if i == 0 {
+                if let Some((d, orig)) = self.scopes[u].aliases.get(name) {
+                    segs[0].node = self.mangle(*d, orig);
+                    continue;
+                }
             }
             if !self.colliding.contains(name) {
                 continue;
@@ -488,7 +501,9 @@ fn unit_of_segment(keys: &[(String, bool)], u: usize, seg: &str) -> Option<usize
     }
     // Extern crates are named like `tpt_moira_clotho` for `clotho`.
     let wanted = seg.strip_prefix("tpt_moira_").unwrap_or(seg);
+    // The key may be given either way (`clotho` or `tpt_moira_clotho`).
     keys.iter().position(|(k, is_root)| {
+        let k = k.strip_prefix("tpt_moira_").unwrap_or(k);
         !is_root
             && !k.is_empty()
             && k.chars()

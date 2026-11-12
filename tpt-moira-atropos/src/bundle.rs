@@ -65,13 +65,51 @@ impl Namer {
     }
 }
 
+/// Rename one C identifier through `f`. A generated name such as `Result_Operand_LowerError`
+/// is one identifier, so when it is not itself a name of the bundle, its `_`-separated runs
+/// are renamed one by one (a run is renamed when `f` renames it).
+fn rename_ident(ident: &str, f: &dyn Fn(&str) -> String) -> String {
+    let whole = f(ident);
+    if whole != ident {
+        return whole;
+    }
+    let pieces: Vec<&str> = ident.split('_').collect();
+    let mut chunks: Vec<String> = Vec::with_capacity(pieces.len());
+    let mut i = 0;
+    while i < pieces.len() {
+        let mut taken = None;
+        for j in (i + 1..=pieces.len()).rev() {
+            let cand = pieces[i..j].join("_");
+            if cand.is_empty() {
+                continue;
+            }
+            let renamed = f(&cand);
+            if renamed != cand {
+                taken = Some((j, renamed));
+                break;
+            }
+        }
+        match taken {
+            Some((j, renamed)) => {
+                chunks.push(renamed);
+                i = j;
+            }
+            None => {
+                chunks.push(pieces[i].to_string());
+                i += 1;
+            }
+        }
+    }
+    chunks.join("_")
+}
+
 /// Rename every identifier of a C-like type string through `f`.
 fn rename_type_str(ty: &str, f: &dyn Fn(&str) -> String) -> String {
     let mut out = String::with_capacity(ty.len());
     let mut ident = String::new();
     let flush = |ident: &mut String, out: &mut String| {
         if !ident.is_empty() {
-            out.push_str(&f(ident));
+            out.push_str(&rename_ident(ident, f));
             ident.clear();
         }
     };
@@ -150,7 +188,7 @@ fn rename_field_types(fields: &mut Vec<(String, String)>, f: &dyn Fn(&str) -> St
 /// Apply `f` to every name in one crate's MIR program.
 fn rename_program(p: &mut mir::MirProgram, f: &dyn Fn(&str) -> String) {
     for s in &mut p.structs {
-        s.name = f(&s.name);
+        s.name = rename_ident(&s.name, f);
         for (_, ty) in &mut s.fields {
             *ty = rename_type_str(ty, f);
         }
@@ -286,5 +324,47 @@ pub fn lower_bundle(
         out.functions.append(&mut unit.functions);
         out.async_fns.append(&mut unit.async_fns);
     }
+    retype_call_results(&mut out);
     Ok(out)
+}
+
+/// A call's result is typed by the callee's return type, which only the unit defining
+/// the callee knows when the caller was lowered. Give every temporary or local that
+/// holds such a result (and was typed `long long` for want of that knowledge) the
+/// callee's declared type.
+fn retype_call_results(p: &mut mir::MirProgram) {
+    let rets: std::collections::HashMap<String, String> = p
+        .functions
+        .iter()
+        .filter_map(|f| f.ret.as_ref().map(|r| (f.name.clone(), r.clone())))
+        .collect();
+    for func in &mut p.functions {
+        let mut found: Vec<(String, String)> = Vec::new();
+        for block in &func.blocks {
+            for stmt in &block.stmts {
+                if let Rvalue::Call(Operand::Func(callee), _) = &stmt.rvalue {
+                    if let Some(r) = rets.get(callee) {
+                        found.push((stmt.place.clone(), r.clone()));
+                    }
+                }
+            }
+        }
+        for (place, ty) in found {
+            if ty == "long long" {
+                continue;
+            }
+            let temp_untyped = func
+                .temp_types
+                .get(&place)
+                .map_or(true, |t| t == "long long");
+            if temp_untyped {
+                func.temp_types.insert(place.clone(), ty.clone());
+            }
+            for (ln, lt) in func.locals.iter_mut() {
+                if *ln == place && lt.as_deref().map_or(true, |t| t == "long long") {
+                    *lt = Some(ty.clone());
+                }
+            }
+        }
+    }
 }

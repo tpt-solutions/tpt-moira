@@ -154,3 +154,31 @@ fn two_glob_imports_of_one_crate_still_resolve_the_name() {
     };
     assert_eq!(p.segments[0].node, "lib_Function");
 }
+
+#[test]
+fn aliased_import_of_a_colliding_type_is_renamed() {
+    let root_src = "use tpt_moira_lib::Function as LibFn;\n\
+                    pub struct Function { pub n: i64 }\n\
+                    pub struct Holder { pub f: LibFn }\n";
+    let lib_src = "pub struct Function { pub name: String }\n";
+    let mut crates = vec![krate("", true, root_src), krate("lib", false, lib_src)];
+    disambiguate(&mut crates);
+    let root = &crates[0].program;
+    assert_eq!(field_type_path(root, "Holder"), vec!["lib_Function".to_string()]);
+}
+
+#[test]
+fn extern_key_may_carry_the_tpt_moira_prefix() {
+    let root_src = "use tpt_moira_lib::Function;\n\
+                    pub struct Holder { pub f: Function }\n";
+    let lib_src = "pub struct Function { pub name: String }\n";
+    let other_src = "pub struct Function { pub n: i64 }\n";
+    let mut crates = vec![
+        krate("", true, root_src),
+        krate("tpt_moira_lib", false, lib_src),
+        krate("other", false, other_src),
+    ];
+    disambiguate(&mut crates);
+    let root = &crates[0].program;
+    assert_eq!(field_type_path(root, "Holder"), vec!["tpt_moira_lib_Function".to_string()]);
+}
