@@ -53,6 +53,23 @@ pub fn monomorphize(prog: &Program, externs: &[(&str, &Program)]) -> Program {
             _ => {}
         }
     }
+    // Generic structs of the extern crates are instantiated here too, as copies of their
+    // definitions: a crate that uses another crate's generic struct needs its instances.
+    for (_, ext) in externs {
+        for item in &ext.items {
+            match &item.kind {
+                ItemKind::Struct(s) if !s.generics.params.is_empty() => {
+                    generic_structs
+                        .entry(s.name.node.clone())
+                        .or_insert_with(|| s.clone());
+                }
+                ItemKind::Impl(imp) if is_generic_impl(imp, &ext.items) => {
+                    generic_impls.push(imp.clone());
+                }
+                _ => {}
+            }
+        }
+    }
     let generic_struct_names: HashSet<String> = generic_structs.keys().cloned().collect();
     if generic_fns.is_empty() && generic_structs.is_empty() && !generic_methods_exist(prog) {
         return prog.clone();
@@ -82,7 +99,8 @@ pub fn monomorphize(prog: &Program, externs: &[(&str, &Program)]) -> Program {
         calls_by_start,
         closure_caps,
         plain_fns,
-        inline: None,
+        inline: Vec::new(),
+        closure_locals: HashMap::new(),
         generic_fns,
         generic_structs,
         generic_struct_names,
@@ -141,11 +159,9 @@ pub fn monomorphize(prog: &Program, externs: &[(&str, &Program)]) -> Program {
                 };
                 f.name.node = instance;
                 f.generics = Generics::default();
-                if let Some(spec) = &closure {
-                    mono.inline = take_closure_param(&mut f, spec);
-                }
+                mono.inline = inline_contexts(&mut f, &closure);
                 mono.rewrite_fn(&mut f, &sub);
-                mono.inline = None;
+                mono.inline.clear();
                 if let Some(spec) = &closure {
                     insert_captures(&mut f, spec);
                 }
@@ -171,11 +187,9 @@ pub fn monomorphize(prog: &Program, externs: &[(&str, &Program)]) -> Program {
                 };
                 f.name.node = instance.clone();
                 f.generics = Generics::default();
-                if let Some(spec) = &closure {
-                    mono.inline = take_closure_param(&mut f, spec);
-                }
+                mono.inline = inline_contexts(&mut f, &closure);
                 mono.rewrite_fn(&mut f, &sub);
-                mono.inline = None;
+                mono.inline.clear();
                 if let Some(spec) = &closure {
                     insert_captures(&mut f, spec);
                 }
@@ -285,6 +299,28 @@ enum Work {
     },
 }
 
+/// The inlined closures of an instance: its closure parameter, and the closures its
+/// closure-valued captures stand for.
+fn inline_contexts(f: &mut Function, closure: &Option<ClosureSpec>) -> Vec<InlineCtx> {
+    let Some(spec) = closure else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    if let Some(main) = take_closure_param(f, spec) {
+        out.push(main);
+    }
+    out.extend(spec.inlines.iter().cloned());
+    out
+}
+
+/// A `let` bound to a closure literal: its span, parameters and body.
+#[derive(Clone)]
+struct LocalClosure {
+    span: Span,
+    params: Vec<Param>,
+    body: Expr,
+}
+
 /// A closure passed to an instance: the parameter at `param_index` is replaced by the
 /// closure's body, which is inlined at each call of it; the closure's captured variables
 /// become parameters at `caps_at`.
@@ -295,6 +331,8 @@ struct ClosureSpec {
     closure_params: Vec<Param>,
     body: Expr,
     caps: Vec<(String, Type)>,
+    /// The closure-valued captures' closures, inlined where they are called.
+    inlines: Vec<InlineCtx>,
 }
 
 /// The closure parameter an instance is inlining: its name, its closure's parameter
@@ -342,8 +380,10 @@ struct Mono {
     closure_caps: HashMap<(usize, usize), Vec<(String, Ty)>>,
     /// Top-level functions that are not generic.
     plain_fns: HashMap<String, Function>,
-    /// The closure parameter being inlined into the instance being rewritten.
-    inline: Option<InlineCtx>,
+    /// The closures being inlined into the instance being rewritten.
+    inline: Vec<InlineCtx>,
+    /// The closures bound by `let` in the function being rewritten, by name.
+    closure_locals: HashMap<String, LocalClosure>,
     /// Generic calls and struct literals, by callee/expression span.
     calls: HashMap<(usize, usize), GenericCall>,
     /// Associated calls (`Pair::new`), by the start of their path.
@@ -379,16 +419,17 @@ impl Mono {
     /// `f(args)` where `f` is the closure parameter being inlined: the closure's body, with
     /// its parameters bound to the arguments.
     fn try_inline(&mut self, e: &mut Expr, sub: &HashMap<String, Ty>) -> Option<ExprKind> {
-        let ctx = self.inline.clone()?;
-        let ExprKind::Call(callee, args) = &mut e.kind else {
+        let called = match &e.kind {
+            ExprKind::Call(callee, _) => match &callee.kind {
+                ExprKind::Path(p) if p.segments.len() == 1 => p.segments[0].node.clone(),
+                _ => return None,
+            },
+            _ => return None,
+        };
+        let ctx = self.inline.iter().find(|c| c.fname == called)?.clone();
+        let ExprKind::Call(_, args) = &mut e.kind else {
             return None;
         };
-        let ExprKind::Path(p) = &callee.kind else {
-            return None;
-        };
-        if p.segments.len() != 1 || p.segments[0].node != ctx.fname {
-            return None;
-        }
         for a in args.iter_mut() {
             self.expr(a, sub);
         }
@@ -440,7 +481,7 @@ impl Mono {
             ExprKind::Closure { params, body, .. } => (params.clone(), (**body).clone()),
             _ => return None,
         };
-        let caps = self.captures_of(&closure, sub)?;
+        let (caps, inlines) = self.captures_of(&closure, sub)?;
         let (base_inst, solved): (String, HashMap<String, Ty>) = if base.generics.params.is_empty() {
             (name.clone(), HashMap::new())
         } else {
@@ -464,6 +505,7 @@ impl Mono {
                     closure_params: cparams,
                     body: cbody,
                     caps: caps.clone(),
+                    inlines: inlines.clone(),
                 }),
             });
         }
@@ -517,7 +559,7 @@ impl Mono {
             ExprKind::Closure { params, body, .. } => (params.clone(), (**body).clone()),
             _ => return None,
         };
-        let caps = self.captures_of(&closure, sub)?;
+        let (caps, inlines) = self.captures_of(&closure, sub)?;
         let params: Vec<(String, Ty)> = call
             .params
             .iter()
@@ -541,6 +583,7 @@ impl Mono {
                     closure_params: cparams,
                     body: cbody,
                     caps: caps.clone(),
+                    inlines: inlines.clone(),
                 }),
             });
         }
@@ -573,19 +616,48 @@ impl Mono {
 
     /// The captured variables of a closure literal, as source types. `None` when a
     /// capture has no source spelling or is itself a closure (not yet supported).
-    fn captures_of(&self, closure: &Expr, sub: &HashMap<String, Ty>) -> Option<Vec<(String, Type)>> {
-        let recorded = self
-            .closure_caps
-            .get(&(closure.span.start, closure.span.end))?;
-        let mut out = Vec::new();
-        for (n, t) in recorded {
-            let st = subst_ty(t, sub);
-            if matches!(st, Ty::Fn(..)) {
-                return None;
-            }
-            out.push((n.clone(), ty_to_ast(&st, closure.span)?));
+    fn captures_of(
+        &self,
+        closure: &Expr,
+        sub: &HashMap<String, Ty>,
+    ) -> Option<(Vec<(String, Type)>, Vec<InlineCtx>)> {
+        let mut caps = Vec::new();
+        let mut inlines = Vec::new();
+        self.collect_captures(closure.span, sub, &mut caps, &mut inlines, 0)?;
+        Some((caps, inlines))
+    }
+
+    /// The captures of the closure at `span`. A capture that is a closure bound by `let`
+    /// is inlined where it is called: its own captures are captures of this closure too.
+    fn collect_captures(
+        &self,
+        span: Span,
+        sub: &HashMap<String, Ty>,
+        caps: &mut Vec<(String, Type)>,
+        inlines: &mut Vec<InlineCtx>,
+        depth: usize,
+    ) -> Option<()> {
+        if depth > 8 {
+            return None;
         }
-        Some(out)
+        let recorded = self.closure_caps.get(&(span.start, span.end))?.clone();
+        for (n, t) in recorded {
+            let st = subst_ty(&t, sub);
+            if matches!(st, Ty::Fn(..)) {
+                let local = self.closure_locals.get(&n)?.clone();
+                if !inlines.iter().any(|c| c.fname == n) {
+                    inlines.push(InlineCtx {
+                        fname: n.clone(),
+                        params: local.params.iter().map(|p| p.pat.clone()).collect(),
+                        body: local.body.clone(),
+                    });
+                    self.collect_captures(local.span, sub, caps, inlines, depth + 1)?;
+                }
+            } else if !caps.iter().any(|(m, _)| m == &n) {
+                caps.push((n, ty_to_ast(&st, span)?));
+            }
+        }
+        Some(())
     }
 
     /// The instance name of the struct `name` at `args`, requesting it if new.
@@ -627,9 +699,6 @@ impl Mono {
     }
 
     fn rewrite_impl(&mut self, imp: &mut ImplDef, sub: &HashMap<String, Ty>) {
-        // Methods with their own type parameters are instantiated at their call sites.
-        imp.items
-            .retain(|m| !matches!(&m.kind, ItemKind::Function(f) if !f.generics.params.is_empty()));
         self.ty(&mut imp.for_ty, sub);
         for m in &mut imp.items {
             if let ItemKind::Function(f) = &mut m.kind {
@@ -639,6 +708,7 @@ impl Mono {
     }
 
     fn rewrite_fn(&mut self, f: &mut Function, sub: &HashMap<String, Ty>) {
+        self.closure_locals.clear();
         for p in &mut f.params {
             self.ty(&mut p.ty, sub);
         }
@@ -652,6 +722,18 @@ impl Mono {
         for s in &mut b.stmts {
             match &mut s.kind {
                 StmtKind::Local(l) => {
+                    if let (Pat::Ident(n), Some(init)) = (&l.pat, &l.init) {
+                        if let ExprKind::Closure { params, body, .. } = &init.kind {
+                            self.closure_locals.insert(
+                                n.node.clone(),
+                                LocalClosure {
+                                    span: init.span,
+                                    params: params.clone(),
+                                    body: (**body).clone(),
+                                },
+                            );
+                        }
+                    }
                     if let Some(t) = &mut l.ty {
                         self.ty(t, sub);
                     }

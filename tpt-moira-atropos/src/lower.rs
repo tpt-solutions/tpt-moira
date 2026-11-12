@@ -328,7 +328,8 @@ pub fn lower_program_with_enums(
                     let ItemKind::Function(f) = &sub.kind else {
                         continue;
                     };
-                    if sub.is_cfg_test() {
+                    // A method with its own type parameters is emitted as its instances only.
+                    if !f.generics.params.is_empty() || sub.is_cfg_test() {
                         continue;
                     }
                     // A trait method whose signature names a type the subset does not
@@ -704,6 +705,9 @@ fn add_fn_params(
                     let impl_aliases = aliases.with_alias("Self", imp.for_ty.clone());
                     for sub in &imp.items {
                         if let ItemKind::Function(f) = &sub.kind {
+                            if !f.generics.params.is_empty() {
+                                continue;
+                            }
                             let tys = f
                                 .params
                                 .iter()
@@ -731,6 +735,9 @@ fn add_impl_methods(
                 let impl_aliases = aliases.with_alias("Self", imp.for_ty.clone());
                 for sub in &imp.items {
                     if let ItemKind::Function(f) = &sub.kind {
+                        if !f.generics.params.is_empty() {
+                            continue;
+                        }
                         let ret = match &f.ret {
                             Some(t) => type_to_c(t, &impl_aliases),
                             None => "void".to_string(),
@@ -1022,6 +1029,8 @@ struct Lower {
     /// The item types the next closure lifted takes as its parameters (set by the
     /// iterator chain that applies it, consumed by `lower_closure`).
     closure_param_hint: Option<Vec<String>>,
+    /// The result type of the closure literal being lowered, from its `Fn` hint.
+    closure_ret_hint: Option<String>,
     /// A counter that makes the names of match-arm bindings unique.
     arm_counter: usize,
     /// The C name of each variable that a `let` has given a new name (by its Rust name).
@@ -1101,6 +1110,18 @@ fn tuple_struct_name(elem_c_tys: &[String]) -> String {
         name.push_str(t.replace(' ', "_").replace('*', "p").as_str());
     }
     name
+}
+
+/// Whether a hint names a pointer to a scalar (`i64*`, `bool*`, ...).
+fn is_scalar_pointer_hint(h: &str) -> bool {
+    match h.strip_suffix('*') {
+        Some(base) => matches!(
+            base,
+            "i8" | "i16" | "i32" | "i64" | "i128" | "isize" | "u8" | "u16" | "u32" | "u64"
+                | "u128" | "usize" | "f32" | "f64" | "bool" | "char"
+        ),
+        None => false,
+    }
 }
 
 /// Build a deterministic C function-pointer type for a non-capturing closure
@@ -1340,6 +1361,7 @@ impl Lower {
             let_counter: 0,
             renames_stack: Vec::new(),
             closure_param_hint: None,
+            closure_ret_hint: None,
             struct_names: std::collections::HashSet::new(),
             closure_captures: HashMap::new(),
             closure_bindings: HashMap::new(),
@@ -1730,9 +1752,13 @@ impl Lower {
         sub.func.name = name.clone();
         // A closure returns the type its body has (a `long long` unless the checker
         // says otherwise, e.g. a `String` built by `to_string()`).
+        // The body's own type, or the closure's declared result (its `Fn` hint), which
+        // names an aggregate the body alone does not (`Err(vec![..])`).
+        let declared_ret = self.closure_ret_hint.take();
         let body_ret = self
             .hint_of_expr(body)
-            .filter(|h| h != "long long" && !h.is_empty())
+            .filter(|h| h != "long long" && !h.is_empty() && h != "Result" && h != "Option")
+            .or(declared_ret.filter(|h| h != "long long" && !h.is_empty()))
             .unwrap_or_else(|| "long long".to_string());
         self.closure_rets.insert(name.clone(), body_ret.clone());
         sub.func.ret = Some(body_ret);
@@ -2091,6 +2117,7 @@ impl Lower {
                         _ if self.pointer_local_type(init).is_some() => self.pointer_local_type(init),
                         _ => self.hint_of_expr(init).filter(|h| {
                             h == "str"
+                                || is_scalar_pointer_hint(h)
                                 || self.struct_names.contains(h)
                                 || ["Option<", "Result<", "Vec<", "Map<", "Sorted<", "Set<", "SortedSet<"]
                                     .iter()
@@ -6853,7 +6880,6 @@ impl Lower {
                 }
                 // A sequence the lowering cannot see locally (a field, or a pattern
                 // binding): iterate it when Lachesis says it is a vector or slice.
-                if std::env::var("MOIRA_DBG").is_ok() { eprintln!("DBG for-seq hint={:?} span={:?}", self.hint_of_expr(si.seq), si.seq.span); }
                 if let Some(hint) = self.hint_of_expr(si.seq) {
                     let vec_form = mir::vec_elem(&hint)
                         .or_else(|| mir::slice_elem(&hint))
@@ -7237,6 +7263,7 @@ impl Lower {
                         if tys.len() == params.len() + 1 {
                             self.closure_param_hint =
                                 Some(tys[..params.len()].iter().map(|t| t.to_string()).collect());
+                            self.closure_ret_hint = tys.last().map(|t| t.to_string());
                         }
                     }
                 }

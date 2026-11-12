@@ -371,6 +371,10 @@ pub fn hint_of_ty(ty: &Ty) -> Option<String> {
         // A slice `[T]` (length 0 in the type) is a value; so is a reference to one.
         Ty::Array(elem, 0) => hint_elem_name(elem).map(|e| format!("Slice<{e}>")),
         Ty::Ref(inner) | Ty::RefMut(inner) => match &**inner {
+            // A reference to a scalar is a pointer to it.
+            Ty::Int | Ty::I8 | Ty::I16 | Ty::I32 | Ty::I64 | Ty::I128 | Ty::Isize | Ty::U8
+            | Ty::U16 | Ty::U32 | Ty::U64 | Ty::U128 | Ty::Usize | Ty::F32 | Ty::F64
+            | Ty::Bool | Ty::Char => hint_elem_name(inner).map(|h| format!("{h}*")),
             // A reference to a string is the string (its C value is the same `char*`).
             Ty::Str => Some("str".to_string()),
             Ty::Struct(name) if name == "String" => Some("str".to_string()),

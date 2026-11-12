@@ -190,6 +190,10 @@ impl Resolver {
         }
         for i in candidates {
             let name = &names[i];
+            // A segment after an uppercase type is a variant or associated item, not a crate item.
+            if i >= 1 && names[i - 1].starts_with(|c: char| c.is_ascii_uppercase()) {
+                continue;
+            }
             if !self.colliding.contains(name) {
                 continue;
             }
