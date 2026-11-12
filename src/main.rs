@@ -274,7 +274,9 @@ fn lower_for_emit(
         let mut i: usize = 0;
         while i < externs.len() {
             // Each extern is typed against the other externs it can see.
-            let mut others: Vec<(String, tpt_moira_clotho::ast::Program)> = Vec::new();
+            // The root crate is visible to every extern: its items may be used there too.
+            let mut others: Vec<(String, tpt_moira_clotho::ast::Program)> =
+                vec![("<root>".to_string(), program.clone())];
             for j in 0..externs.len() {
                 if j != i {
                     others.push(externs[j].clone());
@@ -288,9 +290,12 @@ fn lower_for_emit(
         }
         tpt_moira_atropos::lower_bundle(program, &root_hints, &units)
     } else {
-        tpt_moira_atropos::lower_program_typed(
+        // The other crates' enums are known to the lowering (for patterns on them).
+        let extra: Vec<&tpt_moira_clotho::ast::Program> = externs.iter().map(|(_, p)| p).collect();
+        tpt_moira_atropos::lower_program_with_enums(
             program,
             &tpt_moira_lachesis::expr_type_hints(program, externs),
+            &extra,
         )
     }
 }
