@@ -237,6 +237,16 @@ pub fn lower_program_with_enums(
     for p in extra {
         add_fn_params(&p.items, &aliases, &mut fn_param_tys);
     }
+    // The top-level functions (not async), so a call passing a capturing closure can specialise them.
+    let fn_asts: std::sync::Arc<HashMap<String, ast::Function>> = std::sync::Arc::new(
+        prog.items
+            .iter()
+            .filter_map(|it| match &it.kind {
+                ItemKind::Function(f) if !f.is_async => Some((f.name.node.clone(), f.clone())),
+                _ => None,
+            })
+            .collect(),
+    );
     let mut enum_structs: Vec<mir::StructDef> = Vec::new();
     let mut variants: HashMap<String, (String, i128, usize)> = HashMap::new();
     let mut qualified: HashMap<String, (String, i128, usize)> = HashMap::new();
@@ -352,6 +362,7 @@ pub fn lower_program_with_enums(
                     for c in l.closures.drain(..) {
                         out.functions.push(c);
                     }
+                    out.functions.extend(l.specs.drain(..));
                     out.structs.extend(tuple_structs);
                 }
             }
@@ -390,6 +401,7 @@ pub fn lower_program_with_enums(
                     l.struct_names = struct_names.clone();
                     l.methods = methods.clone();
                     l.fn_param_tys = fn_param_tys.clone();
+                    l.fn_asts = fn_asts.clone();
                     l.aliases = aliases.clone();
                     let func = l.lower_function(f).map_err(|e| in_fn(&f.name.node, e))?;
                     let tuple_structs: Vec<mir::StructDef> =
@@ -398,6 +410,7 @@ pub fn lower_program_with_enums(
                     for f in l.closures.drain(..) {
                         out.functions.push(f);
                     }
+                    out.functions.extend(l.specs.drain(..));
                     out.structs.extend(tuple_structs);
                 }
             }
@@ -439,6 +452,8 @@ struct SeqIter<'a> {
     drain: bool,
     /// `s.char_indices()`: each item is `(byte index, byte)`.
     indices: bool,
+    /// `s.lines()`: each item is one line of the string (without its newline).
+    lines: bool,
 }
 
 fn seq_iter(iter: &Expr) -> SeqIter<'_> {
@@ -451,6 +466,7 @@ fn seq_iter(iter: &Expr) -> SeqIter<'_> {
         chars: false,
         drain: false,
         indices: false,
+        lines: false,
     };
     if let ExprKind::MethodCall(r, m, args) = &e.kind {
         if m.node == "enumerate" && args.is_empty() {
@@ -467,6 +483,12 @@ fn seq_iter(iter: &Expr) -> SeqIter<'_> {
     if let ExprKind::MethodCall(r, m, args) = &e.kind {
         if m.node == "drain" && args.len() == 1 {
             si.drain = true;
+            e = &**r;
+        }
+    }
+    if let ExprKind::MethodCall(r, m, args) = &e.kind {
+        if m.node == "lines" && args.is_empty() {
+            si.lines = true;
             e = &**r;
         }
     }
@@ -791,7 +813,12 @@ fn rename_op(op: &mut mir::Operand, map: &HashMap<String, String>) {
 fn rename_rvalue(rv: &mut mir::Rvalue, map: &HashMap<String, String>) {
     use mir::Rvalue as R;
     match rv {
-        R::Use(a) | R::Unary(_, a) | R::Field(a, _, _) | R::Ref(a, _) | R::Cast(a, _) => {
+        R::Use(a)
+        | R::Unary(_, a)
+        | R::Field(a, _, _)
+        | R::FieldAddr(a, _, _)
+        | R::Ref(a, _)
+        | R::Cast(a, _) => {
             rename_op(a, map)
         }
         R::Binary(_, a, b) | R::Index(a, b) | R::IndexRef(a, b) => {
@@ -829,6 +856,16 @@ fn rename_rvalue(rv: &mut mir::Rvalue, map: &HashMap<String, String>) {
 /// Whether `e` is the bare name `self`.
 fn is_self_path(e: &Expr) -> bool {
     matches!(&e.kind, ExprKind::Path(p) if p.segments.len() == 1 && p.segments[0].node == "self")
+}
+
+/// The scope of a loop's pattern bindings (see `open_pattern_scope`).
+struct PatternScope {
+    /// The block the bindings are made in (the body's first block).
+    cur: usize,
+    /// The first block created after the bindings: the body's own blocks start here.
+    created_from: usize,
+    renames: HashMap<String, String>,
+    saved: Vec<(String, Option<String>)>,
 }
 
 /// How a sort orders two items: the items themselves, a key of each item, or a comparator
@@ -909,6 +946,9 @@ fn type_to_c_expanded(ty: &ast::Type) -> String {
                 (Some("BTreeSet"), 1) => format!("Sorted<{},bool>", arg(0)),
                 // `String` and `str` are one C type (`char*`).
                 (Some("String"), 0) => "str".to_string(),
+                // A function-pointer type `fn(A, B) -> R`: its arguments are the parameters
+                // then the result, and every one is a `long long` (see `func_ptr_c_type`).
+                (Some("fn"), n) => func_ptr_c_type(n.saturating_sub(1)),
                 _ => last.unwrap_or_else(|| "long long".to_string()),
             }
         }
@@ -972,6 +1012,12 @@ struct Lower {
     closure_param_hint: Option<Vec<String>>,
     /// A counter that makes the names of match-arm bindings unique.
     arm_counter: usize,
+    /// The C name of each variable that a `let` has given a new name (by its Rust name).
+    var_renames: HashMap<String, String>,
+    /// Counter for the names of `let` bindings that shadow an existing variable.
+    let_counter: usize,
+    /// The previous `var_renames` entries of each open pattern scope (restored on close).
+    renames_stack: Vec<Vec<(String, Option<String>)>>,
     /// The C return type of each closure lifted so far (by its lifted function name).
     closure_rets: HashMap<String, String>,
     /// The C type a value is expected to have, when its context decides it (the element
@@ -993,6 +1039,14 @@ struct Lower {
     /// name. Used to rewrite direct calls `f(args)` into
     /// `__moira_closure_N(captures…, args)`.
     closure_bindings: HashMap<String, String>,
+    /// The top-level non-async functions by name (specialised for capturing closure arguments).
+    fn_asts: std::sync::Arc<HashMap<String, ast::Function>>,
+    /// The specialised copies already lowered or in progress, by name.
+    spec_done: std::collections::HashSet<String>,
+    /// Lowered specialised copies, emitted with the program.
+    specs: Vec<mir::Function>,
+    /// Captured variables (name and C type) that a specialised copy takes as leading parameters.
+    leading_caps: Vec<(String, String)>,
     /// When set, the enclosing `async fn` state-machine bookkeeping: the future
     /// struct name, the `self` parameter local name, the output C type, and the
     /// list of `(slot_name, c_type)` that must be round-tripped across a
@@ -1270,10 +1324,17 @@ impl Lower {
             expect_ty: None,
             closure_rets: HashMap::new(),
             arm_counter: 0,
+            var_renames: HashMap::new(),
+            let_counter: 0,
+            renames_stack: Vec::new(),
             closure_param_hint: None,
             struct_names: std::collections::HashSet::new(),
             closure_captures: HashMap::new(),
             closure_bindings: HashMap::new(),
+            fn_asts: std::sync::Arc::new(HashMap::new()),
+            spec_done: std::collections::HashSet::new(),
+            specs: Vec::new(),
+            leading_caps: Vec::new(),
             async_fns: std::collections::HashSet::new(),
             async_ctx: None,
             expecting_future: false,
@@ -1288,6 +1349,14 @@ impl Lower {
     fn lower_function(&mut self, f: &ast::Function) -> Result<mir::Function> {
         self.func.name = f.name.node.clone();
         self.func.ret = f.ret.as_ref().map(|t| type_to_c(t, &self.aliases));
+        // The captured variables of a specialised copy are its leading parameters.
+        for (cap, ty) in self.leading_caps.clone() {
+            self.func.params.push(cap.clone());
+            self.func.locals.push((cap.clone(), Some(ty.clone())));
+            if ty != "long long" {
+                self.types.insert(cap, ty);
+            }
+        }
         for p in &f.params {
             let name = pat_name(&p.pat)?;
             let ty = type_to_c(&p.ty, &self.aliases);
@@ -1580,13 +1649,24 @@ impl Lower {
     /// Lower a block, returning the operand holding its value (tail expression
     /// or `()` when there is none).
     fn lower_block_value(&mut self, b: &ast::Block) -> Result<mir::Operand> {
+        // A `let` in the block scopes its names to the block.
+        let saved = self.var_renames.clone();
+        let mut result = Ok(());
         for s in &b.stmts {
-            self.lower_stmt(s)?;
+            result = self.lower_stmt(s);
+            if result.is_err() {
+                break;
+            }
         }
-        match &b.tail {
-            Some(tail) => self.lower_expr(tail),
-            None => Ok(mir::Operand::Unit),
-        }
+        let value = match result {
+            Err(e) => Err(e),
+            Ok(()) => match &b.tail {
+                Some(tail) => self.lower_expr(tail),
+                None => Ok(mir::Operand::Unit),
+            },
+        };
+        self.var_renames = saved;
+        value
     }
 
     /// Lambda-lift a closure `|params| body` into a fresh top-level
@@ -1605,20 +1685,7 @@ impl Lower {
     /// subset and remains a documented limitation).
     fn lower_closure(&mut self, params: &Vec<ast::Param>, body: &Expr) -> Result<mir::Operand> {
         let param_tys_hint: Vec<String> = self.closure_param_hint.take().unwrap_or_default();
-        let mut param_names = std::collections::HashSet::new();
-        for p in params {
-            let names: Vec<String> = closure_param_names(&p.pat)?;
-            for n in names {
-                param_names.insert(n);
-            }
-        }
-        // Structural capture analysis: any single-segment path name the body
-        // references that is neither a closure parameter nor a top-level function
-        // is a captured variable.
-        // Variant constructors (`Some`, `None`) and functions are not captured variables.
-        let mut not_captured = self.all_fn_names.clone();
-        not_captured.extend(self.variants.keys().cloned());
-        let captures = closure_captures(body, &param_names, &not_captured);
+        let captures = self.literal_captures(params, body)?;
 
         // Qualified by the enclosing function: each function is lowered with its
         // own counter, so a bare counter would give two closures the same name.
@@ -1646,6 +1713,8 @@ impl Lower {
         sub.struct_names = self.struct_names.clone();
         sub.const_values = self.const_values.clone();
         sub.closure_counter = self.closure_counter;
+        sub.fn_asts = self.fn_asts.clone();
+        sub.spec_done = self.spec_done.clone();
         sub.func.name = name.clone();
         // A closure returns the type its body has (a `long long` unless the checker
         // says otherwise, e.g. a `String` built by `to_string()`).
@@ -1712,9 +1781,203 @@ impl Lower {
         sub.func.temp_types = sub.types.clone();
         self.closure_counter = sub.closure_counter;
         self.closures.push(sub.func.clone());
+        self.closures.extend(sub.closures.drain(..));
+        self.specs.extend(sub.specs.drain(..));
+        self.spec_done = sub.spec_done.clone();
         // Record the captures so call sites through a bound local can pass them.
         self.closure_captures.insert(name.clone(), captures);
         Ok(mir::Operand::Func(name))
+    }
+
+    /// The captured variables of a closure literal: the names its body uses that are
+    /// variables of the enclosing function.
+    fn literal_captures(&self, params: &[ast::Param], body: &Expr) -> Result<Vec<String>> {
+        let mut param_names = std::collections::HashSet::new();
+        for p in params {
+            for n in closure_param_names(&p.pat)? {
+                param_names.insert(n);
+            }
+        }
+        // Structural capture analysis: a single-segment path name that is neither a
+        // closure parameter nor a function is a captured variable. Variant constructors
+        // (`Some`, `None`) are not captured variables either.
+        let mut not_captured = self.all_fn_names.clone();
+        not_captured.extend(self.variants.keys().cloned());
+        Ok(closure_captures(body, &param_names, &not_captured))
+    }
+
+    /// A call to a top-level function that passes a capturing closure (a local bound to
+    /// one, or a closure literal). The callee is lowered once per closure as a copy that
+    /// takes the captured variables as leading parameters and calls the closure's lifted
+    /// function directly, so the captures never go through a function pointer.
+    fn lower_specialized_call(&mut self, callee: &Expr, args: &[Expr]) -> Result<Option<mir::Operand>> {
+        let ExprKind::Path(p) = &callee.kind else {
+            return Ok(None);
+        };
+        if p.segments.len() != 1 {
+            return Ok(None);
+        }
+        let fname = p.segments[0].node.clone();
+        let Some(f) = self.fn_asts.get(&fname).cloned() else {
+            return Ok(None);
+        };
+        if f.params.len() != args.len() {
+            return Ok(None);
+        }
+        // The capturing closure argument: its position and its lifted function.
+        let mut found: Option<(usize, String)> = None;
+        for (i, a) in args.iter().enumerate() {
+            let lifted = match &a.kind {
+                ExprKind::Path(ap) if ap.segments.len() == 1 => {
+                    self.closure_bindings.get(&ap.segments[0].node).cloned()
+                }
+                ExprKind::Closure { params, body, .. } => {
+                    if self.literal_captures(params, body)?.is_empty() {
+                        None
+                    } else {
+                        match self.lower_closure(params, body)? {
+                            mir::Operand::Func(n) => Some(n),
+                            _ => None,
+                        }
+                    }
+                }
+                _ => None,
+            };
+            if let Some(lifted) = lifted {
+                if found.is_some() {
+                    return Err(LowerError(
+                        "a call passes more than one capturing closure (not supported)".into(),
+                    ));
+                }
+                found = Some((i, lifted));
+            }
+        }
+        let Some((pidx, lifted)) = found else {
+            return Ok(None);
+        };
+        let caps = self.closure_captures.get(&lifted).cloned().unwrap_or_default();
+        let spec_name = format!("{fname}__with_{lifted}");
+        if !self.spec_done.contains(&spec_name) {
+            self.spec_done.insert(spec_name.clone());
+            self.build_spec(&f, pidx, &lifted, &caps, &spec_name)?;
+        }
+        let mut operands = Vec::new();
+        for c in &caps {
+            operands.push(mir::Operand::var(self.var_name(c)));
+        }
+        for (i, a) in args.iter().enumerate() {
+            if i != pidx {
+                operands.push(self.lower_expr(a)?);
+            }
+        }
+        let ret = self
+            .closure_rets
+            .get(&spec_name)
+            .cloned()
+            .unwrap_or_else(|| "long long".to_string());
+        let t = self.fresh_temp(ret);
+        self.emit(t.clone(), mir::Rvalue::Call(mir::Operand::Func(spec_name), operands));
+        Ok(Some(mir::Operand::var(t)))
+    }
+
+    /// Lower the copy of `f` for one capturing closure (`lifted`, capturing `caps`) that
+    /// is passed as parameter `pidx`. The closure parameter is bound to `lifted` in the copy.
+    fn build_spec(
+        &mut self,
+        f: &ast::Function,
+        pidx: usize,
+        lifted: &str,
+        caps: &[String],
+        spec_name: &str,
+    ) -> Result<()> {
+        let param_name = pat_name(&f.params[pidx].pat)?;
+        let mut g = f.clone();
+        g.name.node = spec_name.to_string();
+        g.params.remove(pidx);
+        let mut leading = Vec::new();
+        for cap in caps {
+            let cap_ty = match self.types.get(cap).cloned() {
+                Some(t) => t,
+                None => self
+                    .func
+                    .locals
+                    .iter()
+                    .find(|(n, _)| n == cap)
+                    .and_then(|(_, t)| t.clone())
+                    .unwrap_or_else(|| "long long".to_string()),
+            };
+            leading.push((cap.clone(), cap_ty));
+        }
+        let mut l = Lower::new(&self.structs, self.hints.clone());
+        l.async_fns = self.async_fns.clone();
+        l.all_fn_names = self.all_fn_names.clone();
+        l.aliases = self.aliases.clone();
+        l.variants = self.variants.clone();
+        l.qualified_variants = self.qualified_variants.clone();
+        l.payload_tys = self.payload_tys.clone();
+        l.variant_fields = self.variant_fields.clone();
+        l.methods = self.methods.clone();
+        l.fn_param_tys = self.fn_param_tys.clone();
+        l.closure_rets = self.closure_rets.clone();
+        l.struct_names = self.struct_names.clone();
+        l.const_values = self.const_values.clone();
+        l.closure_captures = self.closure_captures.clone();
+        l.closure_bindings.insert(param_name, lifted.to_string());
+        l.fn_asts = self.fn_asts.clone();
+        l.spec_done = self.spec_done.clone();
+        l.closure_counter = self.closure_counter;
+        l.leading_caps = leading;
+        let func = l.lower_function(&g)?;
+        self.closure_counter = l.closure_counter;
+        self.spec_done = l.spec_done;
+        self.closures.extend(l.closures.drain(..));
+        self.specs.extend(l.specs.drain(..));
+        self.closure_rets.insert(
+            spec_name.to_string(),
+            func.ret.clone().unwrap_or_else(|| "long long".to_string()),
+        );
+        self.specs.push(func);
+        Ok(())
+    }
+
+    /// `let x = init;` where `x` is already a variable: the initializer is lowered under the
+    /// old `x`, and the new `x` is a variable of its own with a new C name.
+    fn lower_rebinding_let(&mut self, plain: &str, local: &ast::Local) -> Result<()> {
+        let init = local.init.as_ref().expect("checked by the caller");
+        let v = self.lower_expr(init)?;
+        let ty = match &local.ty {
+            Some(t) => type_to_c(t, &self.aliases),
+            None => {
+                let actual = match &v {
+                    mir::Operand::Var(n) => self.temp_type_of(n),
+                    mir::Operand::CStr(_) => "char*".to_string(),
+                    _ => "long long".to_string(),
+                };
+                if actual != "long long" {
+                    actual
+                } else {
+                    match self.hint_of_expr(init) {
+                        Some(h)
+                            if h == "str"
+                                || self.struct_names.contains(&h)
+                                || ["Option<", "Result<", "Vec<", "Map<", "Sorted<"]
+                                    .iter()
+                                    .any(|p| h.starts_with(p)) =>
+                        {
+                            h
+                        }
+                        _ => "long long".to_string(),
+                    }
+                }
+            }
+        };
+        let unique = format!("{plain}__let{}", self.let_counter);
+        self.let_counter += 1;
+        self.func.locals.push((unique.clone(), Some(ty.clone())));
+        self.types.insert(unique.clone(), ty);
+        self.emit(unique.clone(), mir::Rvalue::Use(v));
+        self.var_renames.insert(plain.to_string(), unique);
+        Ok(())
     }
 
     fn lower_stmt(&mut self, s: &Stmt) -> Result<()> {
@@ -1724,6 +1987,16 @@ impl Lower {
                 // identifier in the pattern to the matching tuple component.
                 if matches!(local.pat, Pat::Tuple(_)) {
                     return self.lower_tuple_destructure(local);
+                }
+                // A `let` that declares a name already in use in this function gets a new C
+                // name, so its own type does not clash with the earlier variable.
+                if let (Pat::Ident(n), Some(init)) = (&local.pat, &local.init) {
+                    let shadows = self.func.locals.iter().any(|(l, _)| *l == n.node);
+                    let plain_init =
+                        !matches!(init.kind, ExprKind::Closure { .. } | ExprKind::Array(_));
+                    if shadows && plain_init && self.async_ctx.is_none() {
+                        return self.lower_rebinding_let(&n.node, local);
+                    }
                 }
                 let name = pat_name(&local.pat)?;
                 // An array-literal initializer binds the local as an array
@@ -1758,6 +2031,15 @@ impl Lower {
                                 Some((ename, _, _)) => Some(ename),
                                 None => path.segments.last().map(|s| s.node.clone()),
                             }
+                        }
+                        // A variant construction typed by the checker as an instance ().
+                        _ if self.variant_c_type(init).is_some()
+                            && self.hint_of_expr(init).map_or(false, |h| {
+                                mir::split_generic(&h)
+                                    .map_or(false, |(b, _)| b == "Option" || b == "Result")
+                            }) =>
+                        {
+                            self.hint_of_expr(init)
                         }
                         _ if self.variant_c_type(init).is_some() => {
                             // A variant construction (`let o = Some(5);`) types
@@ -1851,7 +2133,10 @@ impl Lower {
                     if let ExprKind::Closure { .. } = &init.kind {
                         if let mir::Operand::Func(lifted) = &v {
                             if self.closure_captures.contains_key(lifted) {
+                                // Calls through the local pass the captures, so the local
+                                // holds no function pointer (its C type has no capture slots).
                                 self.closure_bindings.insert(name.clone(), lifted.clone());
+                                return Ok(());
                             }
                         }
                     }
@@ -2240,7 +2525,7 @@ impl Lower {
         if p.segments.len() != 1 {
             return None;
         }
-        let name = p.segments[0].node.clone();
+        let name = self.var_name(&p.segments[0].node);
         let ty = self.types.get(&name).cloned().or_else(|| {
             self.func
                 .locals
@@ -2407,7 +2692,11 @@ impl Lower {
             .get(&lifted)
             .cloned()
             .unwrap_or_default();
-        Ok((lifted, caps.into_iter().map(mir::Operand::var).collect()))
+        let mut cap_ops = Vec::new();
+        for c in caps {
+            cap_ops.push(mir::Operand::var(self.var_name(&c)));
+        }
+        Ok((lifted, cap_ops))
     }
 
     /// Lower a terminal call (`collect`, `any`, `all`, `find`, `count`, `sum`,
@@ -2832,6 +3121,79 @@ impl Lower {
 
     /// Lower `for c in s.chars()` (or `bytes()`) over a string as an index loop
     /// bounded by `strlen`. The items are bytes, which is exact for ASCII text.
+    /// `for line in s.lines()`: walks the string line by line. Each step copies one line
+    /// (without its `\n`, nor a `\r` before it) through the runtime helpers.
+    fn lower_lines_for(
+        &mut self,
+        seq: &Expr,
+        pat: &ast::Pat,
+        body: &ast::Block,
+    ) -> Result<mir::Operand> {
+        let s = match self.lower_expr(seq)? {
+            mir::Operand::Var(n) => n,
+            _ => return Err(LowerError("`lines()` needs a named string".into())),
+        };
+        let idx = self.fresh_temp("long long");
+        self.emit(idx.clone(), mir::Rvalue::Use(mir::Operand::Const(0)));
+        let next = self.fresh_temp("long long");
+        let head = self.new_block();
+        let body_blk = self.new_block();
+        let step = self.new_block();
+        let exit = self.new_block();
+        self.set_term(mir::Terminator::Goto(head));
+
+        // `while s[idx] != 0`.
+        self.current = head;
+        let ch = self.fresh_temp("char");
+        self.emit(
+            ch.clone(),
+            mir::Rvalue::Index(mir::Operand::var(s.clone()), mir::Operand::var(idx.clone())),
+        );
+        let more = self.fresh_temp("long long");
+        self.emit(
+            more.clone(),
+            mir::Rvalue::Binary(
+                mir::BinOp::Ne,
+                mir::Operand::var(ch),
+                mir::Operand::Const(0),
+            ),
+        );
+        self.set_term(mir::Terminator::If(mir::Operand::var(more), body_blk, exit));
+
+        self.current = body_blk;
+        self.emit(
+            next.clone(),
+            mir::Rvalue::Call(
+                mir::Operand::Func("moira_line_next".to_string()),
+                vec![mir::Operand::var(s.clone()), mir::Operand::var(idx.clone())],
+            ),
+        );
+        let line = self.fresh_temp("char*");
+        self.emit(
+            line.clone(),
+            mir::Rvalue::Call(
+                mir::Operand::Func("moira_line_text".to_string()),
+                vec![
+                    mir::Operand::var(s),
+                    mir::Operand::var(idx.clone()),
+                    mir::Operand::var(next.clone()),
+                ],
+            ),
+        );
+        self.lower_bind_pattern(pat, mir::Operand::var(line), "char*")?;
+        self.loops.push((exit, step));
+        self.lower_block_value(body)?;
+        self.loops.pop();
+        self.set_term(mir::Terminator::Goto(step));
+
+        self.current = step;
+        self.emit(idx.clone(), mir::Rvalue::Use(mir::Operand::var(next)));
+        self.set_term(mir::Terminator::Goto(head));
+
+        self.current = exit;
+        Ok(mir::Operand::Unit)
+    }
+
     fn lower_str_for(
         &mut self,
         seq: &Expr,
@@ -2919,7 +3281,7 @@ impl Lower {
             ExprKind::Path(p) if p.segments.len() == 1 => p,
             _ => return None,
         };
-        let name = p.segments[0].node.clone();
+        let name = self.var_name(&p.segments[0].node);
         let ty = self.types.get(&name).cloned().or_else(|| {
             self.func
                 .locals
@@ -3002,6 +3364,16 @@ impl Lower {
     ) -> Result<Option<mir::Operand>> {
         let (mname, k, v, is_ptr) = match self.map_local(recv) {
             Some(m) => m,
+            // A map read from a field (): the read-only methods work on a
+            // copy of the map, which shares its storage.
+            None if matches!(recv.kind, ExprKind::Field(..))
+                && matches!(method, "get" | "contains_key" | "len" | "is_empty") =>
+            {
+                match self.map_from_hint(recv)? {
+                    Some(m) => m,
+                    None => return Ok(None),
+                }
+            }
             None => return Ok(None),
         };
         let (helper, ret_ty) = match (method, args.len()) {
@@ -3604,7 +3976,7 @@ impl Lower {
             Some(h) => matches!(h.trim_end_matches('*'), "str" | "String"),
             None => match &recv.kind {
                 ExprKind::Path(p) if p.segments.len() == 1 => {
-                    let n = &p.segments[0].node;
+                    let n = &self.var_name(&p.segments[0].node);
                     self.types
                         .get(n)
                         .map_or(false, |t| t == "char*" || t == "str")
@@ -3629,6 +4001,14 @@ impl Lower {
                 vec![mir::Operand::var(ptr), piece],
             ),
         );
+    }
+
+    /// The C name of the variable a Rust name currently refers to.
+    fn var_name(&self, plain: &str) -> String {
+        self.var_renames
+            .get(plain)
+            .cloned()
+            .unwrap_or_else(|| plain.to_string())
     }
 
     /// The element type of a vector-typed field expression, from the checker's hint.
@@ -3852,7 +4232,20 @@ impl Lower {
             return Ok(None);
         }
         //  takes a named vector or field (an iterator chain stays on its own path).
-        if method == "extend" && !matches!(args[0].kind, ExprKind::Path(_) | ExprKind::Field(..)) {
+        // `extend(x.drain(..))` is also a plain sequence source (it empties `x`).
+        let arg0: &Expr = &args[0];
+        let mut drain_inner: &Expr = arg0;
+        let mut draining = false;
+        if let ExprKind::MethodCall(r, m, a) = &arg0.kind {
+            if m.node == "drain" && a.len() == 1 {
+                drain_inner = r;
+                draining = true;
+            }
+        }
+        if method == "extend"
+            && !draining
+            && !matches!(args[0].kind, ExprKind::Path(_) | ExprKind::Field(..))
+        {
             return Ok(None);
         }
         let Some(hint) = self.hint_of_expr(recv) else {
@@ -3871,19 +4264,29 @@ impl Lower {
         let cur = self.fresh_temp(vec_ty.clone());
         self.emit(
             cur.clone(),
-            mir::Rvalue::Field(mir::Operand::var(bname.clone()), field.node.clone(), ptr_base),
+            mir::Rvalue::Field(
+                mir::Operand::var(bname.clone()),
+                field.node.clone(),
+                ptr_base,
+            ),
         );
         if method == "push" {
             let v = self.lower_expr(&args[0])?;
             self.emit_vec_push(&cur, &elem, v);
         } else {
             // `extend(v)`: every item of the vector `v`, in order.
-            let (src, src_elem, src_ptr) = self.chain_sequence(&args[0])?;
+            let (src, src_elem, src_ptr) = self.chain_sequence(drain_inner)?;
             let _ = src_elem;
             let len = self.fresh_temp("long long");
-            self.emit(len.clone(), mir::Rvalue::Field(mir::Operand::var(src.clone()), "len".into(), src_ptr));
+            self.emit(
+                len.clone(),
+                mir::Rvalue::Field(mir::Operand::var(src.clone()), "len".into(), src_ptr),
+            );
             let data = self.fresh_temp(format!("{elem}*"));
-            self.emit(data.clone(), mir::Rvalue::Field(mir::Operand::var(src.clone()), "data".into(), src_ptr));
+            self.emit(
+                data.clone(),
+                mir::Rvalue::Field(mir::Operand::var(src.clone()), "data".into(), src_ptr),
+            );
             let idx = self.fresh_temp("long long");
             self.emit(idx.clone(), mir::Rvalue::Use(mir::Operand::Const(0)));
             let head = self.new_block();
@@ -3894,23 +4297,51 @@ impl Lower {
             let more = self.fresh_temp("long long");
             self.emit(
                 more.clone(),
-                mir::Rvalue::Binary(mir::BinOp::Lt, mir::Operand::var(idx.clone()), mir::Operand::var(len)),
+                mir::Rvalue::Binary(
+                    mir::BinOp::Lt,
+                    mir::Operand::var(idx.clone()),
+                    mir::Operand::var(len),
+                ),
             );
             self.set_term(mir::Terminator::If(mir::Operand::var(more), body, exit));
             self.current = body;
             let item = self.fresh_temp(elem.clone());
-            self.emit(item.clone(), mir::Rvalue::Index(mir::Operand::var(data), mir::Operand::var(idx.clone())));
+            self.emit(
+                item.clone(),
+                mir::Rvalue::Index(mir::Operand::var(data), mir::Operand::var(idx.clone())),
+            );
             self.emit_vec_push(&cur, &elem, mir::Operand::var(item));
             self.emit(
                 idx.clone(),
-                mir::Rvalue::Binary(mir::BinOp::Add, mir::Operand::var(idx), mir::Operand::Const(1)),
+                mir::Rvalue::Binary(
+                    mir::BinOp::Add,
+                    mir::Operand::var(idx),
+                    mir::Operand::Const(1),
+                ),
             );
             self.set_term(mir::Terminator::Goto(head));
             self.current = exit;
+            if draining {
+                // `drain(..)` empties its source once its items are pushed.
+                self.emit(
+                    "__scratch".to_string(),
+                    mir::Rvalue::StoreField(
+                        mir::Operand::var(src),
+                        "len".to_string(),
+                        mir::Operand::Const(0),
+                        src_ptr,
+                    ),
+                );
+            }
         }
         self.emit(
             "__scratch".to_string(),
-            mir::Rvalue::StoreField(mir::Operand::var(bname), field.node.clone(), mir::Operand::var(cur), ptr_base),
+            mir::Rvalue::StoreField(
+                mir::Operand::var(bname),
+                field.node.clone(),
+                mir::Operand::var(cur),
+                ptr_base,
+            ),
         );
         Ok(Some(mir::Operand::Unit))
     }
@@ -4022,6 +4453,186 @@ impl Lower {
         Ok(out)
     }
 
+    /// `seq.get(i)` on a vector or slice: `Some(&seq[i])` while `i < len`, else `None`.
+    /// A payload typed as a pointer (`Option<T*>`, the checker's `Option<&T>`) points into
+    /// the sequence's data, so a struct element is not copied.
+    fn lower_seq_get(
+        &mut self,
+        e: &Expr,
+        recv: &Expr,
+        index: &Expr,
+    ) -> Result<Option<mir::Operand>> {
+        let Some(out_ty) = self.hint_of_expr(e) else {
+            return Ok(None);
+        };
+        let Some(("Option", targs)) = mir::split_generic(&out_ty) else {
+            return Ok(None);
+        };
+        if targs.len() != 1 {
+            return Ok(None);
+        }
+        let payload = targs[0].to_string();
+        // The receiver is a vector or slice: a local or parameter declared as one, or an
+        // expression the checker typed as one.
+        let is_seq = self.vec_local(recv).is_some()
+            || self.hint_of_expr(recv).map_or(false, |h| {
+                mir::vec_elem(&h).is_some() || mir::slice_elem(&h).is_some()
+            });
+        if !is_seq {
+            return Ok(None);
+        }
+        let (sname, _, sptr) = self.chain_sequence(recv)?;
+        let idx = self.lower_expr(index)?;
+        let len = self.fresh_temp("long long");
+        self.emit(
+            len.clone(),
+            mir::Rvalue::Field(mir::Operand::var(sname.clone()), "len".into(), sptr),
+        );
+        // The data pointer points at the elements, so its element type is the payload's
+        // type without the reference's `*` (a pointer payload `Tok*` has data `Tok*`).
+        let elem = payload.strip_suffix('*').unwrap_or(&payload).to_string();
+        let data = self.fresh_temp(format!("{elem}*"));
+        self.emit(
+            data.clone(),
+            mir::Rvalue::Field(mir::Operand::var(sname), "data".into(), sptr),
+        );
+        let in_range = self.fresh_temp("long long");
+        self.emit(
+            in_range.clone(),
+            mir::Rvalue::Binary(mir::BinOp::Lt, idx.clone(), mir::Operand::var(len)),
+        );
+        let result = self.fresh_temp(out_ty);
+        let some_blk = self.new_block();
+        let none_blk = self.new_block();
+        let join = self.new_block();
+        self.set_term(mir::Terminator::If(
+            mir::Operand::var(in_range),
+            some_blk,
+            none_blk,
+        ));
+
+        self.current = some_blk;
+        let item = self.fresh_temp(payload.clone());
+        let elem_is_ptr = payload.ends_with('*');
+        let item_rv = if elem_is_ptr {
+            mir::Rvalue::IndexRef(mir::Operand::var(data), idx)
+        } else {
+            mir::Rvalue::Index(mir::Operand::var(data), idx)
+        };
+        self.emit(item.clone(), item_rv);
+        self.emit(
+            result.clone(),
+            mir::Rvalue::StructLit(
+                "Option".to_string(),
+                vec![
+                    ("tag".to_string(), mir::Operand::Const(0)),
+                    (payload_field("Option", 0, 0), mir::Operand::var(item)),
+                ],
+            ),
+        );
+        self.set_term(mir::Terminator::Goto(join));
+
+        self.current = none_blk;
+        self.emit(
+            result.clone(),
+            mir::Rvalue::StructLit(
+                "Option".to_string(),
+                vec![("tag".to_string(), mir::Operand::Const(1))],
+            ),
+        );
+        self.set_term(mir::Terminator::Goto(join));
+
+        self.current = join;
+        Ok(Some(mir::Operand::var(result)))
+    }
+
+    /// `opt.map(|x| body)` on an `Option<T>` value: a branch on the tag. `Some` applies
+    /// the closure to the payload (typed `T` by the checker's hint, so a reference payload
+    /// stays a pointer) and wraps the result; `None` stays `None`.
+    fn lower_option_map(
+        &mut self,
+        e: &Expr,
+        recv: &Expr,
+        payload: &str,
+        closure: &Expr,
+    ) -> Result<Option<mir::Operand>> {
+        let Some(out_ty) = self.hint_of_expr(e) else {
+            return Ok(None);
+        };
+        let opt = self.lower_expr(recv)?;
+        let oname = match &opt {
+            mir::Operand::Var(n) => n.clone(),
+            _ => return Err(LowerError("`map` on an option needs a named value".into())),
+        };
+        let ptr = self.scrutinee_is_pointer(&opt);
+        let tag = self.fresh_temp("long long");
+        self.emit(
+            tag.clone(),
+            mir::Rvalue::Field(mir::Operand::var(oname.clone()), "tag".into(), ptr),
+        );
+        let cond = self.fresh_temp("long long");
+        self.emit(
+            cond.clone(),
+            mir::Rvalue::Binary(
+                mir::BinOp::Eq,
+                mir::Operand::var(tag),
+                mir::Operand::Const(0),
+            ),
+        );
+        let result = self.fresh_temp(out_ty);
+        let some_blk = self.new_block();
+        let none_blk = self.new_block();
+        let join = self.new_block();
+        self.set_term(mir::Terminator::If(mir::Operand::var(cond), some_blk, none_blk));
+
+        self.current = some_blk;
+        self.closure_param_hint = Some(vec![payload.to_string()]);
+        let callee = self.closure_callee(closure);
+        self.closure_param_hint = None;
+        let (f, caps) = callee?;
+        let payload_val = self.fresh_temp(payload.to_string());
+        self.emit(
+            payload_val.clone(),
+            mir::Rvalue::Field(mir::Operand::var(oname), payload_field("Option", 0, 0), ptr),
+        );
+        let mut args = caps;
+        args.push(mir::Operand::var(payload_val));
+        let ret = self
+            .closure_rets
+            .get(&f)
+            .cloned()
+            .unwrap_or_else(|| "long long".to_string());
+        let mapped = self.fresh_temp(ret);
+        self.emit(
+            mapped.clone(),
+            mir::Rvalue::Call(mir::Operand::Func(f), args),
+        );
+        self.emit(
+            result.clone(),
+            mir::Rvalue::StructLit(
+                "Option".to_string(),
+                vec![
+                    ("tag".to_string(), mir::Operand::Const(0)),
+                    (payload_field("Option", 0, 0), mir::Operand::var(mapped)),
+                ],
+            ),
+        );
+        self.set_term(mir::Terminator::Goto(join));
+
+        self.current = none_blk;
+        self.emit(
+            result.clone(),
+            mir::Rvalue::StructLit(
+                "Option".to_string(),
+                vec![("tag".to_string(), mir::Operand::Const(1))],
+            ),
+        );
+        self.set_term(mir::Terminator::Goto(join));
+
+        self.current = join;
+        Ok(Some(mir::Operand::var(result)))
+    }
+
     /// `v.clone()` on a value: a vector is copied element by element into a new vector, a
     /// string is duplicated, and any other value is copied. A user type's own `clone`
     /// method is dispatched by `lower_user_method` instead.
@@ -4032,6 +4643,25 @@ impl Lower {
         method: &str,
         args: &[Expr],
     ) -> Result<Option<mir::Operand>> {
+        // `seq.get(i)` on a vector or slice with a checker-typed `Option<&T>` result.
+        if method == "get" && args.len() == 1 {
+            if let Some(r) = self.lower_seq_get(e, recv, &args[0])? {
+                return Ok(Some(r));
+            }
+        }
+        // `opt.map(|x| ..)` on an `Option<T>` with a checker-typed payload.
+        if method == "map" && args.len() == 1 && matches!(args[0].kind, ExprKind::Closure { .. }) {
+            if let Some(h) = self.hint_of_expr(recv) {
+                if let Some(("Option", targs)) = mir::split_generic(&h) {
+                    if targs.len() == 1 {
+                        let payload = targs[0].to_string();
+                        if let Some(r) = self.lower_option_map(e, recv, &payload, &args[0])? {
+                            return Ok(Some(r));
+                        }
+                    }
+                }
+            }
+        }
         // `v.sort()`, `v.sort_by_key(f)`, `v.sort_by(f)` on a named vector.
         if matches!(method, "sort" | "sort_by" | "sort_by_key") {
             if let Some((_, elem, _)) = self.vec_local(recv) {
@@ -4288,7 +4918,7 @@ impl Lower {
             // parameter's type comes from the iterator item).
             let recv_ty = self.hint_of_expr(recv).or_else(|| match &recv.kind {
                 ExprKind::Path(p) if p.segments.len() == 1 => {
-                    let n = &p.segments[0].node;
+                    let n = &self.var_name(&p.segments[0].node);
                     self.types.get(n).cloned().or_else(|| {
                         self.func
                             .locals
@@ -4338,7 +4968,7 @@ impl Lower {
             // The lowering's own type for a local (a closure parameter over characters) counts too.
             _ => match &recv.kind {
                 ExprKind::Path(p) if p.segments.len() == 1 => {
-                    let n = &p.segments[0].node;
+                    let n = &self.var_name(&p.segments[0].node);
                     self.types.get(n).map_or(false, |t| t == "char")
                         || self
                             .func
@@ -4382,7 +5012,7 @@ impl Lower {
                 Some(h) => h == "str",
                 None => match &recv.kind {
                     ExprKind::Path(p) if p.segments.len() == 1 => {
-                        let n = &p.segments[0].node;
+                        let n = &self.var_name(&p.segments[0].node);
                         self.types
                             .get(n)
                             .map_or(false, |t| t == "char*" || t == "str")
@@ -4490,16 +5120,41 @@ impl Lower {
                 };
                 let ptr_base = self.scrutinee_is_pointer(&b);
                 let cur = self.fresh_temp("char*");
-                self.emit(cur.clone(), mir::Rvalue::Field(mir::Operand::var(bname.clone()), field.node.clone(), ptr_base));
+                self.emit(
+                    cur.clone(),
+                    mir::Rvalue::Field(
+                        mir::Operand::var(bname.clone()),
+                        field.node.clone(),
+                        ptr_base,
+                    ),
+                );
                 let cur_ptr = self.fresh_temp("char**");
-                self.emit(cur_ptr.clone(), mir::Rvalue::Ref(mir::Operand::var(cur.clone()), true));
+                self.emit(
+                    cur_ptr.clone(),
+                    mir::Rvalue::Ref(mir::Operand::var(cur.clone()), true),
+                );
                 let arg = self.lower_expr(&args[0])?;
-                let helper = if method == "push" { "moira_str_push_char" } else { "moira_str_push_str" };
+                let helper = if method == "push" {
+                    "moira_str_push_char"
+                } else {
+                    "moira_str_push_str"
+                };
                 let done = self.fresh_temp("long long");
-                self.emit(done, mir::Rvalue::Call(mir::Operand::Func(helper.to_string()), vec![mir::Operand::var(cur_ptr), arg]));
+                self.emit(
+                    done,
+                    mir::Rvalue::Call(
+                        mir::Operand::Func(helper.to_string()),
+                        vec![mir::Operand::var(cur_ptr), arg],
+                    ),
+                );
                 self.emit(
                     "__scratch".to_string(),
-                    mir::Rvalue::StoreField(mir::Operand::var(bname), field.node.clone(), mir::Operand::var(cur), ptr_base),
+                    mir::Rvalue::StoreField(
+                        mir::Operand::var(bname),
+                        field.node.clone(),
+                        mir::Operand::var(cur),
+                        ptr_base,
+                    ),
                 );
                 return Ok(Some(mir::Operand::Unit));
             }
@@ -4558,7 +5213,7 @@ impl Lower {
     /// argument (a pointer for `&self`, the value for `self`). `None` otherwise.
     fn lower_user_method(
         &mut self,
-        e: &Expr,
+        _e: &Expr,
         recv: &Expr,
         method: &str,
         args: &[Expr],
@@ -4647,7 +5302,7 @@ impl Lower {
     /// with its receiver first) of an `impl` block. `None` for other paths.
     fn lower_assoc_call(
         &mut self,
-        e: &Expr,
+        _e: &Expr,
         path: &ast::Path,
         args: &[Expr],
     ) -> Result<Option<mir::Operand>> {
@@ -4717,7 +5372,7 @@ impl Lower {
             Some(h) => h,
             None => return Ok(None),
         };
-        let (base, targs) = match mir::split_generic(&hint) {
+        let (_base, targs) = match mir::split_generic(&hint) {
             Some((b, a)) if b == "Option" || b == "Result" => (
                 b.to_string(),
                 a.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
@@ -5030,6 +5685,69 @@ impl Lower {
         Ok(Some(mir::Operand::Unit))
     }
 
+    /// Copy the vector `src` (a local or a field) into a fresh vector, item by item.
+    /// Returns the copy's name and element type, or `None` when `src` is not a
+    /// vector the lowering can see.
+    fn copy_sequence(&mut self, src: &Expr) -> Result<Option<(String, String)>> {
+        let Some(hint) = self.hint_of_expr(src) else {
+            return Ok(None);
+        };
+        let Some(elem) = mir::vec_elem(&hint).map(|s| s.to_string()) else {
+            return Ok(None);
+        };
+        let (sname, _, sptr) = self.chain_sequence(src)?;
+        let copy = self.fresh_temp(mir::vec_type(&elem));
+        self.emit(
+            copy.clone(),
+            mir::Rvalue::Call(mir::Operand::Func(mir::vec_fn_name(&elem, "new")), vec![]),
+        );
+        let len = self.fresh_temp("long long");
+        self.emit(
+            len.clone(),
+            mir::Rvalue::Field(mir::Operand::var(sname.clone()), "len".into(), sptr),
+        );
+        let data = self.fresh_temp(format!("{elem}*"));
+        self.emit(
+            data.clone(),
+            mir::Rvalue::Field(mir::Operand::var(sname), "data".into(), sptr),
+        );
+        let idx = self.fresh_temp("long long");
+        self.emit(idx.clone(), mir::Rvalue::Use(mir::Operand::Const(0)));
+        let head = self.new_block();
+        let body = self.new_block();
+        let exit = self.new_block();
+        self.set_term(mir::Terminator::Goto(head));
+        self.current = head;
+        let more = self.fresh_temp("long long");
+        self.emit(
+            more.clone(),
+            mir::Rvalue::Binary(
+                mir::BinOp::Lt,
+                mir::Operand::var(idx.clone()),
+                mir::Operand::var(len),
+            ),
+        );
+        self.set_term(mir::Terminator::If(mir::Operand::var(more), body, exit));
+        self.current = body;
+        let item = self.fresh_temp(elem.clone());
+        self.emit(
+            item.clone(),
+            mir::Rvalue::Index(mir::Operand::var(data), mir::Operand::var(idx.clone())),
+        );
+        self.emit_vec_push(&copy, &elem, mir::Operand::var(item));
+        self.emit(
+            idx.clone(),
+            mir::Rvalue::Binary(
+                mir::BinOp::Add,
+                mir::Operand::var(idx),
+                mir::Operand::Const(1),
+            ),
+        );
+        self.set_term(mir::Terminator::Goto(head));
+        self.current = exit;
+        Ok(Some((copy, elem)))
+    }
+
     /// Lower a `for` over a sequence (a `Vec`, a slice, or a vector reached
     /// through a field) as an index loop over its `data`/`len` fields. The adapters
     /// in `si` select the order (`rev`), the item (`enumerate` adds a position
@@ -5115,6 +5833,7 @@ impl Lower {
             );
             (mir::Operand::var(v), elem.to_string())
         };
+        let mut scope: Option<PatternScope> = None;
         if si.enumerate {
             let (index_pat, item_pat) = match pat {
                 ast::Pat::Tuple(ps) if ps.len() == 2 => (&ps[0], &ps[1]),
@@ -5137,9 +5856,12 @@ impl Lower {
             }
             self.lower_bind_pattern(item_pat, item, &item_ty)?;
         } else {
-            self.lower_bind_pattern(pat, item, &item_ty)?;
+            scope = Some(self.open_pattern_scope(pat, item, &item_ty)?);
         }
         self.lower_block_value(body)?;
+        if let Some(sc) = scope {
+            self.close_pattern_scope(sc);
+        }
         self.loops.pop();
         self.set_term(mir::Terminator::Goto(step));
 
@@ -5448,7 +6170,7 @@ impl Lower {
                     );
                     return Ok(mir::Operand::var(t));
                 }
-                Ok(mir::Operand::var(name))
+                Ok(mir::Operand::var(self.var_name(&name)))
             }
             ExprKind::Range(..) => Err(LowerError(format!(
                 "range `..` / `..=` at bytes {}..{} is only supported as a `for` iterator or a slice index",
@@ -5571,6 +6293,67 @@ impl Lower {
             }
             ExprKind::Call(callee, args) => {
                 if let ExprKind::Path(p) = &callee.kind {
+                    // `std::fs::read_to_string(path)`: a `Result<String, _>` built from the
+                    // runtime's read (NULL when the file cannot be read).
+                    let segs: Vec<&str> = p.segments.iter().map(|s| s.node.as_str()).collect();
+                    if args.len() == 1
+                        && segs.last() == Some(&"read_to_string")
+                        && (segs.len() == 1 || segs[segs.len() - 2] == "fs")
+                    {
+                        let path = self.lower_expr(&args[0])?;
+                        let text = self.fresh_temp("char*");
+                        self.emit(
+                            text.clone(),
+                            mir::Rvalue::Call(
+                                mir::Operand::Func("moira_fs_read_to_string".to_string()),
+                                vec![path],
+                            ),
+                        );
+                        let result = self.fresh_temp("Result<str,long long>");
+                        let failed = self.fresh_temp("long long");
+                        self.emit(
+                            failed.clone(),
+                            mir::Rvalue::Binary(
+                                mir::BinOp::Eq,
+                                mir::Operand::var(text.clone()),
+                                mir::Operand::Const(0),
+                            ),
+                        );
+                        let ok_blk = self.new_block();
+                        let err_blk = self.new_block();
+                        let join = self.new_block();
+                        self.set_term(mir::Terminator::If(
+                            mir::Operand::var(failed),
+                            err_blk,
+                            ok_blk,
+                        ));
+                        self.current = ok_blk;
+                        self.emit(
+                            result.clone(),
+                            mir::Rvalue::StructLit(
+                                "Result".to_string(),
+                                vec![
+                                    ("tag".to_string(), mir::Operand::Const(0)),
+                                    ("f0".to_string(), mir::Operand::var(text)),
+                                ],
+                            ),
+                        );
+                        self.set_term(mir::Terminator::Goto(join));
+                        self.current = err_blk;
+                        self.emit(
+                            result.clone(),
+                            mir::Rvalue::StructLit(
+                                "Result".to_string(),
+                                vec![
+                                    ("tag".to_string(), mir::Operand::Const(1)),
+                                    (payload_field("Result", 1, 0), mir::Operand::Const(0)),
+                                ],
+                            ),
+                        );
+                        self.set_term(mir::Terminator::Goto(join));
+                        self.current = join;
+                        return Ok(mir::Operand::var(result));
+                    }
                     if let Some(v) = self.lower_assoc_call(e, p, args)? {
                         return Ok(v);
                     }
@@ -5653,6 +6436,9 @@ impl Lower {
                         }
                     }
                 }
+                if let Some(v) = self.lower_specialized_call(callee, args)? {
+                    return Ok(v);
+                }
                 // A closure literal as the callee is invoked immediately: lambda-lift
                 // it into a top-level function and call that directly.
                 let (callee_operand, result_ty) =
@@ -5723,7 +6509,7 @@ impl Lower {
                 if let mir::Operand::Func(fname) = &callee_operand {
                     if let Some(caps) = self.closure_captures.get(fname).cloned() {
                         for cap in caps {
-                            operands.push(mir::Operand::Var(cap));
+                            operands.push(mir::Operand::Var(self.var_name(&cap)));
                         }
                     }
                 }
@@ -5784,6 +6570,29 @@ impl Lower {
                 if let ExprKind::Index(_, idx) = &e.kind {
                     if range_bounds(idx).is_some() {
                         return self.lower_expr(e);
+                    }
+                }
+                // `&p.field` through a pointer `p` points into the struct, rather than
+                // at a copy of the field (which would dangle once returned).
+                if let ExprKind::Field(base, field) = &e.kind {
+                    if let ExprKind::Path(p) = &base.kind {
+                        if p.segments.len() == 1 {
+                            let bn = self.var_name(&p.segments[0].node);
+                            if self.temp_type_of(&bn).ends_with('*') {
+                                let v = self.lower_expr(e)?;
+                                let inner = self.temp_type_of(&name_of(&v));
+                                let t = self.fresh_temp(format!("{}*", inner));
+                                self.emit(
+                                    t.clone(),
+                                    mir::Rvalue::FieldAddr(
+                                        mir::Operand::var(bn),
+                                        field.node.clone(),
+                                        true,
+                                    ),
+                                );
+                                return Ok(mir::Operand::var(t));
+                            }
+                        }
                     }
                 }
                 let o = self.lower_expr(e)?;
@@ -5937,10 +6746,10 @@ impl Lower {
                         };
                         if self.is_sequence(left_e) && self.is_sequence(right_e) {
                             let (ln, le, lp) = self.chain_sequence(left_e)?;
-                            let first = SeqIter { seq: left_e, enumerate: false, rev: false, mutable: false, chars: false, drain: false, indices: false };
+                            let first = SeqIter { seq: left_e, enumerate: false, rev: false, mutable: false, chars: false, drain: false, indices: false, lines: false };
                             self.lower_seq_for(&ln, &le, lp, pat, body, &first)?;
                             let (rn, re, rp) = self.chain_sequence(right_e)?;
-                            let second = SeqIter { seq: right_e, enumerate: false, rev: false, mutable: false, chars: false, drain: false, indices: false };
+                            let second = SeqIter { seq: right_e, enumerate: false, rev: false, mutable: false, chars: false, drain: false, indices: false, lines: false };
                             return self.lower_seq_for(&rn, &re, rp, pat, body, &second);
                         }
                     }
@@ -5986,6 +6795,17 @@ impl Lower {
                     return self.lower_map_for(&mname, &k, &v, is_ptr, pat, body, which, sorted);
                 }
                 let si = seq_iter(iter);
+                // `for x in seq.clone()`: iterate a snapshot, so the body may still change `seq`.
+                if let ExprKind::MethodCall(r, m, a) = &iter.kind {
+                    if m.node == "clone" && a.is_empty() {
+                        if let Some((copy, elem)) = self.copy_sequence(r)? {
+                            return self.lower_seq_for(&copy, &elem, false, pat, body, &si);
+                        }
+                    }
+                }
+                if si.lines {
+                    return self.lower_lines_for(si.seq, pat, body);
+                }
                 if si.chars {
                     return self.lower_str_for(si.seq, pat, body, si.indices);
                 }
@@ -5994,6 +6814,7 @@ impl Lower {
                 }
                 // A sequence the lowering cannot see locally (a field, or a pattern
                 // binding): iterate it when Lachesis says it is a vector or slice.
+                if std::env::var("MOIRA_DBG").is_ok() { eprintln!("DBG for-seq hint={:?} span={:?}", self.hint_of_expr(si.seq), si.seq.span); }
                 if let Some(hint) = self.hint_of_expr(si.seq) {
                     let vec_form = mir::vec_elem(&hint)
                         .or_else(|| mir::slice_elem(&hint))
@@ -6085,8 +6906,9 @@ impl Lower {
                             elem.clone(),
                             mir::Rvalue::Index(arr_op.clone(), mir::Operand::var(idx.clone())),
                         );
-                        self.lower_bind_pattern(pat, mir::Operand::var(elem), &elem_ct)?;
+                        let scope = self.open_pattern_scope(pat, mir::Operand::var(elem), &elem_ct)?;
                         self.lower_block_value(body)?;
+                        self.close_pattern_scope(scope);
                         self.loops.pop();
                         self.set_term(mir::Terminator::Goto(step));
                         self.current = step;
@@ -6367,7 +7189,8 @@ impl Lower {
                 );
                 Ok(mir::Operand::var(t))
             }
-            ExprKind::Unsafe(..) => Err(LowerError("`unsafe` is not in the codegen subset".into())),
+            // `unsafe` only gates what the block may do; codegen treats it as a plain block.
+            ExprKind::Unsafe(b) => self.lower_block_value(b),
             ExprKind::Closure { params, body, .. } => self.lower_closure(params, body),
             ExprKind::Cast(e, ty) => {
                 let operand = self.lower_expr(e)?;
@@ -6636,6 +7459,12 @@ impl Lower {
             self.emit(unique.clone(), mir::Rvalue::Use(val.clone()));
             renames.insert(name.clone(), unique);
         }
+        let mut shadowed: Vec<(String, Option<String>)> = Vec::new();
+        for (name, unique) in &renames {
+            shadowed.push((name.clone(), self.var_renames.get(name).cloned()));
+            self.var_renames.insert(name.clone(), unique.clone());
+        }
+        self.renames_stack.push(shadowed);
         (renames, saved)
     }
 
@@ -6647,6 +7476,35 @@ impl Lower {
         renames: &HashMap<String, String>,
         saved: Vec<(String, Option<String>)>,
     ) {
+        let blocks: Vec<usize> = (from..self.func.blocks.len()).collect();
+        self.leave_bindings_on(&blocks, renames, saved);
+    }
+
+    /// `leave_bindings` for an explicit list of blocks.
+    fn leave_bindings_on(
+        &mut self,
+        blocks: &[usize],
+        renames: &HashMap<String, String>,
+        saved: Vec<(String, Option<String>)>,
+    ) {
+        let popped: Vec<(String, Option<String>)> = match self.renames_stack.pop() {
+            Some(x) => x,
+            None => Vec::new(),
+        };
+        {
+            // Each name appears once in a scope, so the order of the restores does not matter.
+            for entry in popped {
+                let name = entry.0;
+                match entry.1 {
+                    Some(n) => {
+                        self.var_renames.insert(name, n);
+                    }
+                    None => {
+                        self.var_renames.remove(&name);
+                    }
+                }
+            }
+        }
         for (name, old) in saved.into_iter().rev() {
             match old {
                 Some(t) => {
@@ -6658,10 +7516,87 @@ impl Lower {
             }
         }
         if !renames.is_empty() {
-            for block in self.func.blocks[from..].iter_mut() {
-                rename_block(block, renames);
+            for &b in blocks {
+                rename_block(&mut self.func.blocks[b], renames);
             }
         }
+    }
+
+    /// The variables a pattern binds to `elem` (of C type `elem_ct`): the element itself for a
+    /// name, or each named component of a tuple (a value read from the element).
+    fn pattern_binds(
+        &mut self,
+        pat: &ast::Pat,
+        elem: mir::Operand,
+        elem_ct: &str,
+    ) -> Result<Vec<(String, mir::Operand)>> {
+        let ast::Pat::Tuple(elems) = pat else {
+            let name = pat_name(pat)?;
+            if name == "_" {
+                return Ok(Vec::new());
+            }
+            return Ok(vec![(name, elem)]);
+        };
+        let mut out = Vec::new();
+        for (i, e) in elems.iter().enumerate() {
+            let name =
+                match e {
+                    ast::Pat::Ident(n) => n.node.clone(),
+                    ast::Pat::Wild => continue,
+                    _ => return Err(LowerError(
+                        "only identifier/wildcard elements are supported in `for` tuple patterns"
+                            .into(),
+                    )),
+                };
+            let ct = self
+                .tuple_structs
+                .get(elem_ct)
+                .and_then(|s| s.fields.get(i))
+                .map(|(_, t)| t.clone())
+                .or_else(|| match mir::split_generic(elem_ct) {
+                    Some(("Tuple", args)) => args.get(i).map(|s| s.to_string()),
+                    _ => None,
+                })
+                .unwrap_or_else(|| "long long".to_string());
+            let t = self.fresh_temp(ct);
+            self.emit(
+                t.clone(),
+                mir::Rvalue::Field(elem.clone(), format!("f{i}"), false),
+            );
+            out.push((name, mir::Operand::var(t)));
+        }
+        Ok(out)
+    }
+
+    /// Open the scope of a loop's pattern: each bound name becomes a variable of its own.
+    /// The scope is closed by `close_pattern_scope` once the body is lowered.
+    fn open_pattern_scope(
+        &mut self,
+        pat: &ast::Pat,
+        elem: mir::Operand,
+        elem_ct: &str,
+    ) -> Result<PatternScope> {
+        let binds = self.pattern_binds(pat, elem, elem_ct)?;
+        let cur = self.current;
+        let (renames, saved) = self.enter_bindings(&binds);
+        let created_from = self.func.blocks.len();
+        Ok(PatternScope {
+            cur,
+            created_from,
+            renames,
+            saved,
+        })
+    }
+
+    /// Close a scope opened by `open_pattern_scope`: the blocks of its body (the current block
+    /// at the open, and every block created since) take the bindings' unique names.
+    fn close_pattern_scope(&mut self, scope: PatternScope) {
+        let mut blocks = vec![scope.cur];
+        let end = self.func.blocks.len();
+        for b in scope.created_from..end {
+            blocks.push(b);
+        }
+        self.leave_bindings_on(&blocks, &scope.renames, scope.saved);
     }
 
     fn lower_if_let(

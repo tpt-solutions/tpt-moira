@@ -844,3 +844,13 @@ fn glob_imported_unit_variant_pattern_runs() {
     };
     assert_eq!(out.trim(), "2\n1");
 }
+
+#[test]
+fn unsafe_block_lowers_as_plain_block() {
+    // `unsafe` only gates what the block may do; it must not block codegen.
+    let src = "fn main() { let x: i64 = unsafe { 1 + 2 }; println!(\"{}\", x); }";
+    let prog = tpt_moira_clotho::parse_source(src).expect("should parse");
+    let mir = tpt_moira_atropos::lower_program(&prog).expect("unsafe block should lower");
+    let c = tpt_moira_atropos::codegen_c::emit_c(&mir);
+    assert!(c.contains("main"), "main should be emitted");
+}
