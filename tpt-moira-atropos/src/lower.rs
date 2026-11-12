@@ -44,6 +44,8 @@ fn hint_applies(hint: &str) -> bool {
         || hint.starts_with("Option<")
         || hint.starts_with("Result<")
         || hint.starts_with("Map<")
+        || hint.starts_with("Set<")
+        || hint.starts_with("SortedSet<")
         || hint.starts_with("Tuple<")
         || mir::vec_elem(hint).is_some()
         || mir::slice_elem(hint).is_some()
@@ -636,6 +638,10 @@ fn map_args(ty: &str) -> Option<(String, String)> {
     match mir::split_generic(ty) {
         Some(("Map", a)) | Some(("Sorted", a)) if a.len() == 2 => {
             Some((a[0].to_string(), a[1].to_string()))
+        }
+        // A set is a map to `bool`.
+        Some(("Set", a)) | Some(("SortedSet", a)) if a.len() == 1 => {
+            Some((a[0].to_string(), "bool".to_string()))
         }
         _ => None,
     }
@@ -1960,7 +1966,7 @@ impl Lower {
                         Some(h)
                             if h == "str"
                                 || self.struct_names.contains(&h)
-                                || ["Option<", "Result<", "Vec<", "Map<", "Sorted<"]
+                                || ["Option<", "Result<", "Vec<", "Map<", "Sorted<", "Set<", "SortedSet<"]
                                     .iter()
                                     .any(|p| h.starts_with(p)) =>
                         {
@@ -2075,7 +2081,7 @@ impl Lower {
                         _ => self.hint_of_expr(init).filter(|h| {
                             h == "str"
                                 || self.struct_names.contains(h)
-                                || ["Option<", "Result<", "Vec<", "Map<", "Sorted<"]
+                                || ["Option<", "Result<", "Vec<", "Map<", "Sorted<", "Set<", "SortedSet<"]
                                     .iter()
                                     .any(|p| h.starts_with(p))
                         }),
@@ -3299,7 +3305,7 @@ impl Lower {
     /// A map the checker types (a field, a call result): lowered, and typed by its hint.
     fn map_from_hint(&mut self, e: &Expr) -> Result<Option<(String, String, String, bool)>> {
         let hint = match self.hint_of_expr(e) {
-            Some(h) if h.starts_with("Map<") => h,
+            Some(h) if h.starts_with("Map<") || h.starts_with("Sorted<") || h.starts_with("Set<") || h.starts_with("SortedSet<") => h,
             _ => return Ok(None),
         };
         let (k, v) = match map_args(&hint) {
@@ -3321,7 +3327,7 @@ impl Lower {
     fn is_sorted_expr(&self, e: &Expr) -> bool {
         let by_hint = self
             .hint_of_expr(e)
-            .map_or(false, |h| h.starts_with("Sorted<"));
+            .map_or(false, |h| h.starts_with("Sorted<") || h.starts_with("SortedSet<"));
         let by_local = match &e.kind {
             ExprKind::Path(p) if p.segments.len() == 1 => {
                 let name = &p.segments[0].node;
@@ -3335,7 +3341,7 @@ impl Lower {
                             .find(|(n, _)| n == name)
                             .and_then(|(_, t)| t.clone())
                     })
-                    .map_or(false, |t| t.starts_with("Sorted<"))
+                    .map_or(false, |t| t.starts_with("Sorted<") || t.starts_with("SortedSet<"))
             }
             _ => false,
         };

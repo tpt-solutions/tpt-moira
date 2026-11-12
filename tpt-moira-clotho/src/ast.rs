@@ -240,6 +240,9 @@ pub struct TypeParam {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TypeBound {
     Trait(Path),
+    /// A closure bound `Fn(A..) -> R` (also `FnMut`/`FnOnce`), as the function type
+    /// `fn(A.., R)`: the path `fn` whose arguments are the parameters and the result.
+    Fn(Type),
 }
 
 /// A `where` predicate, e.g. `where Self: Clone` or `where T: Bound`.

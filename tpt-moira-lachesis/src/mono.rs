@@ -758,6 +758,15 @@ fn mangle(t: &Ty) -> Option<String> {
         }
         Ty::Ref(inner) => format!("ref_{}", mangle(inner)?),
         Ty::RefMut(inner) => format!("refmut_{}", mangle(inner)?),
+        Ty::Fn(params, ret) => {
+            let mut parts = vec!["fn".to_string()];
+            for p in params {
+                parts.push(mangle(p)?);
+            }
+            parts.push("ret".to_string());
+            parts.push(mangle(ret)?);
+            parts.join("_")
+        }
         _ => return None,
     })
 }
@@ -800,6 +809,15 @@ fn ast_to_ty(t: &Type) -> Option<Ty> {
         TypeKind::Ref(inner) => Ty::Ref(Box::new(ast_to_ty(inner)?)),
         TypeKind::RefMut(inner) => Ty::RefMut(Box::new(ast_to_ty(inner)?)),
         TypeKind::Tuple(elems) if elems.is_empty() => Ty::Unit,
+        // A function type is the path `fn` whose arguments are its parameters and result.
+        TypeKind::Path(p, args) if p.segments.len() == 1 && p.segments[0].node == "fn" && !args.is_empty() => {
+            let (ret, params) = args.split_last()?;
+            let mut ps = Vec::new();
+            for a in params {
+                ps.push(ast_to_ty(a)?);
+            }
+            Ty::Fn(ps, Box::new(ast_to_ty(ret)?))
+        }
         _ => return None,
     })
 }
@@ -857,6 +875,14 @@ fn ty_to_ast(t: &Ty, span: Span) -> Option<Type> {
             kind: TypeKind::RefMut(Box::new(ty_to_ast(inner, span)?)),
             span,
         },
+        Ty::Fn(params, ret) => {
+            let mut args = Vec::new();
+            for p in params {
+                args.push(ty_to_ast(p, span)?);
+            }
+            args.push(ty_to_ast(ret, span)?);
+            path("fn", args)
+        }
         _ => return None,
     })
 }

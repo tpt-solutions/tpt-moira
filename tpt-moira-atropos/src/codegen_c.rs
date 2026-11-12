@@ -620,6 +620,8 @@ fn c_type(ty: &str, struct_names: &std::collections::HashSet<&str>) -> String {
     if let Some((base, args)) = mir::split_generic(ty) {
         match (base, args.len()) {
             ("Map" | "Sorted", 2) => return mir::map_c_name(args[0], args[1]),
+            // A set is a map to `bool`.
+            ("Set" | "SortedSet", 1) => return mir::map_c_name(args[0], "bool"),
             ("Option" | "Result" | "Tuple", _) => {
                 let name = mir::inst_c_name(ty);
                 return if struct_names.contains(name.as_str()) {
@@ -825,6 +827,9 @@ fn scan_generics(
         }
         "Map" | "Sorted" if args.len() == 2 => {
             maps.insert((args[0].to_string(), args[1].to_string()));
+        }
+        "Set" | "SortedSet" if args.len() == 1 => {
+            maps.insert((args[0].to_string(), "bool".to_string()));
         }
         _ => {}
     }

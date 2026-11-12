@@ -3009,8 +3009,29 @@ impl Parser {
             if (name == "Fn" || name == "FnMut" || name == "FnOnce")
                 && self.tokens.get(self.pos + 1).map(|t| &t.kind) == Some(&TokenKind::LParen)
             {
-                self.consume_fn_trait()?;
-                return Ok(None);
+                // `Fn(A, B) -> R`: kept as the function type `fn(A, B, R)`.
+                let span = self.tokens[self.pos].span;
+                self.bump();
+                self.expect(TokenKind::LParen)?;
+                let mut args: Vec<Type> = self.parse_delimited(TokenKind::RParen, |s| s.parse_type())?;
+                if self.eat(&TokenKind::Arrow) {
+                    args.push(self.parse_type()?);
+                } else {
+                    args.push(Type {
+                        kind: TypeKind::Tuple(Vec::new()),
+                        span,
+                    });
+                }
+                let fn_path = Path {
+                    segments: vec![Spanned {
+                        node: "fn".to_string(),
+                        span,
+                    }],
+                };
+                return Ok(Some(TypeBound::Fn(Type {
+                    kind: TypeKind::Path(fn_path, args),
+                    span,
+                })));
             }
         }
         Ok(Some(TypeBound::Trait(self.parse_path(true)?)))

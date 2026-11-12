@@ -133,7 +133,7 @@ pub struct TypeChecker {
     /// `check_call`: it seeds the solution of the callee's generic parameters.
     expected_call_ty: Option<Ty>,
     /// The type parameters a method declares itself (not its impl's), by (type, method).
-    method_own_generics: HashMap<(String, String), Vec<String>>,
+    method_own_generics: HashMap<(String, String), Generics>,
     /// The parameter types a closure argument is expected to take, from the `Fn` type
     /// of the parameter it is passed to. Consumed by the next closure checked.
     closure_expected: Option<Vec<Ty>>,
@@ -218,7 +218,14 @@ fn hint_compound(ty: &Ty) -> Option<String> {
             payload.map(|p| format!("Option<{p}>"))
         }
         Ty::Apply(name, args) if name == "Result" && args.len() == 2 => {
-            let parts: Option<Vec<String>> = args.iter().map(hint_elem_name).collect();
+            // A unit payload is a zero value in the C backend (its C type is long long).
+            let parts: Option<Vec<String>> = args
+                .iter()
+                .map(|a| match a {
+                    Ty::Unit => Some("long long".to_string()),
+                    other => hint_elem_name(other),
+                })
+                .collect();
             parts.map(|p| format!("Result<{}>", p.join(",")))
         }
         Ty::Apply(name, args) if name == "HashMap" && args.len() == 2 => {
@@ -227,7 +234,7 @@ fn hint_compound(ty: &Ty) -> Option<String> {
         }
         // A set is a map to `bool` (keys only).
         Ty::Apply(name, args) if name == "HashSet" && args.len() == 1 => {
-            hint_elem_name(&args[0]).map(|k| format!("Map<{k},bool>"))
+            hint_elem_name(&args[0]).map(|k| format!("Set<{k}>"))
         }
         // The sorted collections (`BTreeMap`, `BTreeSet`) are sorted maps.
         Ty::Apply(name, args) if name == "BTreeMap" && args.len() == 2 => {
@@ -235,7 +242,7 @@ fn hint_compound(ty: &Ty) -> Option<String> {
             parts.map(|p| format!("Sorted<{}>", p.join(",")))
         }
         Ty::Apply(name, args) if name == "BTreeSet" && args.len() == 1 => {
-            hint_elem_name(&args[0]).map(|k| format!("Sorted<{k},bool>"))
+            hint_elem_name(&args[0]).map(|k| format!("SortedSet<{k}>"))
         }
         Ty::Tuple(elems) if !elems.is_empty() => {
             let parts: Option<Vec<String>> = elems.iter().map(hint_elem_name).collect();
@@ -604,7 +611,7 @@ impl TypeChecker {
                             let ret = f.ret.as_ref().map(|t| cx.type_to_ty(t)).unwrap_or(Ty::Unit);
                             cx.method_own_generics.insert(
                                 (self_name.clone(), f.name.node.clone()),
-                                f.generics.params.iter().map(|p| p.name.node.clone()).collect(),
+                                f.generics.clone(),
                             );
                             cx.user_methods.insert(
                                 (self_name.clone(), f.name.node.clone()),
@@ -2150,8 +2157,27 @@ impl TypeChecker {
             if let Some(exp) = &expected {
                 self.unify_ty(&sig.ret, exp, &mut sub);
             }
+            // A closure passed for a parameter with a closure bound (`f: F` with
+            // `F: Fn(i64) -> R`) takes the bound's parameter types.
+            let closure_bounds: HashMap<String, Ty> = sig
+                .generics
+                .params
+                .iter()
+                .filter_map(|p| {
+                    p.bounds.iter().find_map(|b| match b {
+                        TypeBound::Fn(fty) => Some((p.name.node.clone(), self.type_to_ty(fty))),
+                        _ => None,
+                    })
+                })
+                .collect();
             for (a, pt) in args.iter().zip(sig.params.iter()) {
+                if let (ExprKind::Closure { .. }, Ty::Generic(gname)) = (&a.kind, pt) {
+                    if let Some(Ty::Fn(ps, _)) = closure_bounds.get(gname) {
+                        self.closure_expected = Some(ps.clone());
+                    }
+                }
                 let at = self.infer_expr(a);
+                self.closure_expected = None;
                 if !self.unify_ty(pt, &at, &mut sub) {
                     self.err(
                         a.span,
@@ -2163,10 +2189,27 @@ impl TypeChecker {
                     );
                 }
             }
+            // A closure bound (`F: FnOnce() -> R`) describes the parameter's solved
+            // closure type: unifying it solves the result's parameters (`T` in `R`).
+            let gnames: Vec<String> = sig.generics.params.iter().map(|p| p.name.node.clone()).collect();
+            for p in &sig.generics.params {
+                for b in &p.bounds {
+                    if let TypeBound::Fn(fty) = b {
+                        if let Some(actual) = sub.get(&p.name.node).cloned() {
+                            let bt = self.type_to_ty(fty);
+                            let g = generalize_params(&bt, &gnames);
+                            self.unify_ty(&g, &actual, &mut sub);
+                        }
+                    }
+                }
+            }
             // Enforce declared bounds on the inferred type arguments — both
             // inline (`<T: Show>`) and `where`-clause (`where T: Show`)
             // predicates.
             let enforce = |cx: &mut Self, concrete: &Ty, bn: &str| {
+                if bn.is_empty() {
+                    return;
+                }
                 // A user-written or derive-generated `impl Trait for T`
                 // satisfies the bound even when `Trait` is also a builtin name
                 // (e.g. derived `PartialEq`): consult the solver first.
@@ -2870,7 +2913,7 @@ impl TypeChecker {
     fn generic_bounds_of(&self, name: &str) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
         let push_bound = |out: &mut Vec<String>, b: &TypeBound| {
-            let TypeBound::Trait(path) = b;
+            let TypeBound::Trait(path) = b else { return };
             let seg = path
                 .segments
                 .last()
@@ -2916,7 +2959,7 @@ impl TypeChecker {
             Some((owner, method, _)) => self
                 .method_own_generics
                 .get(&(owner.clone(), method.clone()))
-                .cloned()
+                .map(|g| g.params.iter().map(|p| p.name.node.clone()).collect())
                 .unwrap_or_default(),
             None => Vec::new(),
         };
@@ -2986,6 +3029,21 @@ impl TypeChecker {
             for (pt, at) in &arg_tys {
                 let g = generalize_params(pt, &own);
                 self.unify_ty(&g, at, &mut sub);
+            }
+            // Closure bounds on the method's own parameters solve as in `check_call`.
+            if let Some(own_gen) = self.method_own_generics.get(&(owner.clone(), method.clone())).cloned() {
+                let gnames: Vec<String> = own_gen.params.iter().map(|p| p.name.node.clone()).collect();
+                for p in &own_gen.params {
+                    for b in &p.bounds {
+                        if let TypeBound::Fn(fty) = b {
+                            if let Some(actual) = sub.get(&p.name.node).cloned() {
+                                let bt = self.type_to_ty(fty);
+                                let g = generalize_params(&bt, &gnames);
+                                self.unify_ty(&g, &actual, &mut sub);
+                            }
+                        }
+                    }
+                }
             }
             solved_sub = sub.clone();
             let solved: Vec<(String, Ty)> = own
@@ -4424,6 +4482,8 @@ fn bound_trait_name_str(b: &TypeBound) -> String {
             .last()
             .map(|s| s.node.clone())
             .unwrap_or_default(),
+        // A closure bound is not a trait: it constrains the parameter's type instead.
+        TypeBound::Fn(_) => String::new(),
     }
 }
 

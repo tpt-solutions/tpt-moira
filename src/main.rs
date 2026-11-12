@@ -171,12 +171,31 @@ fn main() -> ExitCode {
     };
     // Generic functions are specialized per instantiation before anything else sees
     // the program: the checker and the backends then only handle concrete code.
-    let program = {
-        let refs: Vec<(&str, &tpt_moira_clotho::ast::Program)> = extern_programs
+    // Each crate is specialized against the others it can see (the root and the other
+    // externs), so every unit of a bundle is concrete.
+    let (program, extern_programs) = {
+        let mut specialized_externs: Vec<(String, tpt_moira_clotho::ast::Program)> = Vec::new();
+        let mut i = 0;
+        while i < extern_programs.len() {
+            let mut visible: Vec<(&str, &tpt_moira_clotho::ast::Program)> =
+                vec![("", &program)];
+            let mut j = 0;
+            while j < extern_programs.len() {
+                if j != i {
+                    visible.push((extern_programs[j].0.as_str(), &extern_programs[j].1));
+                }
+                j += 1;
+            }
+            let mono = tpt_moira_lachesis::mono::monomorphize(&extern_programs[i].1, &visible);
+            specialized_externs.push((extern_programs[i].0.clone(), mono));
+            i += 1;
+        }
+        let refs: Vec<(&str, &tpt_moira_clotho::ast::Program)> = specialized_externs
             .iter()
             .map(|(k, p)| (k.as_str(), p))
             .collect();
-        tpt_moira_lachesis::mono::monomorphize(&program, &refs)
+        let root = tpt_moira_lachesis::mono::monomorphize(&program, &refs);
+        (root, specialized_externs)
     };
     let have_externs = !extern_programs.is_empty();
     let check_call = |program: &tpt_moira_clotho::ast::Program| {

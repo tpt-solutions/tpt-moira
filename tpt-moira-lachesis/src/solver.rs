@@ -492,6 +492,8 @@ fn bound_trait_name(b: &tpt_moira_clotho::ast::TypeBound) -> String {
             .last()
             .map(|s| s.node.clone())
             .unwrap_or_default(),
+        // A closure bound is not a trait.
+        tpt_moira_clotho::ast::TypeBound::Fn(_) => String::new(),
     }
 }
 
@@ -609,13 +611,17 @@ pub fn well_formedness_report(
                     ),
                     span: p.name.span,
                 };
-                predicates.push((param_ty, bound_trait_name(bound), p.name.span));
+                if !bound_trait_name(bound).is_empty() {
+                    predicates.push((param_ty, bound_trait_name(bound), p.name.span));
+                }
             }
         }
         for pred in &imp.generics.where_clause {
             let bounds: &Vec<tpt_moira_clotho::ast::TypeBound> = &pred.bounds;
             for bound in bounds {
-                predicates.push((pred.ty.clone(), bound_trait_name(bound), pred.ty.span));
+                if !bound_trait_name(bound).is_empty() {
+                    predicates.push((pred.ty.clone(), bound_trait_name(bound), pred.ty.span));
+                }
             }
         }
         for (ty, bound, span) in predicates {
