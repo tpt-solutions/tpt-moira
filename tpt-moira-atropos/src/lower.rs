@@ -981,6 +981,8 @@ fn type_to_c_expanded(ty: &ast::Type) -> String {
                 (Some("Into" | "AsRef"), 0) => "str".to_string(),
                 (Some("Option"), 1) => format!("Option<{}>", arg(0)),
                 (Some("Result"), 2) => format!("Result<{},{}>", arg(0), arg(1)),
+                // `io::Result<T>` (a one-argument alias) fixes the error to a string.
+                (Some("Result"), 1) => format!("Result<{},str>", arg(0)),
                 (Some("HashMap"), 2) => format!("Map<{},{}>", arg(0), arg(1)),
                 // A set is a map to `bool` (keys only).
                 (Some("HashSet"), 1) => format!("Map<{},bool>", arg(0)),

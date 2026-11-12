@@ -149,6 +149,30 @@ pub struct TypeChecker {
 /// merged field by field: a field only one side declares is added. A field both sides
 /// declare with different types takes the checked crate's own type (`own`), or becomes
 /// `Unknown` when it comes from another crate (the shape is ambiguous there).
+/// Whether `arm` is the same generic type as `result` with its unknown parts known
+/// (`Option<T>` for `Option<Unknown>`): only then does a match take the arm's type.
+fn same_base_refined(result: &Ty, arm: &Ty) -> bool {
+    match (result, arm) {
+        (Ty::Apply(a, xs), Ty::Apply(b, ys)) => {
+            a == b && xs.len() == ys.len() && has_unknown(result) && !has_unknown(arm)
+        }
+        _ => false,
+    }
+}
+
+/// Whether a type still has an unknown part anywhere inside it.
+fn has_unknown(t: &Ty) -> bool {
+    match t {
+        Ty::Unknown => true,
+        Ty::Apply(_, args) | Ty::Tuple(args) => args.iter().any(has_unknown),
+        Ty::Ref(inner) | Ty::RefMut(inner) | Ty::Array(inner, _) | Ty::Future(inner) => {
+            has_unknown(inner)
+        }
+        Ty::Fn(params, ret) => params.iter().any(has_unknown) || has_unknown(ret),
+        _ => false,
+    }
+}
+
 fn merge_struct_fields(
     cx: &mut TypeChecker,
     name: &str,
@@ -1161,6 +1185,9 @@ impl TypeChecker {
             if first {
                 result_ty = arm_ty.clone();
                 first = false;
+            } else if same_base_refined(&result_ty, &arm_ty) {
+                // An arm that says more (`Some(q)` against a bare `None`) gives the type.
+                result_ty = arm_ty.clone();
             } else if !self.compatible(&result_ty, &arm_ty) {
                 self.err(
                     span,
@@ -1173,10 +1200,18 @@ impl TypeChecker {
         }
         if first {
             // No arms — degenerate; treat as unit.
-            Ty::Unit
-        } else {
-            result_ty
+            return Ty::Unit;
         }
+        // Arms that were typed before the match's type was known (a bare `None`) take it.
+        if !has_unknown(&result_ty) {
+            for (_, body) in arms {
+                let key = (body.span.start, body.span.end);
+                if self.expr_types.get(&key).map_or(false, has_unknown) {
+                    self.expr_types.insert(key, result_ty.clone());
+                }
+            }
+        }
+        result_ty
     }
 
     /// Validate that a pattern's shape is supported by the type-checked subset,
@@ -3651,6 +3686,10 @@ impl TypeChecker {
         );
         self.methods
             .insert(("Option".into(), "as_deref".into()), sig(vec![], Unknown));
+        self.methods.insert(
+            ("Option".into(), "map_or".into()),
+            sig(vec![Unknown, Unknown], Unknown),
+        );
         self.assoc_fns
             .insert(("Stdio".into(), "piped".into()), sig(vec![], std("Stdio")));
         self.assoc_fns.insert(
@@ -4329,6 +4368,11 @@ impl TypeChecker {
                 // coerces `&Box<T>` to `&T`, which the checker does not track.
                 if name == "Box" && args.len() == 1 {
                     return self.type_to_ty(&args[0]);
+                }
+                // A one-argument `Result<T>` is an alias that fixes the error type
+                // (`std::io::Result<T>`). The error is modeled as a string.
+                if name == "Result" && args.len() == 1 {
+                    return Ty::Apply(name, vec![self.type_to_ty(&args[0]), Ty::Str]);
                 }
                 match prim(&name) {
                     Some(t) => t,
