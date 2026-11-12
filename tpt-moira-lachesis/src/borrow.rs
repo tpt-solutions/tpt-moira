@@ -137,7 +137,7 @@ fn check_function(f: &tpt_moira_atropos::mir::Function, errors: &mut Vec<Diag>) 
     }
 
     // Collect borrows: `temp = &place` (or `temp = &mut place`).
-    let mut borrows = Vec::new();
+    let mut borrows: Vec<Borrow> = Vec::new();
     for (bi, b) in f.blocks.iter().enumerate() {
         for (si, s) in b.stmts.iter().enumerate() {
             if let Rvalue::Ref(Operand::Var(x), m) = &s.rvalue {
@@ -153,7 +153,7 @@ fn check_function(f: &tpt_moira_atropos::mir::Function, errors: &mut Vec<Diag>) 
     }
 
     // Precompute liveness info per borrow.
-    let mut infos = Vec::new();
+    let mut infos: Vec<BorrowInfo> = Vec::new();
     for br in &borrows {
         // The set of names that keep this borrow alive: the temp itself plus
         // every variable that aliases it (transitively).

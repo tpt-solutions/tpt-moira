@@ -394,48 +394,48 @@ fn triage_record_to_json(r: &TriageRecord) -> String {
 
 /// Tolerant parser for the flat JSON object emitted by [`triage_record_to_json`].
 /// Extracts each known field by its `"key":` prefix; tolerates field order.
-fn triage_record_from_json(line: &str) -> Option<TriageRecord> {
-    let get_str = |key: &str| -> Option<String> {
-        let marker = format!("\"{key}\":");
-        let idx = line.find(&marker)? + marker.len();
-        let rest = &line[idx..];
-        let start = rest.find('"')? + 1;
-        let mut s = String::new();
-        let mut chars = rest[start..].chars();
-        while let Some(c) = chars.next() {
-            match c {
-                '"' => break,
-                '\\' => {
-                    if let Some(e) = chars.next() {
-                        match e {
-                            '"' => s.push('"'),
-                            '\\' => s.push('\\'),
-                            'n' => s.push('\n'),
-                            'r' => s.push('\r'),
-                            't' => s.push('\t'),
-                            'u' => {
-                                let hex: String = chars.by_ref().take(4).collect();
-                                if let Ok(cp) = u32::from_str_radix(&hex, 16) {
-                                    if let Some(ch) = char::from_u32(cp) {
-                                        s.push(ch);
-                                    }
+fn get_json_str(line: &str, key: &str) -> Option<String> {
+    let marker = format!("\"{key}\":");
+    let idx = line.find(&marker)? + marker.len();
+    let rest = &line[idx..];
+    let start = rest.find('"')? + 1;
+    let mut s = String::new();
+    let mut chars = rest[start..].chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => break,
+            '\\' => {
+                if let Some(e) = chars.next() {
+                    match e {
+                        '"' => s.push('"'),
+                        '\\' => s.push('\\'),
+                        'n' => s.push('\n'),
+                        'r' => s.push('\r'),
+                        't' => s.push('\t'),
+                        'u' => {
+                            let hex: String = chars.by_ref().take(4).collect();
+                            if let Ok(cp) = u32::from_str_radix(&hex, 16) {
+                                if let Some(ch) = char::from_u32(cp) {
+                                    s.push(ch);
                                 }
                             }
-                            other => s.push(other),
                         }
+                        other => s.push(other),
                     }
                 }
-                other => s.push(other),
             }
+            other => s.push(other),
         }
-        Some(s)
-    };
+    }
+    Some(s)
+}
 
-    let tag = get_str("divergence")?;
+fn triage_record_from_json(line: &str) -> Option<TriageRecord> {
+    let tag = get_json_str(line, "divergence")?;
     let divergence = Divergence::from_tag(&tag)?;
-    let label = get_str("label")?;
-    let root_cause = get_str("root_cause")?;
-    let minimal_fix = get_str("minimal_fix")?;
+    let label = get_json_str(line, "label")?;
+    let root_cause = get_json_str(line, "root_cause")?;
+    let minimal_fix = get_json_str(line, "minimal_fix")?;
     let hash_marker = "\"source_hash\":";
     let idx = line.find(hash_marker)? + hash_marker.len();
     let rest = line[idx..].trim_start();

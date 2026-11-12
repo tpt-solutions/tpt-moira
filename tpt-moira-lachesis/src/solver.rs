@@ -5,7 +5,7 @@
 //!
 //! * [`Term`]s unify with inference variables ([`Term::Var`]) under an occurs
 //!   check;
-//! * a [`Program`] is a set of clauses `forall vars. body => head`;
+//! * a [`ClauseProgram`] is a set of clauses `forall vars. body => head`;
 //! * [`Solver::solve`] performs depth-limited SLD-style resolution over a
 //!   conjunction of [`Goal`]s, with a memo cache keyed by goal+depth to give
 //!   early-exit / `Ambiguous` behavior (the "memoization + early-exit
@@ -87,7 +87,7 @@ pub struct Clause {
 
 /// A set of clauses to resolve goals against.
 #[derive(Debug, Default, Clone)]
-pub struct Program {
+pub struct ClauseProgram {
     pub clauses: Vec<Clause>,
     /// Associated-type normalization facts: each entry maps a projection term
     /// `<Self as Trait>::Assoc` to its normalized value (per the `type Assoc =`
@@ -95,7 +95,7 @@ pub struct Program {
     pub projections: Vec<(Term, Term)>,
 }
 
-impl Program {
+impl ClauseProgram {
     /// Add a fact (a clause with an empty body).
     pub fn fact(&mut self, head: Term) {
         self.clauses.push(Clause {
@@ -191,7 +191,7 @@ fn hash_goal(goals: &[Term], sub: &Subst) -> u64 {
 
 /// Depth-limited SLD resolution with memoization.
 fn solve_goal(
-    program: &Program,
+    program: &ClauseProgram,
     goals: &[Term],
     sub: &Subst,
     depth: usize,
@@ -234,12 +234,12 @@ fn solve_goal(
 
 /// A small Horn-clause solver over [`Term`].
 pub struct Solver {
-    pub program: Program,
+    pub program: ClauseProgram,
     pub max_depth: usize,
 }
 
 impl Solver {
-    pub fn new(program: Program) -> Self {
+    pub fn new(program: ClauseProgram) -> Self {
         Solver {
             program,
             max_depth: 64,
@@ -309,7 +309,7 @@ pub fn implements_rule(t: TraitId, ty: &Ty) -> bool {
 
 /// Build the built-in operator-trait program (one fact per type that
 /// implements each trait), mirroring `TraitDb`.
-pub fn builtin_program() -> Program {
+pub fn builtin_program() -> ClauseProgram {
     let types = [
         Ty::Int,
         Ty::I8,
@@ -344,7 +344,7 @@ pub fn builtin_program() -> Program {
         TraitId::Eq,
         TraitId::Ord,
     ];
-    let mut prog = Program::default();
+    let mut prog = ClauseProgram::default();
     for t in &traits {
         for ty in &types {
             if implements_rule(t.clone(), ty) {
@@ -366,7 +366,7 @@ pub fn builtin_solver() -> Solver {
 /// `App(User(Trait), SelfTerm) :- App(User(Bound), VarT)`, and each
 /// `type Assoc = Val;` inside the impl becomes an associated-type projection
 /// `Proj(Trait, Assoc, SelfTerm) -> ValTerm`.
-pub fn program_with_impls(prog: &tpt_moira_clotho::ast::Program) -> Program {
+pub fn program_with_impls(prog: &tpt_moira_clotho::ast::Program) -> ClauseProgram {
     let mut prog2 = builtin_program();
     for item in &prog.items {
         if let tpt_moira_clotho::ast::ItemKind::Impl(imp) = &item.kind {
@@ -613,7 +613,8 @@ pub fn well_formedness_report(
             }
         }
         for pred in &imp.generics.where_clause {
-            for bound in &pred.bounds {
+            let bounds: &Vec<tpt_moira_clotho::ast::TypeBound> = &pred.bounds;
+            for bound in bounds {
                 predicates.push((pred.ty.clone(), bound_trait_name(bound), pred.ty.span));
             }
         }
@@ -728,7 +729,7 @@ mod tests {
     fn simple_rule_resolution() {
         // fact: Even(0).  rule: Even(Var(0)) :- Even(Sub(Var(0), 1))  (illustrative)
         // We test that a single fact resolves a ground goal.
-        let mut prog = Program::default();
+        let mut prog = ClauseProgram::default();
         prog.fact(Term::App(TraitId::Eq, Box::new(Term::Concr(Ty::Bool))));
         let solver = Solver::new(prog);
         let goal = vec![Term::App(TraitId::Eq, Box::new(Term::Concr(Ty::Bool)))];
@@ -740,7 +741,7 @@ mod tests {
     #[test]
     fn user_defined_trait_impl_search() {
         // A user trait `Marker` implemented for `i32` (a fact).
-        let mut prog = Program::default();
+        let mut prog = ClauseProgram::default();
         prog.fact(Term::App(
             TraitId::User("Marker".into()),
             Box::new(Term::Concr(Ty::I32)),
@@ -791,7 +792,7 @@ mod tests {
     #[test]
     fn normalize_generic_associated_type() {
         // impl<T> It for Wrap<T> { type Item = T; }
-        let mut prog = Program::default();
+        let mut prog = ClauseProgram::default();
         prog.projections.push((
             Term::Proj(
                 "It".into(),

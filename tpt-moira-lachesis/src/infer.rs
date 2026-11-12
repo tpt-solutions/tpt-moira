@@ -83,6 +83,12 @@ pub struct TypeChecker {
     /// Unit-variant name -> the enums that declare it. A bare `Variant` (after
     /// `use Enum::*;`) names that variant as a value and as a pattern.
     unit_variant_owners: HashMap<String, Vec<String>>,
+    /// Each enum's variants with their payload field types, for typing the
+    /// bindings of a variant pattern: `enum -> [(variant, payload types)]`.
+    enum_variants: HashMap<String, Vec<(String, Vec<Ty>)>>,
+    /// The field names of each struct-like variant: `(enum, variant) -> names`, in
+    /// declaration order (the payload types above are in the same order).
+    variant_field_names: HashMap<(String, String), Vec<String>>,
     /// Enums declared by the program being checked (not extern crates). A bare
     /// variant name prefers these owners.
     own_enums: std::collections::HashSet<String>,
@@ -102,7 +108,53 @@ pub struct TypeChecker {
 
 /// The C-style name of a scalar, string or struct type, used inside a
 /// `Vec<..>` hint. `None` for types the backend cannot name yet.
+/// The hint of a generic type with its arguments: `Option<T>`, `Result<T, E>`,
+/// `Map<K, V>` (for `HashMap<K, V>`) and `Tuple<..>`, when every argument has a hint.
+fn hint_compound(ty: &Ty) -> Option<String> {
+    match ty {
+        Ty::Apply(name, args) if name == "Option" && args.len() == 1 => {
+            let parts: Option<Vec<String>> = args.iter().map(hint_elem_name).collect();
+            parts.map(|p| format!("Option<{}>", p.join(",")))
+        }
+        Ty::Apply(name, args) if name == "Result" && args.len() == 2 => {
+            let parts: Option<Vec<String>> = args.iter().map(hint_elem_name).collect();
+            parts.map(|p| format!("Result<{}>", p.join(",")))
+        }
+        Ty::Apply(name, args) if name == "HashMap" && args.len() == 2 => {
+            let parts: Option<Vec<String>> = args.iter().map(hint_elem_name).collect();
+            parts.map(|p| format!("Map<{}>", p.join(",")))
+        }
+        // A set is a map to `bool` (keys only).
+        Ty::Apply(name, args) if name == "HashSet" && args.len() == 1 => {
+            hint_elem_name(&args[0]).map(|k| format!("Map<{k},bool>"))
+        }
+        // The sorted collections (`BTreeMap`, `BTreeSet`) are sorted maps.
+        Ty::Apply(name, args) if name == "BTreeMap" && args.len() == 2 => {
+            let parts: Option<Vec<String>> = args.iter().map(hint_elem_name).collect();
+            parts.map(|p| format!("Sorted<{}>", p.join(",")))
+        }
+        Ty::Apply(name, args) if name == "BTreeSet" && args.len() == 1 => {
+            hint_elem_name(&args[0]).map(|k| format!("Sorted<{k},bool>"))
+        }
+        Ty::Tuple(elems) if !elems.is_empty() => {
+            let parts: Option<Vec<String>> = elems.iter().map(hint_elem_name).collect();
+            parts.map(|p| format!("Tuple<{}>", p.join(",")))
+        }
+        _ => None,
+    }
+}
+
 fn hint_elem_name(ty: &Ty) -> Option<String> {
+    if let Some(h) = hint_compound(ty) {
+        return Some(h);
+    }
+    // A reference to a string or a named value is that value (a string is a pointer
+    // already, and an element is copied).
+    if let Ty::Ref(inner) | Ty::RefMut(inner) = ty {
+        if matches!(**inner, Ty::Str | Ty::Struct(_) | Ty::Apply(..)) {
+            return hint_elem_name(inner);
+        }
+    }
     // A nested vector (`Vec<Vec<T>>`) names its element recursively.
     if let Ty::Apply(n, a) = ty {
         if n == "Vec" && a.len() == 1 {
@@ -127,6 +179,7 @@ fn hint_elem_name(ty: &Ty) -> Option<String> {
         Ty::Bool => "bool",
         Ty::Char => "char",
         Ty::Str => "str",
+        Ty::Struct(n) if n == "String" => return Some("str".to_string()),
         Ty::Struct(n) if n != "Vec" => return Some(n.clone()),
         _ => return None,
     };
@@ -138,9 +191,40 @@ fn hint_elem_name(ty: &Ty) -> Option<String> {
 /// those are the types whose lowering changes (printing, element access,
 /// iteration); other scalars keep the backend's default.
 pub fn hint_of_ty(ty: &Ty) -> Option<String> {
+    if let Some(h) = hint_compound(ty) {
+        return Some(h);
+    }
     match ty {
         Ty::Bool => Some("bool".to_string()),
         Ty::Str => Some("str".to_string()),
+        Ty::Char => Some("char".to_string()),
+        // Numeric types are named by their Rust names (a hint the lowering may read).
+        Ty::I8 => Some("i8".to_string()),
+        Ty::I16 => Some("i16".to_string()),
+        Ty::I32 => Some("i32".to_string()),
+        Ty::I64 => Some("i64".to_string()),
+        Ty::I128 => Some("i128".to_string()),
+        Ty::Isize => Some("isize".to_string()),
+        Ty::U8 => Some("u8".to_string()),
+        Ty::U16 => Some("u16".to_string()),
+        Ty::U32 => Some("u32".to_string()),
+        Ty::U64 => Some("u64".to_string()),
+        Ty::U128 => Some("u128".to_string()),
+        Ty::Usize => Some("usize".to_string()),
+        Ty::F32 => Some("f32".to_string()),
+        Ty::F64 => Some("f64".to_string()),
+        // A `String` is a `str` (its C value is the same `char*`).
+        Ty::Struct(name) if name == "String" => Some("str".to_string()),
+        // A user struct or enum is its own name (the lowering applies the hint only to
+        // structs the program defines).
+        Ty::Struct(name)
+            if !matches!(
+                name.as_str(),
+                "Vec" | "String" | "Option" | "Result" | "Self"
+            ) =>
+        {
+            Some(name.clone())
+        }
         Ty::Apply(name, _) | Ty::Struct(name) if name == "Option" || name == "Result" => {
             Some(name.clone())
         }
@@ -150,6 +234,9 @@ pub fn hint_of_ty(ty: &Ty) -> Option<String> {
         // A slice `[T]` (length 0 in the type) is a value; so is a reference to one.
         Ty::Array(elem, 0) => hint_elem_name(elem).map(|e| format!("Slice<{e}>")),
         Ty::Ref(inner) | Ty::RefMut(inner) => match &**inner {
+            // A reference to a string is the string (its C value is the same `char*`).
+            Ty::Str => Some("str".to_string()),
+            Ty::Struct(name) if name == "String" => Some("str".to_string()),
             Ty::Array(elem, 0) => hint_elem_name(elem).map(|e| format!("Slice<{e}>")),
             Ty::Apply(name, args) if name == "Vec" && args.len() == 1 => {
                 hint_elem_name(&args[0]).map(|e| format!("Vec<{e}>*"))
@@ -157,6 +244,64 @@ pub fn hint_of_ty(ty: &Ty) -> Option<String> {
             _ => None,
         },
         _ => None,
+    }
+}
+
+/// The reference to an item type `t` (`Unknown` stays `Unknown`).
+fn ref_item(t: Ty) -> Ty {
+    match t {
+        Ty::Unknown => Ty::Unknown,
+        other => Ty::Ref(Box::new(other)),
+    }
+}
+
+/// The item behind one reference (`&T` gives `T`; other types are unchanged).
+fn deref_item(t: Ty) -> Ty {
+    match t {
+        Ty::Ref(inner) | Ty::RefMut(inner) => *inner,
+        other => other,
+    }
+}
+
+/// Whether `t` is, or contains, a type the context should decide: the default integer
+/// type of an unsuffixed literal, or an element type the checker could not infer
+/// (`Vec::new()`).
+fn has_default_int(t: &Ty) -> bool {
+    match t {
+        Ty::Int | Ty::Unknown => true,
+        Ty::Ref(i) | Ty::RefMut(i) => has_default_int(i),
+        Ty::Apply(_, args) | Ty::Tuple(args) => args.iter().any(has_default_int),
+        _ => false,
+    }
+}
+
+/// Replace the generic parameters named in `map` by their types, throughout `t`.
+fn subst_generics(t: &Ty, map: &HashMap<String, Ty>) -> Ty {
+    let go = |x: &Ty| subst_generics(x, map);
+    match t {
+        Ty::Generic(n) => map.get(n).cloned().unwrap_or_else(|| t.clone()),
+        Ty::Ref(i) => Ty::Ref(Box::new(go(i))),
+        Ty::RefMut(i) => Ty::RefMut(Box::new(go(i))),
+        Ty::Future(i) => Ty::Future(Box::new(go(i))),
+        Ty::Pin(i) => Ty::Pin(Box::new(go(i))),
+        Ty::Array(i, n) => Ty::Array(Box::new(go(i)), *n),
+        Ty::Apply(n, args) => Ty::Apply(n.clone(), args.iter().map(go).collect()),
+        Ty::Tuple(elems) => Ty::Tuple(elems.iter().map(go).collect()),
+        Ty::Fn(params, ret) => Ty::Fn(params.iter().map(go).collect(), Box::new(go(ret))),
+        other => other.clone(),
+    }
+}
+
+/// A reference to a scalar (number, `bool`, `char`) used as an operand: the std
+/// operator impls take the scalar behind it, so the checker does too.
+fn peel_scalar_ref(t: Ty) -> Ty {
+    match t {
+        Ty::Ref(inner) | Ty::RefMut(inner)
+            if inner.is_numeric() || matches!(*inner, Ty::Bool | Ty::Char) =>
+        {
+            *inner
+        }
+        other => other,
     }
 }
 
@@ -186,6 +331,8 @@ impl Default for TypeChecker {
             values: HashMap::new(),
             assoc_consts: HashMap::new(),
             unit_variant_owners: HashMap::new(),
+            enum_variants: HashMap::new(),
+            variant_field_names: HashMap::new(),
             own_enums: std::collections::HashSet::new(),
             env: Vec::new(),
             generic_scope: Vec::new(),
@@ -321,6 +468,7 @@ impl TypeChecker {
                             generics: s.generics.clone(),
                         },
                     );
+                    Self::register_tuple_ctor(&mut cx, s);
                 }
                 tpt_moira_clotho::ast::ItemKind::Impl(imp) => {
                     // Collect the methods declared in user `impl` blocks so that
@@ -487,10 +635,52 @@ impl TypeChecker {
         Self::collect_extern_items(crate_name.to_string(), Vec::new(), &prog.items, self);
     }
 
+    /// A tuple struct `struct P(A, B);` is also its constructor function `P(a, b)`.
+    fn register_tuple_ctor(cx: &mut TypeChecker, s: &tpt_moira_clotho::ast::StructDef) {
+        if s.fields.is_empty() || s.fields.iter().any(|f| !f.name.node.is_empty()) {
+            return;
+        }
+        cx.generic_scope.push(s.generics.clone());
+        let params = s.fields.iter().map(|f| cx.type_to_ty(&f.ty)).collect();
+        cx.generic_scope.pop();
+        cx.fns.insert(
+            s.name.node.clone(),
+            FnSig {
+                params,
+                ret: Ty::Struct(s.name.node.clone()),
+                is_async: false,
+                generics: s.generics.clone(),
+            },
+        );
+    }
+
     /// Register an enum's **nullary** variants as associated constants so
     /// `EnumName::Variant` used as a *value* (not a pattern) resolves to the
     /// enum's type (`TokenKind::Fn`, `Ordering::Less`, …).
     fn register_enum_variants(e: &tpt_moira_clotho::ast::EnumDef, cx: &mut TypeChecker) {
+        // The payload types of each variant, with the enum's generic parameters in scope.
+        cx.generic_scope.push(e.generics.clone());
+        let variants: Vec<(String, Vec<Ty>)> = e
+            .variants
+            .iter()
+            .map(|v| {
+                let tys = v
+                    .fields
+                    .as_ref()
+                    .map(|fs| fs.iter().map(|f| cx.type_to_ty(&f.ty)).collect())
+                    .unwrap_or_default();
+                (v.name.node.clone(), tys)
+            })
+            .collect();
+        cx.generic_scope.pop();
+        for v in &e.variants {
+            if let Some(fs) = &v.fields {
+                let names: Vec<String> = fs.iter().map(|f| f.name.node.clone()).collect();
+                cx.variant_field_names
+                    .insert((e.name.node.clone(), v.name.node.clone()), names);
+            }
+        }
+        cx.enum_variants.insert(e.name.node.clone(), variants);
         let enum_ty = tpt_moira_clotho::ast::Type {
             kind: tpt_moira_clotho::ast::TypeKind::Path(
                 tpt_moira_clotho::ast::Path {
@@ -612,6 +802,7 @@ impl TypeChecker {
                             );
                         }
                     }
+                    Self::register_tuple_ctor(cx, s);
                 }
                 tpt_moira_clotho::ast::ItemKind::Impl(imp) => {
                     let self_name = imp.for_ty.node_name();
@@ -866,7 +1057,11 @@ impl TypeChecker {
                 }
             }
             Pat::Wild => {}
-            Pat::Ref(inner) => self.bind_pattern(inner, scrut_ty),
+            // `&pat` matches through one reference: the inner pattern binds the referent.
+            Pat::Ref(inner) => match scrut_ty {
+                Ty::Ref(t) | Ty::RefMut(t) => self.bind_pattern(inner, &(**t).clone()),
+                other => self.bind_pattern(inner, other),
+            },
             Pat::Or(a, b) => {
                 self.bind_pattern(a, scrut_ty);
                 self.bind_pattern(b, scrut_ty);
@@ -874,10 +1069,26 @@ impl TypeChecker {
             Pat::Tuple(elems) => {
                 // Each element binds with its tuple component's type (`Unknown` when the
                 // scrutinee's shape is not known, e.g. an iterator item).
+                // Through a reference (match ergonomics) each element binds by reference too.
+                let (tuple_ty, by_ref): (&Ty, Option<bool>) = match scrut_ty {
+                    Ty::Ref(t) => (&**t, Some(false)),
+                    Ty::RefMut(t) => (&**t, Some(true)),
+                    other => (other, None),
+                };
                 for (i, e) in elems.iter().enumerate() {
-                    let t = match scrut_ty {
+                    let t = match tuple_ty {
                         Ty::Tuple(tys) => tys.get(i).cloned().unwrap_or(Ty::Unknown),
                         _ => Ty::Unknown,
+                    };
+                    let t = match by_ref {
+                        Some(m) if !matches!(t, Ty::Unknown) => {
+                            if m {
+                                Ty::RefMut(Box::new(t))
+                            } else {
+                                Ty::Ref(Box::new(t))
+                            }
+                        }
+                        _ => t,
                     };
                     self.bind_pattern(e, &t);
                 }
@@ -885,13 +1096,44 @@ impl TypeChecker {
             Pat::Struct(name, fields) => {
                 // A field binds with its declared type when the struct is known;
                 // a struct-variant field (not modeled per variant) is `Unknown`.
+                // A struct-like variant (`E::V { a, b }`) takes each field's declared
+                // type from the scrutinee's enum; matching through a reference binds
+                // by reference.
+                let vname = name.rsplit("::").next().unwrap_or(name).to_string();
+                let st = self.strip_refs(scrut_ty);
+                let variant = match &st {
+                    Ty::Struct(n) | Ty::Apply(n, _) => {
+                        let names = self.variant_field_names.get(&(n.clone(), vname.clone())).cloned();
+                        let tys = self
+                            .enum_variants
+                            .get(n)
+                            .and_then(|vs| vs.iter().find(|(v, _)| *v == vname))
+                            .map(|(_, tys)| tys.clone());
+                        match (names, tys) {
+                            (Some(names), Some(tys)) => Some((names, tys)),
+                            _ => None,
+                        }
+                    }
+                    _ => None,
+                };
+                let wrap = |t: Ty| match scrut_ty {
+                    Ty::Ref(_) => Ty::Ref(Box::new(t)),
+                    Ty::RefMut(_) => Ty::RefMut(Box::new(t)),
+                    _ => t,
+                };
                 for (fname, sub) in fields {
-                    let fty = self
-                        .structs
-                        .get(name)
-                        .and_then(|si| si.fields.iter().find(|(n, _)| n == fname))
-                        .map(|(_, t)| t.clone())
-                        .unwrap_or(Ty::Unknown);
+                    let fty = match &variant {
+                        Some((names, tys)) => {
+                            let pos = names.iter().position(|n| n == fname);
+                            wrap(pos.and_then(|i| tys.get(i).cloned()).unwrap_or(Ty::Unknown))
+                        }
+                        None => self
+                            .structs
+                            .get(name)
+                            .and_then(|si| si.fields.iter().find(|(n, _)| n == fname))
+                            .map(|(_, t)| t.clone())
+                            .unwrap_or(Ty::Unknown),
+                    };
                     self.bind_pattern(sub, &fty);
                 }
             }
@@ -915,9 +1157,36 @@ impl TypeChecker {
                     .last()
                     .map(|s| s.node.clone())
                     .unwrap_or_default();
-                let inner_ty = Self::variant_payload_ty(scrut_ty, &vname);
-                for p in args {
-                    self.bind_pattern(p, &inner_ty);
+                // A user enum's payload fields have their declared types; the prelude
+                // `Option`/`Result` payload is the one type `variant_payload_ty` gives.
+                let st = self.strip_refs(scrut_ty);
+                let declared = match &st {
+                    Ty::Struct(n) | Ty::Apply(n, _) => self
+                        .enum_variants
+                        .get(n)
+                        .and_then(|vs| vs.iter().find(|(v, _)| *v == vname))
+                        .map(|(_, tys)| tys.clone()),
+                    _ => None,
+                };
+                // Match ergonomics: matching through a reference binds the payload by reference.
+                let wrap = |t: Ty| match scrut_ty {
+                    Ty::Ref(_) => Ty::Ref(Box::new(t)),
+                    Ty::RefMut(_) => Ty::RefMut(Box::new(t)),
+                    _ => t,
+                };
+                match declared {
+                    Some(tys) => {
+                        for (i, p) in args.iter().enumerate() {
+                            let t = wrap(tys.get(i).cloned().unwrap_or(Ty::Unknown));
+                            self.bind_pattern(p, &t);
+                        }
+                    }
+                    None => {
+                        let inner_ty = Self::variant_payload_ty(scrut_ty, &vname);
+                        for p in args {
+                            self.bind_pattern(p, &inner_ty);
+                        }
+                    }
                 }
             }
         }
@@ -1011,6 +1280,9 @@ impl TypeChecker {
     fn check_try(&mut self, span: Span, inner: &Expr) -> Ty {
         let t = self.infer_expr(inner);
         match &t {
+            // `x?` on an `Option<T>` / `Result<T, E>` is the payload `T`.
+            Ty::Apply(name, args) if name == "Option" && args.len() == 1 => args[0].clone(),
+            Ty::Apply(name, args) if name == "Result" && !args.is_empty() => args[0].clone(),
             Ty::Apply(..) | Ty::Struct(_) | Ty::Generic(_) | Ty::Unknown => Ty::Unknown,
             other => {
                 self.err(
@@ -1537,7 +1809,7 @@ impl TypeChecker {
                 | BinOp::ShrAssign
         ) {
             let lt = self.infer_expr(l);
-            let rt = self.infer_expr(r);
+            let rt = peel_scalar_ref(self.infer_expr(r));
             if !matches!(lt, Ty::Unknown) && !lt.is_numeric() {
                 self.err(
                     span,
@@ -1555,6 +1827,9 @@ impl TypeChecker {
 
         let lt = self.infer_expr(l);
         let rt = self.infer_expr(r);
+        // The std operator impls also take references to scalars (`i32 + &i32`).
+        let lt = peel_scalar_ref(lt);
+        let rt = peel_scalar_ref(rt);
         match op {
             BinOp::And | BinOp::Or => {
                 self.expect(&lt, &Ty::Bool, span);
@@ -1673,9 +1948,34 @@ impl TypeChecker {
         };
         let segments: Vec<String> = path.segments.iter().map(|s| s.node.clone()).collect();
         let name = segments.last().cloned().unwrap_or_default();
+        // `Some(x)` is an `Option` of `x`'s type; `Ok(x)` / `Err(x)` a `Result` with that
+        // side typed (the other side is unknown until the context fixes it).
+        if segments.len() == 1 && args.len() == 1 && matches!(name.as_str(), "Some" | "Ok" | "Err")
+            && self.lookup(&name).is_none()
+        {
+            let t = self.infer_expr(&args[0]);
+            return match name.as_str() {
+                "Some" => Ty::Apply("Option".to_string(), vec![t]),
+                "Ok" => Ty::Apply("Result".to_string(), vec![t, Ty::Unknown]),
+                _ => Ty::Apply("Result".to_string(), vec![Ty::Unknown, t]),
+            };
+        }
         let sig = match self.resolve_call(&segments, span) {
             Some(s) => s,
             None => {
+                // A closure or function-typed local (`f(x)` for `f: impl Fn(..)`) is
+                // called through its type; an untyped one is absorbed.
+                if segments.len() == 1 {
+                    if let Some(local) = self.lookup(&name) {
+                        for a in args {
+                            self.infer_expr(a);
+                        }
+                        return match local {
+                            Ty::Fn(_, ret) => *ret,
+                            _ => Ty::Unknown,
+                        };
+                    }
+                }
                 self.err(span, format!("cannot find function `{}`", name));
                 return Ty::Unknown;
             }
@@ -1824,7 +2124,18 @@ impl TypeChecker {
         match &bt {
             Ty::Struct(s) | Ty::Apply(s, _) => match self.structs.get(s) {
                 Some(info) => match info.fields.iter().find(|(n, _)| n == &field.node) {
-                    Some((_, ft)) => ft.clone(),
+                    Some((_, ft)) => {
+                        // A generic struct's field is typed with the instance's arguments.
+                        let args: &[Ty] = match &bt {
+                            Ty::Apply(_, a) => a.as_slice(),
+                            _ => &[],
+                        };
+                        let mut map: HashMap<String, Ty> = HashMap::new();
+                        for (p, a) in info.generics.params.iter().zip(args) {
+                            map.insert(p.name.node.clone(), a.clone());
+                        }
+                        subst_generics(ft, &map)
+                    }
                     None => {
                         self.err(span, format!("no field `{}` on type `{}`", field.node, s));
                         Ty::Unknown
@@ -1920,6 +2231,37 @@ impl TypeChecker {
                 Ty::Struct(name)
             }
             None => {
+                // A struct-like variant `Enum::Variant { .. }`: each field is checked
+                // against its declared type, and the literal is the enum.
+                let segs: Vec<String> = path.segments.iter().map(|s| s.node.clone()).collect();
+                if segs.len() >= 2 {
+                    let en = segs[segs.len() - 2].clone();
+                    let vn = segs[segs.len() - 1].clone();
+                    let names = self.variant_field_names.get(&(en.clone(), vn.clone())).cloned();
+                    let tys = self
+                        .enum_variants
+                        .get(&en)
+                        .and_then(|vs| vs.iter().find(|(v, _)| *v == vn))
+                        .map(|(_, t)| t.clone());
+                    if let (Some(names), Some(tys)) = (names, tys) {
+                        for (fname, fexpr) in fields {
+                            let at = self.infer_expr(fexpr);
+                            match names.iter().position(|n| n == &fname.node).and_then(|i| tys.get(i)) {
+                                Some(ft) => self.expect(&at, ft, fexpr.span),
+                                None => self.err(
+                                    span,
+                                    format!("variant `{}` has no field `{}`", vn, fname.node),
+                                ),
+                            }
+                        }
+                        for n in &names {
+                            if !fields.iter().any(|(f, _)| f.node == *n) {
+                                self.err(span, format!("missing field `{}` for variant `{}`", n, vn));
+                            }
+                        }
+                        return Ty::Struct(en);
+                    }
+                }
                 self.err(span, format!("unknown struct `{}`", name));
                 Ty::Unknown
             }
@@ -2013,6 +2355,61 @@ impl TypeChecker {
         if let Some(t) = self.check_iter_method(&recv_ty, &method.node, args) {
             return t;
         }
+        // `Option<&T>::cloned()` / `copied()` is `Option<T>` (the referent's type).
+        if let Ty::Apply(n, targs) = self.strip_refs(&recv_ty) {
+            if n == "Option"
+                && targs.len() == 1
+                && args.is_empty()
+                && (method.node == "cloned" || method.node == "copied")
+            {
+                return Ty::Apply("Option".into(), vec![deref_item(targs[0].clone())]);
+            }
+            // The payload of an `Option`/`Result` is the value of `unwrap`, `expect`
+            // and `unwrap_or`.
+            let m = method.node.as_str();
+            if (n == "Option" || n == "Result")
+                && !targs.is_empty()
+                && ((args.is_empty() && (m == "unwrap" || m == "expect" || m == "unwrap_or_default"))
+                    || (args.len() == 1 && (m == "unwrap_or" || m == "unwrap_or_else")))
+            {
+                for a in args {
+                    self.infer_expr(a);
+                }
+                return targs[0].clone();
+            }
+            // `first()` / `last()` of a `Vec<T>` is an `Option<T>`.
+            if n == "Vec" && targs.len() == 1 && args.is_empty() && (m == "first" || m == "last") {
+                return Ty::Apply("Option".into(), vec![deref_item(targs[0].clone())]);
+            }
+        }
+        // A `HashMap<K, V>` method gives its value type: `get` and `insert` are `Option<V>`.
+        if let Ty::Apply(n, targs) = self.strip_refs(&recv_ty) {
+            if (n == "HashMap" || n == "BTreeMap") && targs.len() == 2 {
+                let v = targs[1].clone();
+                let result = match (method.node.as_str(), args.len()) {
+                    ("get" | "remove", 1) => Some(Ty::Apply("Option".to_string(), vec![v])),
+                    ("insert", 2) => Some(Ty::Apply("Option".to_string(), vec![v])),
+                    ("contains_key", 1) => Some(Ty::Bool),
+                    ("len", 0) => Some(Ty::Usize),
+                    ("is_empty", 0) => Some(Ty::Bool),
+                    _ => None,
+                };
+                if let Some(t) = result {
+                    for a in args {
+                        self.infer_expr(a);
+                    }
+                    return t;
+                }
+            }
+        }
+        // `Option::take` returns the option's value and leaves `None` in its place.
+        if method.node == "take" && args.is_empty() {
+            if let Ty::Apply(n, _) = self.strip_refs(&recv_ty) {
+                if n == "Option" {
+                    return self.strip_refs(&recv_ty);
+                }
+            }
+        }
         let recv_name = self.type_name(&recv_ty);
         // 1) User-defined method from an `impl` block. The receiver is the first
         //    parameter (`self`/`&self`/`&mut self`); the remaining parameters are
@@ -2034,6 +2431,7 @@ impl TypeChecker {
                 let is_vec = name == "Vec";
                 // `String` auto-derefs to `str`: its `str` methods are found too.
                 let is_string = name == "String";
+                let is_str = name == "str";
                 self.methods
                     .get(&(name, method.node.clone()))
                     .cloned()
@@ -2045,6 +2443,11 @@ impl TypeChecker {
                         } else if is_string {
                             self.methods
                                 .get(&("str".to_string(), method.node.clone()))
+                                .cloned()
+                        } else if is_str {
+                            // `str` methods that mutate or return a `String` live in the `String` table.
+                            self.methods
+                                .get(&("String".to_string(), method.node.clone()))
                                 .cloned()
                         } else {
                             None
@@ -2338,11 +2741,20 @@ impl TypeChecker {
                 if (m.node == "iter" || m.node == "iter_mut") && args.is_empty() =>
             {
                 let seq = self.infer_expr(r);
-                self.item_of(span, &seq)
+                let item = self.item_of(span, &seq);
+                ref_item(item)
             }
             _ => {
+                // Iterating through a reference (`for x in &v`, `for x in v` with
+                // `v: &Vec<T>`) yields references to the items.
                 let t = self.infer_expr(iter);
-                self.item_of(span, &t)
+                let by_ref = matches!(t, Ty::Ref(_) | Ty::RefMut(_));
+                let item = self.item_of(span, &t);
+                if by_ref {
+                    ref_item(item)
+                } else {
+                    item
+                }
             }
         }
     }
@@ -2358,7 +2770,13 @@ impl TypeChecker {
         };
         if let Some(elem) = seq_elem_ty(&recv) {
             if matches!(method, "iter" | "iter_mut" | "into_iter") && args.is_empty() {
-                return Some(Ty::Apply("Iter".to_string(), vec![elem]));
+                // `iter()` yields references to the elements; `into_iter()` the elements.
+                let item = if method == "into_iter" {
+                    elem
+                } else {
+                    ref_item(elem)
+                };
+                return Some(Ty::Apply("Iter".to_string(), vec![item]));
             }
             return None;
         }
@@ -2369,7 +2787,8 @@ impl TypeChecker {
         let iter_of = |t: Ty| Ty::Apply("Iter".to_string(), vec![t]);
         match (method, args.len()) {
             ("enumerate", 0) => Some(iter_of(Ty::Tuple(vec![Ty::Usize, item]))),
-            ("rev" | "cloned" | "copied", 0) => Some(iter_of(item)),
+            ("rev", 0) => Some(iter_of(item)),
+            ("cloned" | "copied", 0) => Some(iter_of(deref_item(item))),
             ("map", 1) => Some(iter_of(self.closure_result(&args[0], &item))),
             ("filter", 1) => {
                 self.closure_result(&args[0], &item);
@@ -2389,7 +2808,7 @@ impl TypeChecker {
             }
             ("count", 0) => Some(Ty::Usize),
             ("collect", 0) => Some(Ty::Apply("Vec".to_string(), vec![item])),
-            ("sum", 0) => Some(item),
+            ("sum", 0) => Some(deref_item(item)),
             ("next", 0) => Some(Ty::Apply("Option".to_string(), vec![item])),
             _ => None,
         }
@@ -2421,6 +2840,17 @@ impl TypeChecker {
             Ty::Array(elem, _) => (**elem).clone(),
             Ty::Range => Ty::Int,
             Ty::Apply(name, args) if name == "Iter" && args.len() == 1 => args[0].clone(),
+            // A map yields its (key, value) pairs.
+            Ty::Apply(name, args) if name == "HashMap" && args.len() == 2 => {
+                Ty::Tuple(vec![args[0].clone(), args[1].clone()])
+            }
+            // A set yields its keys.
+            Ty::Apply(name, args) if (name == "HashSet" || name == "BTreeSet") && args.len() == 1 => {
+                args[0].clone()
+            }
+            Ty::Apply(name, args) if name == "BTreeMap" && args.len() == 2 => {
+                Ty::Tuple(vec![args[0].clone(), args[1].clone()])
+            }
             Ty::Apply(name, args) if name == "Vec" && args.len() == 1 => args[0].clone(),
             Ty::Struct(name) | Ty::Apply(name, _) if name == "Vec" => Ty::Unknown,
             // An `Unknown` iterator means an earlier error already fired; absorb it
@@ -2478,9 +2908,11 @@ impl TypeChecker {
 
         // Associated functions `Type::fn()`.
         self.assoc_fns
-            .insert(("Vec".into(), "new".into()), sig(vec![], std("Vec")));
+            .insert(("Vec".into(), "new".into()), sig(vec![], Apply("Vec".into(), vec![Unknown])));
         self.assoc_fns
             .insert(("String".into(), "new".into()), sig(vec![], std("String")));
+        self.assoc_fns
+            .insert(("String".into(), "from".into()), sig(vec![Unknown], std("String")));
         self.assoc_fns
             .insert(("Box".into(), "new".into()), sig(vec![Unknown], std("Box")));
         self.assoc_fns.insert(
@@ -2832,7 +3264,7 @@ impl TypeChecker {
         self.methods
             .insert(("String".into(), "is_empty".into()), sig(vec![], Bool));
         self.methods
-            .insert(("str".into(), "as_bytes".into()), sig(vec![], std("Vec")));
+            .insert(("str".into(), "as_bytes".into()), sig(vec![], Apply("Vec".into(), vec![U8])));
         self.methods
             .insert(("str".into(), "chars".into()), sig(vec![], Unknown));
         self.methods
@@ -2904,7 +3336,7 @@ impl TypeChecker {
         );
         self.assoc_fns.insert(
             ("Vec".into(), "with_capacity".into()),
-            sig(vec![Usize], std("Vec")),
+            sig(vec![Usize], Apply("Vec".into(), vec![Unknown])),
         );
         self.assoc_fns.insert(
             ("mem".into(), "take".into()),
@@ -2945,11 +3377,25 @@ impl TypeChecker {
             ("HashSet".into(), "new".into()),
             sig(vec![], std("HashSet")),
         );
-        for m in ["HashMap", "HashSet"] {
-            self.methods.insert(
-                (m.into(), "insert".into()),
-                sig(vec![Unknown, Unknown], Unit),
-            );
+        self.assoc_fns.insert(
+            ("BTreeMap".into(), "new".into()),
+            sig(vec![], std("BTreeMap")),
+        );
+        self.assoc_fns.insert(
+            ("BTreeSet".into(), "new".into()),
+            sig(vec![], std("BTreeSet")),
+        );
+        for m in ["HashMap", "HashSet", "BTreeMap", "BTreeSet"] {
+            // A map's `insert(k, v)` returns the old value; a set's `insert(v)` is a `bool`.
+            if m.ends_with("Set") {
+                self.methods
+                    .insert((m.into(), "insert".into()), sig(vec![Unknown], Bool));
+            } else {
+                self.methods.insert(
+                    (m.into(), "insert".into()),
+                    sig(vec![Unknown, Unknown], std("Option")),
+                );
+            }
             self.methods.insert(
                 (m.into(), "get".into()),
                 sig(vec![Ref(Box::new(Unknown))], std("Option")),
@@ -3009,14 +3455,66 @@ impl TypeChecker {
             "Args",
             "HashMap",
             "HashSet",
+            "BTreeMap",
+            "BTreeSet",
         ] {
-            self.structs.insert(
-                std_type.to_string(),
-                StructInfo {
+            // Keep fields an extern crate already registered for the same name.
+            self.structs
+                .entry(std_type.to_string())
+                .or_insert_with(|| StructInfo {
                     fields: Vec::new(),
                     generics: Generics::default(),
-                },
-            );
+                });
+        }
+
+        // More `Option`/`Result`/`HashSet`/`String` methods. Closure-taking methods
+        // return `Unknown` (the closure's result is not tracked here).
+        for (recv, m, params, ret) in [
+            ("Option", "and_then", vec![Unknown], Unknown),
+            ("Option", "or_else", vec![Unknown], Unknown),
+            ("Option", "ok_or_else", vec![Unknown], Unknown),
+            ("Option", "expect", vec![Str], Unknown),
+            ("Option", "unwrap_or_default", vec![], Unknown),
+            ("Result", "unwrap_or_default", vec![], Unknown),
+            ("Result", "unwrap_or_else", vec![Unknown], Unknown),
+            ("HashSet", "contains", vec![Unknown], Bool),
+            ("String", "ends_with", vec![Unknown], Bool),
+            ("String", "starts_with", vec![Unknown], Bool),
+            ("String", "strip_suffix", vec![Unknown], Apply("Option".into(), vec![Str])),
+            ("String", "strip_prefix", vec![Unknown], Apply("Option".into(), vec![Str])),
+            ("str", "strip_suffix", vec![Unknown], Apply("Option".into(), vec![Str])),
+            ("str", "strip_prefix", vec![Unknown], Apply("Option".into(), vec![Str])),
+            // `str` methods of the C string runtime (`moira_str_*`).
+            ("str", "trim", vec![], Str),
+            ("str", "trim_start", vec![], Str),
+            ("str", "trim_end", vec![], Str),
+            ("str", "starts_with", vec![Unknown], Bool),
+            ("str", "ends_with", vec![Unknown], Bool),
+            ("str", "contains", vec![Unknown], Bool),
+            ("str", "is_empty", vec![], Bool),
+            ("str", "to_string", vec![], Str),
+            ("str", "to_owned", vec![], Str),
+            ("str", "to_ascii_lowercase", vec![], Str),
+            ("str", "replace", vec![Unknown, Unknown], Str),
+            ("str", "find", vec![Unknown], Apply("Option".into(), vec![Usize])),
+            ("String", "find", vec![Unknown], Apply("Option".into(), vec![Usize])),
+            ("char", "is_ascii_alphanumeric", vec![], Bool),
+            ("char", "is_ascii_digit", vec![], Bool),
+            ("char", "is_ascii_alphabetic", vec![], Bool),
+            ("char", "is_ascii_whitespace", vec![], Bool),
+            ("char", "is_ascii_uppercase", vec![], Bool),
+            ("char", "is_ascii_lowercase", vec![], Bool),
+            ("char", "is_alphanumeric", vec![], Bool),
+            ("char", "is_numeric", vec![], Bool),
+            ("char", "to_ascii_lowercase", vec![], Char),
+            ("char", "to_ascii_uppercase", vec![], Char),
+        ] {
+            // A `String` has the same methods as its `str`.
+            for r in [recv, "String"] {
+                self.methods
+                    .entry((r.to_string(), m.to_string()))
+                    .or_insert_with(|| sig(params.clone(), ret.clone()));
+            }
         }
 
         // Wider primitive output helpers (mirror the C/native backend runtimes).
@@ -3081,11 +3579,16 @@ impl TypeChecker {
     /// parameter `T` satisfies the operator only when it carries the
     /// corresponding bound (`T: Add`) in its enclosing function's generics.
     fn implements_op(&mut self, ty: &Ty, tr: BuiltinTrait, span: Span) {
+        // `&A` implements an operator trait when `A` does (`&str == &str`).
+        if let Ty::Ref(inner) | Ty::RefMut(inner) = ty {
+            let inner = (**inner).clone();
+            return self.implements_op(&inner, tr, span);
+        }
         // Modeled std types (`String`, `Option`, …) and absorbing sentinels
         // are lenient — derives or the opaque runtime model stand in for the
         // real impl — and a user-written / derive-generated `impl Trait for T`
         // (seeded into the solver) satisfies the operator too.
-        let std_lenient = matches!(ty, Ty::Unknown | Ty::Never)
+        let std_lenient = matches!(ty, Ty::Unknown | Ty::Never | Ty::Str)
             || matches!(ty,
             Ty::Struct(n) | Ty::Apply(n, _)
             if matches!(
@@ -3211,6 +3714,11 @@ impl TypeChecker {
                     .last()
                     .map(|s| s.node.clone())
                     .unwrap_or_default();
+                // `impl Into<String>` / `impl AsRef<str>` (the trait's arguments are not kept):
+                // the conversion target is a string in this crate.
+                if (name == "Into" || name == "AsRef") && args.is_empty() {
+                    return Ty::Str;
+                }
                 // `Self` resolves to the enclosing impl's concrete self type.
                 // A primitive self type (`impl Show for i32`) resolves to the
                 // primitive `Ty` (not a struct named "i32") so receiver checks
@@ -3226,6 +3734,11 @@ impl TypeChecker {
                 // `fn f<T>(x: T)` or `impl<T> Foo<T>` is `Ty::Generic("T")`).
                 if self.is_generic_param(&name) {
                     return Ty::Generic(name);
+                }
+                // `Box<T>` is modelled as `T`: a box is a pointer to its value, and Rust
+                // coerces `&Box<T>` to `&T`, which the checker does not track.
+                if name == "Box" && args.len() == 1 {
+                    return self.type_to_ty(&args[0]);
                 }
                 match prim(&name) {
                     Some(t) => t,
@@ -3286,6 +3799,12 @@ impl TypeChecker {
     /// Whether two types are mutually compatible for assignment/use.
     fn compatible(&self, a: &Ty, b: &Ty) -> bool {
         if matches!(a, Ty::Unknown | Ty::Never) || matches!(b, Ty::Unknown | Ty::Never) {
+            return true;
+        }
+        // `String` and `str` are one type to the checker (the owned/borrowed split is
+        // a codegen detail here): `String` values pass where `str` is expected and back.
+        let is_strlike = |t: &Ty| matches!(t, Ty::Str | Ty::Struct(_) if matches!(t, Ty::Str) || matches!(t, Ty::Struct(n) if n == "String"));
+        if is_strlike(a) && is_strlike(b) {
             return true;
         }
         // `impl Into<T>` accepts any argument that converts into `T`; the conversion
@@ -3396,6 +3915,12 @@ impl TypeChecker {
     fn expect(&mut self, a: &Ty, b: &Ty, span: Span) {
         if !self.compatible(a, b) {
             self.err(span, format!("type mismatch: expected {}, found {}", b, a));
+            return;
+        }
+        // An unsuffixed integer literal (or a collection of them) takes the type the
+        // context expects, not the `i32` default: the expression's type is the expected one.
+        if has_default_int(a) && !matches!(b, Ty::Unknown) {
+            self.expr_types.insert((span.start, span.end), b.clone());
         }
     }
 
