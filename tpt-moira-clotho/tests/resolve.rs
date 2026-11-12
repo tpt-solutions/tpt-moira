@@ -71,3 +71,22 @@ fn names_without_a_collision_are_untouched() {
     assert_eq!(struct_names(&crates[0].program), vec!["Holder"]);
     assert_eq!(struct_names(&crates[1].program), vec!["Other"]);
 }
+
+#[test]
+fn glob_imported_extern_type_is_rewritten_in_the_root() {
+    // The root names the extern's type through a glob import, as `use lib::ast::*` does.
+    let root_src = "use tpt_moira_lib::*;\n\
+                    pub struct Holder { pub f: Function }\n";
+    let lib_src = "pub struct Function { pub name: String }\n";
+    let other_src = "pub struct Function { pub n: i64 }\n";
+    let mut crates = vec![
+        krate("", true, root_src),
+        krate("lib", false, lib_src),
+        krate("other", false, other_src),
+    ];
+    disambiguate(&mut crates);
+    assert_eq!(
+        field_type_path(&crates[0].program, "Holder"),
+        vec!["lib_Function"]
+    );
+}

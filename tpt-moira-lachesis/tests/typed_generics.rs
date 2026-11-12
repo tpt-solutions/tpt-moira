@@ -81,5 +81,12 @@ fn generic_function_with_one_instance_keeps_no_generic_original() {
         })
         .collect();
     assert!(names.contains(&"id__i32".to_string()), "{names:?}");
-    assert!(!names.contains(&"id".to_string()), "{names:?}");
+    // The generic original stays for the checker; the backend emits only the instance.
+    let stripped = tpt_moira_atropos::codegen_c::emit_c(
+        &tpt_moira_atropos::lower_program_typed(&mono, &Default::default())
+            .expect("instance program should lower"),
+    );
+    assert!(!stripped.contains("id(int64_t x) {") && !stripped.contains("int32_t id(int32_t") || stripped.contains("id__i32"), "generic original emitted");
+    assert!(!stripped.contains("
+int32_t id("), "generic original was emitted");
 }

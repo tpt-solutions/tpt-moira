@@ -119,30 +119,34 @@ pub fn monomorphize(prog: &Program, externs: &[(&str, &Program)]) -> Program {
         seen: HashSet::new(),
         queue: Vec::new(),
         out: Vec::new(),
+        next_base: INSTANCE_BASE,
     };
 
     let empty: HashMap<String, Ty> = HashMap::new();
     for item in &prog.items {
+        // A generic original stays as it is: the checker reads its signature, and the
+        // backend leaves it out (its instances are the code).
+        let generic_original = match &item.kind {
+            ItemKind::Function(f) => !f.generics.params.is_empty(),
+            ItemKind::Struct(s) => !s.generics.params.is_empty(),
+            ItemKind::Impl(imp) => is_generic_impl(imp, &prog.items),
+            _ => false,
+        };
+        if generic_original {
+            mono.out.push(item.clone());
+            continue;
+        }
         let mut item = item.clone();
         match &mut item.kind {
             ItemKind::Function(f) => {
-                if !f.generics.params.is_empty() {
-                    continue;
-                }
                 mono.rewrite_fn(f, &empty);
             }
             ItemKind::Struct(s) => {
-                if !s.generics.params.is_empty() {
-                    continue;
-                }
                 for f in &mut s.fields {
                     mono.ty(&mut f.ty, &empty);
                 }
             }
             ItemKind::Impl(imp) => {
-                if is_generic_impl(imp, &prog.items) {
-                    continue;
-                }
                 mono.rewrite_impl(imp, &empty);
             }
             _ => {}
@@ -175,11 +179,7 @@ pub fn monomorphize(prog: &Program, externs: &[(&str, &Program)]) -> Program {
                 if let Some(spec) = &closure {
                     insert_captures(&mut f, spec);
                 }
-                mono.out.push(Item {
-                    visibility: Visibility::Private,
-                    kind: ItemKind::Function(f),
-                    attributes: Vec::new(),
-                });
+                mono.push_rebased(ItemKind::Function(f));
             }
             Work::Method {
                 owner,
@@ -207,11 +207,14 @@ pub fn monomorphize(prog: &Program, externs: &[(&str, &Program)]) -> Program {
                     if let ItemKind::Impl(imp) = &mut item.kind {
                         if imp_self_name(imp) == Some(owner.as_str()) && imp.generics.params.is_empty()
                         {
-                            imp.items.push(Item {
+                            let mut copy = Item {
                                 visibility: Visibility::Private,
                                 kind: ItemKind::Function(f.clone()),
                                 attributes: Vec::new(),
-                            });
+                            };
+                            crate::rebase::rebase_item(&mut copy, mono.next_base);
+                            mono.next_base += INSTANCE_SPAN;
+                            imp.items.push(copy);
                             break;
                         }
                     }
@@ -239,11 +242,7 @@ pub fn monomorphize(prog: &Program, externs: &[(&str, &Program)]) -> Program {
                 for f in &mut s.fields {
                     mono.ty(&mut f.ty, &sub);
                 }
-                mono.out.push(Item {
-                    visibility: Visibility::Private,
-                    kind: ItemKind::Struct(s),
-                    attributes: Vec::new(),
-                });
+                mono.push_rebased(ItemKind::Struct(s));
                 // Every generic impl block of this struct gets an instance too.
                 let impls: Vec<ImplDef> = mono
                     .generic_impls
@@ -273,11 +272,7 @@ pub fn monomorphize(prog: &Program, externs: &[(&str, &Program)]) -> Program {
                         span: inst.for_ty.span,
                     };
                     mono.rewrite_impl(&mut inst, &isub);
-                    mono.out.push(Item {
-                        visibility: Visibility::Private,
-                        kind: ItemKind::Impl(inst),
-                        attributes: Vec::new(),
-                    });
+                    mono.push_rebased(ItemKind::Impl(inst));
                 }
             }
         }
@@ -285,6 +280,11 @@ pub fn monomorphize(prog: &Program, externs: &[(&str, &Program)]) -> Program {
 
     Program { items: mono.out }
 }
+
+/// Where the instances of a program start: far above any source position.
+const INSTANCE_BASE: usize = 1 << 40;
+/// The positions given to one instance (room for any instance's code).
+const INSTANCE_SPAN: usize = 1 << 24;
 
 /// Work waiting to be generated.
 enum Work {
@@ -412,9 +412,26 @@ struct Mono {
     seen: HashSet<String>,
     queue: Vec<Work>,
     out: Vec<Item>,
+    /// The first position of the next instance's copy (see `push_rebased`).
+    next_base: usize,
 }
 
 impl Mono {
+    /// Add an instance to the output, with source positions of its own: the checker keys
+    /// per-expression types by position, so two instances of one generic body must not share
+    /// any. The positions are moved after the instance is rewritten, while its calls can still
+    /// be found by their original positions.
+    fn push_rebased(&mut self, kind: ItemKind) {
+        let mut item = Item {
+            visibility: Visibility::Private,
+            kind,
+            attributes: Vec::new(),
+        };
+        crate::rebase::rebase_item(&mut item, self.next_base);
+        self.next_base += INSTANCE_SPAN;
+        self.out.push(item);
+    }
+
     /// The instance name of the function `callee` at `params`, requesting it if new.
     fn request_fn(&mut self, callee: &str, params: &[(String, Ty)]) -> Option<String> {
         let instance = instance_name(callee, params)?;

@@ -85,5 +85,11 @@ fn generic_struct_original_is_not_emitted() {
         })
         .collect();
     assert!(structs.contains(&"Pair__i64".to_string()), "{structs:?}");
-    assert!(!structs.contains(&"Pair".to_string()), "{structs:?}");
+    // The generic original stays for the checker, but the backend emits only the instance.
+    let stripped = tpt_moira_atropos::codegen_c::emit_c(
+        &tpt_moira_atropos::lower_program_typed(&mono, &Default::default())
+            .expect("instance program should lower"),
+    );
+    assert!(!stripped.contains("struct Pair {"), "generic original was emitted");
+    assert!(stripped.contains("struct Pair__i64"), "instance missing");
 }

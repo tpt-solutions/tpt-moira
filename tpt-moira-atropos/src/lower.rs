@@ -69,14 +69,44 @@ pub fn lower_program_typed(prog: &Program, hints: &TypeHints) -> Result<mir::Mir
     lower_program_with_enums(prog, hints, &[])
 }
 
+/// The program without its generic definitions: generic functions, structs and impl blocks
+/// (and methods with their own type parameters). The checker reads those; the backend emits
+/// only their instances, which monomorphization made into ordinary items.
+fn strip_generic_items(program: &Program) -> Program {
+    let mut items = Vec::new();
+    for item in &program.items {
+        match &item.kind {
+            ItemKind::Function(f) if !f.generics.params.is_empty() => continue,
+            ItemKind::Struct(s) if !s.generics.params.is_empty() => continue,
+            ItemKind::Impl(imp) if !imp.generics.params.is_empty() => continue,
+            ItemKind::Impl(imp) => {
+                let mut imp = imp.clone();
+                imp.items.retain(|m| match &m.kind {
+                    ItemKind::Function(f) => f.generics.params.is_empty(),
+                    _ => true,
+                });
+                items.push(ast::Item {
+                    kind: ItemKind::Impl(imp),
+                    ..item.clone()
+                });
+            }
+            _ => items.push(item.clone()),
+        }
+    }
+    Program { items }
+}
+
 /// Lower `prog`, which may match on the enums of `extra` programs (other crates of a
 /// bundle). Those enums' variants are registered, but their structs are not emitted:
 /// the program that defines them emits them.
 pub fn lower_program_with_enums(
-    prog: &Program,
+    program: &Program,
     hints: &TypeHints,
     extra: &[&Program],
 ) -> Result<mir::MirProgram> {
+    // Generic definitions are not code: their instances are (see `strip_generic_items`).
+    let stripped = strip_generic_items(program);
+    let prog = &stripped;
     let shared = std::sync::Arc::new(hints.clone());
     // The enum items of `prog`, then those of `extra`.
     let mut enum_items: Vec<&ast::Item> = prog.items.iter().collect();
