@@ -50,6 +50,13 @@ pub fn tokenize_source(src: &str) -> Vec<token::Token> {
 /// what lets the compiler parse its own crate layout (a prerequisite for
 /// self-hosting). `compile_source` remains for path-less snippets (stdin).
 pub fn compile_file(path: &Path) -> Result<ast::Program, error::Diag> {
+    compile_file_in(path, &mut 0)
+}
+
+/// Like [`compile_file`], but span offsets are drawn from `next_base`. A driver that
+/// loads several programs (the root crate and its extern crates) passes one counter
+/// through all of them, so no two files in the run share a span offset.
+pub fn compile_file_in(path: &Path, next_base: &mut usize) -> Result<ast::Program, error::Diag> {
     let src = std::fs::read_to_string(path).map_err(|e| {
         error::Diag::error(format!("cannot read `{}`: {}", path.display(), e), None)
     })?;
@@ -57,8 +64,18 @@ pub fn compile_file(path: &Path) -> Result<ast::Program, error::Diag> {
         .parent()
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| PathBuf::from("."));
-    let prog = pipeline::compile(&src).map_err(|d| in_file(d, path))?;
-    flatten_modules(prog, &base)
+    let prog = pipeline::compile_at(&src, reserve_span_range(next_base, src.len()))
+        .map_err(|d| in_file(d, path))?;
+    flatten_modules(prog, &base, next_base)
+}
+
+/// Reserve the offsets `[*next, *next + len]` for one file and return the base.
+/// Each file compiled for a program reserves a disjoint range, so spans are unique
+/// across all files of the flattened program.
+fn reserve_span_range(next: &mut usize, len: usize) -> usize {
+    let base = *next;
+    *next += len + 1;
+    base
 }
 
 /// Name the file a diagnostic came from: front-end errors carry only byte offsets,
@@ -70,12 +87,20 @@ fn in_file(mut d: error::Diag, path: &Path) -> error::Diag {
 
 /// Recursively inline module items into a flat item list, loading the source
 /// of `mod name;` declarations relative to `base`.
-fn flatten_modules(prog: ast::Program, base: &Path) -> Result<ast::Program, error::Diag> {
-    let items = flatten_items(prog.items, base)?;
+fn flatten_modules(
+    prog: ast::Program,
+    base: &Path,
+    next_base: &mut usize,
+) -> Result<ast::Program, error::Diag> {
+    let items = flatten_items(prog.items, base, next_base)?;
     Ok(ast::Program { items })
 }
 
-fn flatten_items(items: Vec<ast::Item>, base: &Path) -> Result<Vec<ast::Item>, error::Diag> {
+fn flatten_items(
+    items: Vec<ast::Item>,
+    base: &Path,
+    next_base: &mut usize,
+) -> Result<Vec<ast::Item>, error::Diag> {
     let mut out = Vec::with_capacity(items.len());
     for item in items {
         match item.kind {
@@ -90,7 +115,7 @@ fn flatten_items(items: Vec<ast::Item>, base: &Path) -> Result<Vec<ast::Item>, e
                     Vec::new()
                 };
                 let sub = match &m.kind {
-                    ast::ModuleKind::Inline(sub) => flatten_items(sub.clone(), base)?,
+                    ast::ModuleKind::Inline(sub) => flatten_items(sub.clone(), base, next_base)?,
                     ast::ModuleKind::External => {
                         let candidate = base.join(format!("{}.rs", m.name.node));
                         let (sub_path, sub_base) =
@@ -120,8 +145,9 @@ fn flatten_items(items: Vec<ast::Item>, base: &Path) -> Result<Vec<ast::Item>, e
                             )
                         })?;
                         let sub_prog =
-                            pipeline::compile(&sub_src).map_err(|d| in_file(d, &sub_path))?;
-                        flatten_items(sub_prog.items, &sub_base)?
+                            pipeline::compile_at(&sub_src, reserve_span_range(next_base, sub_src.len()))
+                                .map_err(|d| in_file(d, &sub_path))?;
+                        flatten_items(sub_prog.items, &sub_base, next_base)?
                     }
                 };
                 for mut child in sub {

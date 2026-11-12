@@ -73,6 +73,9 @@ fn main() -> ExitCode {
         }
     }
 
+    // One span-offset counter for the root file and every extern crate (see
+    // `compile_file_in`): spans stay unique across the whole run.
+    let mut span_base = 0usize;
     let (source, program) = if let Some(path) = positional.first() {
         let src = match std::fs::read_to_string(path) {
             Ok(s) => s,
@@ -81,7 +84,7 @@ fn main() -> ExitCode {
                 return ExitCode::FAILURE;
             }
         };
-        let prog = match tpt_moira_clotho::compile_file(std::path::Path::new(path)) {
+        let prog = match tpt_moira_clotho::compile_file_in(std::path::Path::new(path), &mut span_base) {
             Ok(p) => p,
             Err(diag) => {
                 eprintln!("moira: parse error: {}", diag);
@@ -125,7 +128,7 @@ fn main() -> ExitCode {
     for pair in &extern_pairs {
         let name = &pair.0;
         let path = &pair.1;
-        let compiled = tpt_moira_clotho::compile_file(std::path::Path::new(path));
+        let compiled = tpt_moira_clotho::compile_file_in(std::path::Path::new(path), &mut span_base);
         match compiled {
             Ok(p) => {
                 extern_programs.push((name.clone(), p));

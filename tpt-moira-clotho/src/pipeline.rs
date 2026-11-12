@@ -27,7 +27,21 @@ use std::io::Read;
 /// restricted `macro` keyword and `macro_rules!` definitions are extracted; the
 /// latter are expanded from the token stream *before* parsing.
 pub fn compile(source: &str) -> ParseResult<Program> {
-    let tokens = lexer::tokenize(source);
+    compile_at(source, 0)
+}
+
+/// Like [`compile`], but every token span is shifted by `base`. Each source file of
+/// a crate gets its own base, so spans are unique across the flattened program.
+/// Passes that key information by span (the checker's expression types) would
+/// otherwise confuse two files' expressions at the same byte offset.
+pub fn compile_at(source: &str, base: usize) -> ParseResult<Program> {
+    let mut tokens = lexer::tokenize(source);
+    if base != 0 {
+        for t in &mut tokens {
+            t.span.start += base;
+            t.span.end += base;
+        }
+    }
     let (table, rest) = extract_macros(&tokens)?;
     let (mr_table, rest2) = extract_macro_rules(&rest)?;
     let expanded_tokens = expand_macro_rules_calls(&rest2, &mr_table);
