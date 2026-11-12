@@ -1819,7 +1819,11 @@ impl Lower {
             // A parameter names one value, typed by the hint when there is one; a tuple
             // pattern (`|(i, x)|`) binds several untyped names.
             let names_of_p: Vec<String> = closure_param_names(&p.pat)?;
+            // An annotated parameter (`|t: &Type|`) has its declared C type; the hint
+            // from the use site does not keep the reference.
+            let annotated = !matches!(p.ty.kind, ast::TypeKind::Infer);
             let ty = match (names_of_p.len(), param_tys.get(k)) {
+                (1, _) if annotated => type_to_c(&p.ty, &self.aliases),
                 (1, Some(t)) => t.clone(),
                 _ => "long long".to_string(),
             };
@@ -2156,6 +2160,8 @@ impl Lower {
                             h == "str"
                                 || is_scalar_pointer_hint(h)
                                 || self.struct_names.contains(h)
+                                // A block, `if` or `match` yielding an enum value.
+                                || self.variants.values().any(|(e, _, _)| e == h)
                                 || ["Option<", "Result<", "Vec<", "Map<", "Sorted<", "Set<", "SortedSet<"]
                                     .iter()
                                     .any(|p| h.starts_with(p))
@@ -2421,7 +2427,12 @@ impl Lower {
         } else {
             let mut fields = vec![("tag".to_string(), mir::Operand::Const(err_tag))];
             if ret_base == "Result" {
-                let e = self.fresh_temp("long long");
+                // The error payload has the operand's error type (`Result<T, E>`'s `E`).
+                let err_ty = match mir::split_generic(&op_ty) {
+                    Some((b, a)) if b == "Result" && a.len() == 2 => a[1].to_string(),
+                    _ => "long long".to_string(),
+                };
+                let e = self.fresh_temp(err_ty);
                 self.emit(
                     e.clone(),
                     mir::Rvalue::Field(mir::Operand::var(name.clone()), "e0".into(), false),
@@ -3781,6 +3792,33 @@ impl Lower {
             mir::Operand::Var(n) => self.temp_type_of(n),
             _ => return v,
         };
+        // A vector (or a reference to one) passed where a slice is expected: the slice
+        // is the vector's `data` and `len`.
+        if let Some(elem) = mir::slice_elem(pt) {
+            let base = at.trim_end_matches('*');
+            if mir::vec_elem(base) == Some(elem) {
+                let deref = at.ends_with('*');
+                let data = self.fresh_temp(format!("{elem}*"));
+                self.emit(
+                    data.clone(),
+                    mir::Rvalue::Field(v.clone(), "data".into(), deref),
+                );
+                let len = self.fresh_temp("long long");
+                self.emit(len.clone(), mir::Rvalue::Field(v, "len".into(), deref));
+                let s = self.fresh_temp(pt);
+                self.emit(
+                    s.clone(),
+                    mir::Rvalue::StructLit(
+                        mir::slice_c_name(elem),
+                        vec![
+                            ("data".to_string(), mir::Operand::var(data)),
+                            ("len".to_string(), mir::Operand::var(len)),
+                        ],
+                    ),
+                );
+                return mir::Operand::var(s);
+            }
+        }
         if pt.ends_with('*')
             && !at.ends_with('*')
             && at != "long long"
@@ -5390,8 +5428,17 @@ impl Lower {
             op
         };
         let mut ops = vec![self_arg];
-        for a in args {
-            ops.push(self.lower_expr(a)?);
+        // The declared parameter types follow the receiver (the method's `self` is its
+        // first parameter), so an argument can be adapted to them (a vector to a slice).
+        let param_tys = self.fn_param_tys.get(&cname).cloned();
+        for (i, a) in args.iter().enumerate() {
+            let v = self.lower_expr(a)?;
+            let pt = param_tys.as_ref().and_then(|p| p.get(i + 1)).cloned();
+            let v = match pt {
+                Some(pt) => self.adapt_arg(v, &pt),
+                None => v,
+            };
+            ops.push(v);
         }
         // A unit-returning function is called as a statement (codegen knows it is void).
         if ret == "void" {

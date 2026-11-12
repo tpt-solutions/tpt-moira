@@ -180,6 +180,13 @@ pub fn emit_c(prog: &mir::MirProgram) -> String {
             collect_vec_elems(t, &mut vec_elems, &mut slice_elems);
         }
     }
+    // Maps are referenced by pointer from vectors and slices, so each map name is declared
+    // before any of them; its definition follows.
+    for (k, v) in &map_types {
+        let name = mir::map_c_name(k, v);
+        out.push_str(&format!("typedef struct {name} {name};
+"));
+    }
     // Inner element types first: a nested vector's typedef needs its element's.
     let mut ordered: Vec<&String> = vec_elems.iter().collect();
     ordered.sort_by_key(|e| e.matches("Vec<").count());

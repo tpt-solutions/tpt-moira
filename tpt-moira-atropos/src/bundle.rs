@@ -126,7 +126,7 @@ fn rename_type_str(ty: &str, f: &dyn Fn(&str) -> String) -> String {
 
 fn rename_operand(op: &mut Operand, f: &dyn Fn(&str) -> String) {
     if let Operand::Func(n) = op {
-        *n = f(n);
+        *n = rename_ident(n, f);
     }
 }
 
@@ -193,7 +193,7 @@ fn rename_program(p: &mut mir::MirProgram, f: &dyn Fn(&str) -> String) {
         }
     }
     for func in &mut p.functions {
-        func.name = f(&func.name);
+        func.name = rename_ident(&func.name, f);
         if let Some(r) = &mut func.ret {
             *r = rename_type_str(r, f);
         }
