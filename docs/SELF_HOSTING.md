@@ -21,39 +21,42 @@ Windows; use the `python` launcher) and read `build/self_host_report.md`. The
 probe reports, per crate: parse/check acceptance and C-backend codegen
 acceptance.
 
-**Latest probe (2026-11-13): 0 of 5 self-hostable under the strict gate.** The probe
-now also compiles each emitted C file with the system C compiler. Before this, the
-gate only checked that C was emitted, which is why an earlier "2/5" was wrong: `moira-alloc` emitted C that does not compile.
+**Latest probe: 1 of 5 self-hostable under the strict gate** (`moira-alloc`: it
+parses, checks, and its emitted C compiles). The probe compiles each emitted C file,
+so this is the real gate. Its tests are not run through Moira yet.
 
-Type/borrow errors per crate: `clotho` 141, `atropos` 274, `lachesis` 139.
-Emitted-C failures are the next blocker:
+Check errors: `clotho` 113, `atropos` 182, `lachesis` 128. The driver checks cleanly
+but its C needs types from other crates. Blockers, in the order they block:
 
-- Generic structs are not monomorphized (`Arena<T>` emits a field of type `T`).
-  `RefCell<T>` has no C model.
-- Types from other crates (`Expr`, `Ty`, `Diag`, `Program`) are not emitted into
-  a per-crate C file. `--bundle` emits them, but bundling needs every crate to lower.
-- `lachesis` lowering: `Allowlist::save` iterates a `BTreeSet` of tuples, and the file
-  writes (`File::create`, `write_all`) and `format!` are not in the codegen subset.
+- **Cross-crate types in per-crate C.** `Diag`, `Expr`, `Ty` and `Program` are used
+  but not emitted into a per-crate file. `--bundle` emits them, but bundling needs
+  every crate to lower.
+- **Closures with aggregate results.** A closure is lowered as a `long long` function
+  pointer, so passing `|s| vec![..]` to a generic method (clotho's `parse_delimited`)
+  does not type in C.
+- **A variant named like a type** (`Frag::Ty` in clotho's `macrorules`) can be typed
+  as the type `Ty` once the other crates are loaded.
+- **Lachesis `Allowlist::save`**: iterating a `BTreeSet` of tuples, file writes, and
+  `format!`.
+- **Checker errors** in all three crates (the counts above).
 
-What this pass added (all with runtime tests in `tpt-moira-lachesis/tests/typed_runtime.rs`,
-which compile and run the C):
+What has been added to the pipeline, with tests in `tpt-moira-lachesis/tests/`:
 
-- Atropos: `Option::map` lowers as a tag branch; `seq.get(i)` yields `Option<&T>`, a
-  pointer into the data; `&p.field` through a pointer is a field address (`&p->f`),
-  so references to elements point into the sequence rather than at a copy.
-  Option tags: `Some` is 0 and `None` is 1 (declaration order).
-- Atropos: `for line in s.lines()` and `std::fs::read_to_string` (a `Result`).
-- Lachesis checker: `Vec::drain`, `str::lines`, `seq.get`, `Option::map`,
-  `zip`/`flat_map`/`filter_map`/`chain`/`fold` and friends; comparisons compare
-  referents; `Self::f` in calls; a function used as a value; closure parameters bind
-  under unknown receivers.
-- Structs with the same bare name in two crates (`clotho::ast::Function` and
-  `atropos::mir::Function`) merge field by field. The checked crate's own declaration
-  wins a conflict; an extern-only conflict becomes `Unknown`. This is a stopgap: the
-  real fix is crate-qualified struct identities.
-- Clotho: `b'x'` lexes as a `u8`; each file of a program gets a disjoint span
-  range (spans were keyed by offset, and two files collided).
-- `x.py`: report table fixed (missing Check column); emitted C is compiled.
+- Crate-qualified names for same-named types and functions across crates
+  (`tpt-moira-clotho/src/resolve.rs`).
+- Monomorphization (`tpt-moira-lachesis/src/mono.rs`): generic functions, generic
+  structs with their impl blocks, and methods with their own type parameters, each
+  specialized per instantiation before checking. Derived impls of generic structs are
+  generic impls.
+- Inference: a `let` annotation seeds a generic call or struct literal; applied types
+  unify argument by argument; `impl Fn(..) -> R` keeps its signature, so a generic
+  parameter is solved from a closure's result; method return types get their solved
+  parameters.
+- Atropos: `Option::map`, `seq.get(i)` as a pointer payload, `&p.field` as a field
+  address, `lines()`, and `read_to_string`.
+
+Known limits: generic methods of generic structs; expected-type propagation beyond
+`let` annotations; closures whose results are aggregates.
 
 **Probe health (2026-08-22):** the self-host probe was previously *dead* — commit
 `4a55ae5` renamed the workspace crates to `tpt-moira-*` but left the driver
