@@ -1505,7 +1505,7 @@ impl TypeChecker {
         else_b: Option<&Expr>,
         span: Span,
     ) -> Ty {
-        if !matches!(local.pat, Pat::Ident(_) | Pat::Variant(..)) {
+        if !matches!(local.pat, Pat::Ident(_) | Pat::Variant(..) | Pat::Tuple(_)) {
             self.err(
                 span,
                 "`if let`/`while let` with unsupported pattern (enum destructuring needs `match`)",
@@ -1543,7 +1543,7 @@ impl TypeChecker {
     /// Type-check `while let pat = init { body }`. See [`Self::infer_if_let`] for
     /// the pattern-support notes.
     fn infer_while_let(&mut self, local: &Local, body: &Block, span: Span) -> Ty {
-        if !matches!(local.pat, Pat::Ident(_) | Pat::Variant(..)) {
+        if !matches!(local.pat, Pat::Ident(_) | Pat::Variant(..) | Pat::Tuple(_)) {
             self.err(
                 span,
                 "`if let`/`while let` with unsupported pattern (enum destructuring needs `match`)",
@@ -2835,7 +2835,7 @@ impl TypeChecker {
             }
             None => None,
         };
-        let sig = match sig {
+        let sig: FnSig = match sig {
             Some(s) => s,
             None => {
                 // 3) Trait-bound method resolution through the Chalk-like

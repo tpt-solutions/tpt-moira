@@ -2036,6 +2036,11 @@ impl Lower {
                         return self.lower_rebinding_let(&n.node, local);
                     }
                 }
+                // `let Some(x) = e;` (a refutable pattern, the `else` branch dropped by the
+                // parser): the payload is read out of the value and bound to its names.
+                if matches!(local.pat, ast::Pat::Variant(..) | ast::Pat::Struct(..)) {
+                    return self.lower_refutable_let(local);
+                }
                 let name = pat_name(&local.pat)?;
                 // An array-literal initializer binds the local as an array
                 // declaration directly. C cannot assign arrays by value, so we
@@ -4495,6 +4500,31 @@ impl Lower {
         self.set_term(mir::Terminator::Goto(head));
         self.current = exit;
         Ok(out)
+    }
+
+    /// `let P = init;` for a refutable pattern `P` (`Some(x)`, `E::V { .. }`): each name the
+    /// pattern binds is read out of the value. The pattern is assumed to match, as an
+    /// irrefutable `let` requires.
+    fn lower_refutable_let(&mut self, local: &ast::Local) -> Result<()> {
+        let Some(init) = &local.init else {
+            return Err(LowerError("a refutable `let` needs an initializer".into()));
+        };
+        let value = self.lower_expr(init)?;
+        let (_, binds) = self.pattern_guard(&value, &local.pat)?;
+        for (name, val) in binds {
+            let ty = match &val {
+                mir::Operand::Var(n) => self.temp_type_of(n),
+                _ => "long long".to_string(),
+            };
+            if !self.func.locals.iter().any(|(n, _)| n == &name) {
+                self.func.locals.push((name.clone(), Some(ty.clone())));
+            }
+            if ty != "long long" {
+                self.types.insert(name.clone(), ty);
+            }
+            self.emit(name, mir::Rvalue::Use(val));
+        }
+        Ok(())
     }
 
     /// `seq.get(i)` on a vector or slice: `Some(&seq[i])` while `i < len`, else `None`.

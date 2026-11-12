@@ -55,16 +55,26 @@ pub fn monomorphize(prog: &Program, externs: &[(&str, &Program)]) -> Program {
     }
     // Generic structs of the extern crates are instantiated here too, as copies of their
     // definitions: a crate that uses another crate's generic struct needs its instances.
-    for (_, ext) in externs {
+    // Each extern crate's copies get source positions of their own (see ).
+    for (k, (_, ext)) in externs.iter().enumerate() {
+        let base = (k + 1) << 32;
         for item in &ext.items {
             match &item.kind {
                 ItemKind::Struct(s) if !s.generics.params.is_empty() => {
-                    generic_structs
-                        .entry(s.name.node.clone())
-                        .or_insert_with(|| s.clone());
+                    let mut copy = item.clone();
+                    crate::rebase::rebase_item(&mut copy, base);
+                    if let ItemKind::Struct(s2) = &copy.kind {
+                        generic_structs
+                            .entry(s.name.node.clone())
+                            .or_insert_with(|| s2.clone());
+                    }
                 }
                 ItemKind::Impl(imp) if is_generic_impl(imp, &ext.items) => {
-                    generic_impls.push(imp.clone());
+                    let mut copy = item.clone();
+                    crate::rebase::rebase_item(&mut copy, base);
+                    if let ItemKind::Impl(imp2) = copy.kind {
+                        generic_impls.push(imp2);
+                    }
                 }
                 _ => {}
             }
@@ -212,12 +222,16 @@ pub fn monomorphize(prog: &Program, externs: &[(&str, &Program)]) -> Program {
                 name,
                 args,
             } => {
-                let Some(generic) = mono.generic_structs.get(&name).cloned() else {
+                let generic_opt: Option<StructDef> = mono.generic_structs.get(&name).cloned();
+                let Some(generic) = generic_opt else {
                     continue;
                 };
+                let args: Vec<Ty> = args;
                 let mut sub: HashMap<String, Ty> = HashMap::new();
-                for (p, a) in generic.generics.params.iter().zip(args.iter()) {
-                    sub.insert(p.name.node.clone(), a.clone());
+                let mut k: usize = 0;
+                while k < generic.generics.params.len() && k < args.len() {
+                    sub.insert(generic.generics.params[k].name.node.clone(), args[k].clone());
+                    k += 1;
                 }
                 let mut s = generic;
                 s.name.node = instance.clone();

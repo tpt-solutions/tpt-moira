@@ -20,6 +20,7 @@ pub mod cache;
 pub mod diff;
 pub mod infer;
 pub mod mono;
+pub mod rebase;
 pub mod pipeline_cache;
 pub mod propose;
 pub mod solver;
