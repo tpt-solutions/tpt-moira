@@ -4,6 +4,13 @@ Thanks for your interest in improving Moira! This guide covers how to build,
 test, and extend the compiler. For the high-level design and roadmap, read
 [`spec.txt`](spec.txt) and [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
+## How to contribute
+
+Contributions are accepted as issues only. Please open an issue to report a
+bug, propose a feature, or discuss a change. Pull requests are not accepted,
+so please don't open one; the maintainers will implement any accepted change
+themselves.
+
 ## Code of conduct
 
 Be respectful and constructive. This is a TPT Solutions project; keep
@@ -117,12 +124,9 @@ checker in sequence.
 
 ## Working on a task
 
-1. Pick an item from [`TODO.md`](TODO.md). The checkboxes mark what is done;
-   status notes record measured results and known limitations.
-2. Implement the change and its tests.
-3. Run `cargo test --workspace`.
-4. Update the relevant `TODO.md` line: check the box when complete, or add a
-   status note describing partial progress / open measurement.
+The maintainers work from [`TODO.md`](TODO.md). The checkboxes mark what is
+done; status notes record measured results and known limitations. To suggest
+or ask about a `TODO.md` item, open an issue referencing it.
 
 ## Adding a language feature: the `&mut` thread as a worked example
 
@@ -142,6 +146,6 @@ source through to the borrow checker.
 
 ## License
 
-By contributing, you agree that your contributions are dual-licensed under
-MIT (`LICENSE-MIT`) and Apache-2.0 (`LICENSE-APACHE-2.0`), copyright TPT
-Solutions (2026).
+Moira is dual-licensed under MIT (`LICENSE-MIT`) and Apache-2.0
+(`LICENSE-APACHE-2.0`), copyright TPT Solutions (2026). By opening an issue, you
+agree that any text or code you include in it may be used under those licenses.
