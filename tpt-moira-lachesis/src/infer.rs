@@ -1237,7 +1237,13 @@ impl TypeChecker {
                         }
                     }
                     None => {
-                        let inner_ty = Self::variant_payload_ty(scrut_ty, &vname);
+                        // Behind a reference, the payload of `Option<T>` is `&T` (or `&mut T`).
+                        let payload = Self::variant_payload_ty(&st, &vname);
+                        let inner_ty = if matches!(payload, Ty::Unknown) {
+                            payload
+                        } else {
+                            wrap(payload)
+                        };
                         for p in args {
                             self.bind_pattern(p, &inner_ty);
                         }
@@ -1510,6 +1516,8 @@ impl TypeChecker {
                 let t = self.infer_expr(e2);
                 match &t {
                     Ty::Ref(inner) | Ty::RefMut(inner) => (**inner).clone(),
+                    // `Box<T>` is modelled as `T`, so dereferencing a struct value is the value.
+                    Ty::Struct(_) | Ty::Apply(..) => t.clone(),
                     _ => {
                         self.err(span, "cannot dereference a non-reference".to_string());
                         Ty::Unknown
@@ -1992,6 +2000,8 @@ impl TypeChecker {
                     // Deref through `Unknown` (an earlier error already
                     // fired) is absorbed silently.
                     Ty::Unknown => Ty::Unknown,
+                    // `Box<T>` is modelled as `T`: dereferencing a struct value is the value.
+                    Ty::Struct(_) | Ty::Apply(..) => t.clone(),
                     _ => {
                         self.err(span, "cannot dereference a non-reference".to_string());
                         Ty::Unknown
@@ -2362,21 +2372,21 @@ impl TypeChecker {
             .collect();
         let segments = resolved.as_slice();
         match segments.len() {
-            1 => self.fns.get(&segments[0]).cloned().or_else(|| {
-                // A local bound to a closure (`let f = |x| ...; f(2)`) is
-                // callable with the closure's own signature.
-                let ty = self.lookup(&segments[0])?;
-                if let Ty::Fn(params, ret) = ty {
-                    Some(FnSig {
+            1 => {
+                // A local bound to a closure (`let f = |x| ...; f(2)`) is callable with
+                // the closure's own signature. A local shadows a free function of the
+                // same name, so locals are looked up first.
+                let local = match self.lookup(&segments[0]) {
+                    Some(Ty::Fn(params, ret)) => Some(FnSig {
                         params,
                         ret: (*ret).clone(),
                         is_async: false,
                         generics: Generics::default(),
-                    })
-                } else {
-                    None
-                }
-            }),
+                    }),
+                    _ => None,
+                };
+                local.or_else(|| self.fns.get(&segments[0]).cloned())
+            }
             2 => self
                 .assoc_fns
                 .get(&(segments[0].clone(), segments[1].clone()))

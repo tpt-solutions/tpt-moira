@@ -8304,6 +8304,8 @@ impl Lower {
                 mir::Operand::Var(n) => self.temp_type_of(n),
                 _ => String::new(),
             };
+            // A scrutinee behind a reference (`match &mut opt`) has the pointer type.
+            let st = st.trim_end_matches('*').to_string();
             if let Some((base, args)) = mir::split_generic(&st) {
                 if base == ename {
                     let k = if ename == "Result" && tag == 1 { 1 } else { 0 };

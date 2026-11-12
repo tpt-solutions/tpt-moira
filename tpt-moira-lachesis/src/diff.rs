@@ -11,7 +11,7 @@
 //! the divergences seen in a run.
 
 use std::collections::BTreeSet;
-use std::io::{BufRead, Write};
+use std::io::Write;
 use std::path::Path;
 
 /// A class of disagreement between Moira and `rustc` on the same input.
