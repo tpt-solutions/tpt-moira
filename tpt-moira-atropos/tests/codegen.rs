@@ -294,9 +294,18 @@ fn println_macro_expands_to_print_calls() {
          }",
     );
     let c = tpt_moira_atropos::codegen_c::emit_c(&mir);
-    assert!(c.contains("__moira_w_str(\"hello\")"), "literal segment:\n{c}");
-    assert!(c.contains("__moira_w_i64(n)"), "placeholder arg printed:\n{c}");
-    assert!(c.contains("__moira_w_str(\"\\n\")"), "trailing newline:\n{c}");
+    assert!(
+        c.contains("__moira_w_str(\"hello\")"),
+        "literal segment:\n{c}"
+    );
+    assert!(
+        c.contains("__moira_w_i64(n)"),
+        "placeholder arg printed:\n{c}"
+    );
+    assert!(
+        c.contains("__moira_w_str(\"\\n\")"),
+        "trailing newline:\n{c}"
+    );
 }
 
 #[test]

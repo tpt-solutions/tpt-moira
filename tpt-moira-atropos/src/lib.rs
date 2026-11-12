@@ -16,6 +16,8 @@ pub mod mir;
 pub mod ssa;
 
 pub use bundle::lower_bundle;
-pub use lower::{lower_program, lower_program_typed, lower_program_with_enums, LowerError, TypeHints};
+pub use lower::{
+    lower_program, lower_program_typed, lower_program_with_enums, LowerError, TypeHints,
+};
 pub use mir::MirProgram;
 pub use ssa::{build_ssa, SsaProgram};

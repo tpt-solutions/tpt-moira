@@ -2042,7 +2042,8 @@ impl Parser {
                         // trailing-comma form `(a,)` we must consume it here.
                         let mut elems = vec![first];
                         if !self.check(&TokenKind::RParen) {
-                            let more = self.parse_delimited(TokenKind::RParen, |s| s.parse_expr())?;
+                            let more =
+                                self.parse_delimited(TokenKind::RParen, |s| s.parse_expr())?;
                             elems.extend(more);
                         } else {
                             self.expect(TokenKind::RParen)?;
@@ -2094,7 +2095,7 @@ impl Parser {
                     let mut elems = vec![first];
                     if self.eat(&TokenKind::Comma) {
                         let more = self.parse_delimited(TokenKind::RBracket, |s| s.parse_expr())?;
-                            elems.extend(more);
+                        elems.extend(more);
                     } else {
                         self.expect(TokenKind::RBracket)?;
                     }
