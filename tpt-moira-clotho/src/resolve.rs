@@ -167,6 +167,10 @@ impl Resolver {
             .copied()
             .filter(|&g| self.scopes[g].defines.contains(name))
             .collect();
+        // Two imports of one crate are one candidate.
+        let mut globbed = globbed;
+        globbed.sort();
+        globbed.dedup();
         if globbed.len() == 1 {
             return Some(globbed[0]);
         }

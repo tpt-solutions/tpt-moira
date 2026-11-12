@@ -1384,9 +1384,11 @@ fn ast_to_ty(t: &Type) -> Option<Ty> {
                     other => Ty::Struct(other.to_string()),
                 }
             } else {
-                let mut converted = Vec::new();
-                for a in args {
-                    converted.push(ast_to_ty(a)?);
+                let mut converted: Vec<Ty> = Vec::new();
+                let mut k: usize = 0;
+                while k < args.len() {
+                    converted.push(ast_to_ty(&args[k])?);
+                    k += 1;
                 }
                 Ty::Apply(name.to_string(), converted)
             }
@@ -1397,9 +1399,11 @@ fn ast_to_ty(t: &Type) -> Option<Ty> {
         // A function type is the path `fn` whose arguments are its parameters and result.
         TypeKind::Path(p, args) if p.segments.len() == 1 && p.segments[0].node == "fn" && !args.is_empty() => {
             let (ret, params) = args.split_last()?;
-            let mut ps = Vec::new();
-            for a in params {
-                ps.push(ast_to_ty(a)?);
+            let mut ps: Vec<Ty> = Vec::new();
+            let mut k: usize = 0;
+            while k < params.len() {
+                ps.push(ast_to_ty(&params[k])?);
+                k += 1;
             }
             Ty::Fn(ps, Box::new(ast_to_ty(ret)?))
         }

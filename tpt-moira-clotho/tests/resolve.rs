@@ -90,3 +90,67 @@ fn glob_imported_extern_type_is_rewritten_in_the_root() {
         vec!["lib_Function"]
     );
 }
+
+#[test]
+fn glob_of_a_module_path_renames_a_reference_parameter_type() {
+    // `use tpt_moira_lib::ast::*;` then `f: &mut Function`, the shape the compiler's own
+    // sources use.
+    let root_src = "use tpt_moira_lib::ast::*;\n\
+                    pub fn touch(f: &mut Function) -> i64 { 0 }\n";
+    let lib_src = "pub struct Function { pub name: String }\n";
+    let other_src = "pub struct Function { pub n: i64 }\n";
+    let mut crates = vec![
+        krate("", true, root_src),
+        krate("lib", false, lib_src),
+        krate("other", false, other_src),
+    ];
+    disambiguate(&mut crates);
+    let f = crates[0]
+        .program
+        .items
+        .iter()
+        .find_map(|i| match &i.kind {
+            ItemKind::Function(f) if f.name.node == "touch" => Some(f),
+            _ => None,
+        })
+        .expect("the function");
+    let TypeKind::RefMut(inner) = &f.params[0].ty.kind else {
+        panic!("expected a &mut parameter");
+    };
+    let TypeKind::Path(p, _) = &inner.kind else {
+        panic!("expected a path type");
+    };
+    assert_eq!(p.segments[0].node, "lib_Function");
+}
+
+#[test]
+fn two_glob_imports_of_one_crate_still_resolve_the_name() {
+    // Two modules of one crate each glob-import the same extern module.
+    let root_src = "use tpt_moira_lib::ast::*;\n\
+                    use tpt_moira_lib::ast::*;\n\
+                    pub fn touch(f: &mut Function) -> i64 { 0 }\n";
+    let lib_src = "pub struct Function { pub name: String }\n";
+    let other_src = "pub struct Function { pub n: i64 }\n";
+    let mut crates = vec![
+        krate("", true, root_src),
+        krate("lib", false, lib_src),
+        krate("other", false, other_src),
+    ];
+    disambiguate(&mut crates);
+    let f = crates[0]
+        .program
+        .items
+        .iter()
+        .find_map(|i| match &i.kind {
+            ItemKind::Function(f) if f.name.node == "touch" => Some(f),
+            _ => None,
+        })
+        .expect("the function");
+    let TypeKind::RefMut(inner) = &f.params[0].ty.kind else {
+        panic!("expected a &mut parameter");
+    };
+    let TypeKind::Path(p, _) = &inner.kind else {
+        panic!("expected a path type");
+    };
+    assert_eq!(p.segments[0].node, "lib_Function");
+}

@@ -317,12 +317,17 @@ impl TriageQueue {
 
     /// Append `record` and persist it.
     pub fn push(&mut self, record: TriageRecord) -> std::io::Result<()> {
-        let mut f = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.path)?;
+        // The log is rewritten with the new line at its end (its records are read back
+        // whole, so the file is always complete).
+        let mut text = if self.path.exists() {
+            std::fs::read_to_string(&self.path)?
+        } else {
+            String::new()
+        };
         let line = triage_record_to_json(&record);
-        writeln!(f, "{line}")?;
+        text.push_str(&line);
+        text.push('\n');
+        std::fs::write(&self.path, text)?;
         self.records.push(record);
         Ok(())
     }

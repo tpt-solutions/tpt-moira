@@ -44,6 +44,7 @@ long long moira_char_to_ascii_uppercase(long long c) { return toupper((int)c); }
 char* moira_str_before(char* s, long long n) { return moira_str_dup_n(s, (size_t)n); }
 long long moira_line_next(char* s, long long i) { char* q = strchr(s + i, '\n'); return q ? (long long)(q - s) + 1 : (long long)strlen(s); }
 char* moira_line_text(char* s, long long i, long long next) { long long n = next - i; if (n > 0 && s[i + n - 1] == '\n') n--; if (n > 0 && s[i + n - 1] == '\r') n--; return moira_str_dup_n(s + i, (size_t)n); }
+long long moira_fs_write(char* path, char* data) { FILE* f = fopen(path, "wb"); if (!f) return 0; size_t n = strlen(data); size_t w = fwrite(data, 1, n, f); fclose(f); return w == n; }
 char* moira_fs_read_to_string(char* path) { FILE* f = fopen(path, "rb"); if (!f) return NULL; fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET); char* b = (char*)malloc((size_t)sz + 1); size_t r = fread(b, 1, (size_t)sz, f); b[r] = 0; fclose(f); return b; }
 long long moira_str_starts_with_char(char* s, long long c) { return s[0] != 0 && s[0] == (char)c; }
 long long moira_str_ends_with_char(char* s, long long c) { size_t n = strlen(s); return n > 0 && s[n - 1] == (char)c; }

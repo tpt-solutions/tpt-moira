@@ -6422,6 +6422,54 @@ impl Lower {
                     // `std::fs::read_to_string(path)`: a `Result<String, _>` built from the
                     // runtime's read (NULL when the file cannot be read).
                     let segs: Vec<&str> = p.segments.iter().map(|s| s.node.as_str()).collect();
+                    // `std::fs::write(path, data)`: a `Result<(), _>` from the runtime's write (0 on
+                    // failure).
+                    if args.len() == 2
+                        && segs.last() == Some(&"write")
+                        && (segs.len() == 1 || segs[segs.len() - 2] == "fs")
+                    {
+                        let path = self.lower_expr(&args[0])?;
+                        let data = self.lower_expr(&args[1])?;
+                        let ok = self.fresh_temp("long long");
+                        self.emit(
+                            ok.clone(),
+                            mir::Rvalue::Call(
+                                mir::Operand::Func("moira_fs_write".to_string()),
+                                vec![path, data],
+                            ),
+                        );
+                        let result = self.fresh_temp("Result<long long,long long>");
+                        let ok_blk = self.new_block();
+                        let err_blk = self.new_block();
+                        let join = self.new_block();
+                        self.set_term(mir::Terminator::If(mir::Operand::var(ok), ok_blk, err_blk));
+                        self.current = ok_blk;
+                        self.emit(
+                            result.clone(),
+                            mir::Rvalue::StructLit(
+                                "Result".to_string(),
+                                vec![
+                                    ("tag".to_string(), mir::Operand::Const(0)),
+                                    ("f0".to_string(), mir::Operand::Const(0)),
+                                ],
+                            ),
+                        );
+                        self.set_term(mir::Terminator::Goto(join));
+                        self.current = err_blk;
+                        self.emit(
+                            result.clone(),
+                            mir::Rvalue::StructLit(
+                                "Result".to_string(),
+                                vec![
+                                    ("tag".to_string(), mir::Operand::Const(1)),
+                                    (payload_field("Result", 1, 0), mir::Operand::Const(0)),
+                                ],
+                            ),
+                        );
+                        self.set_term(mir::Terminator::Goto(join));
+                        self.current = join;
+                        return Ok(mir::Operand::var(result));
+                    }
                     if args.len() == 1
                         && segs.last() == Some(&"read_to_string")
                         && (segs.len() == 1 || segs[segs.len() - 2] == "fs")

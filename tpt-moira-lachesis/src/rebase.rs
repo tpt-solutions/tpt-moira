@@ -39,9 +39,11 @@ impl Rebase {
                 self.spanned(&mut e.name);
                 for v in &mut e.variants {
                     self.spanned(&mut v.name);
-                    for f in v.fields.iter_mut().flatten() {
-                        self.spanned(&mut f.name);
-                        self.ty(&mut f.ty);
+                    if let Some(fields) = &mut v.fields {
+                        for f in fields.iter_mut() {
+                            self.spanned(&mut f.name);
+                            self.ty(&mut f.ty);
+                        }
                     }
                 }
             }
