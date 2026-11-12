@@ -617,6 +617,19 @@ fn c_type(ty: &str, struct_names: &std::collections::HashSet<&str>) -> String {
     if let Some(elem) = mir::slice_elem(ty) {
         return mir::slice_c_name(elem);
     }
+    // A function type `Fn<params..,result>` is a function pointer with that signature.
+    if let Some(("Fn", parts)) = mir::split_generic(ty) {
+        if let Some((ret, params)) = parts.split_last() {
+            let ret_c = c_type(ret, struct_names);
+            let params_c: Vec<String> = params.iter().map(|p| c_type(p, struct_names)).collect();
+            let list = if params_c.is_empty() {
+                "void".to_string()
+            } else {
+                params_c.join(", ")
+            };
+            return format!("{ret_c} (*)({list})");
+        }
+    }
     if let Some((base, args)) = mir::split_generic(ty) {
         match (base, args.len()) {
             ("Map" | "Sorted", 2) => return mir::map_c_name(args[0], args[1]),
@@ -676,12 +689,14 @@ fn c_type(ty: &str, struct_names: &std::collections::HashSet<&str>) -> String {
 /// rewrites the `(*)` to `(*name)` for such types and otherwise defers to
 /// [`c_type`].
 fn c_decl(ty: &str, name: &str, struct_names: &std::collections::HashSet<&str>) -> String {
-    if let Some(star) = ty.find("(*)") {
-        let (ret, rest) = ty.split_at(star);
+    // A function pointer's name sits inside its parentheses: `R (*name)(P)`.
+    let cty = c_type(ty, struct_names);
+    if let Some(star) = cty.find("(*)") {
+        let (ret, rest) = cty.split_at(star);
         let rest = rest.replacen("(*)", &format!("(*{})", name), 1);
         return format!("{}{}", ret.trim_end(), rest);
     }
-    format!("{} {}", c_type(ty, struct_names), name)
+    format!("{} {}", cty, name)
 }
 
 fn emit_rvalue(rv: &mir::Rvalue) -> String {

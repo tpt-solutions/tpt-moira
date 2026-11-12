@@ -241,6 +241,22 @@ fn hint_compound(ty: &Ty) -> Option<String> {
             let parts: Option<Vec<String>> = args.iter().map(hint_elem_name).collect();
             parts.map(|p| format!("Sorted<{}>", p.join(",")))
         }
+        // A function type is `Fn<params..,result>`: the C backend makes it a function
+        // pointer with that signature. A `()` result is a zero value (`long long`).
+        Ty::Fn(params, ret) => {
+            let mut parts = Vec::new();
+            for p in params {
+                parts.push(match p {
+                    Ty::Unit => "long long".to_string(),
+                    other => hint_elem_name(other)?,
+                });
+            }
+            parts.push(match &**ret {
+                Ty::Unit => "long long".to_string(),
+                other => hint_elem_name(other)?,
+            });
+            Some(format!("Fn<{}>", parts.join(",")))
+        }
         Ty::Apply(name, args) if name == "BTreeSet" && args.len() == 1 => {
             hint_elem_name(&args[0]).map(|k| format!("SortedSet<{k}>"))
         }

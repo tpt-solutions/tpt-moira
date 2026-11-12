@@ -954,6 +954,12 @@ fn type_to_c_expanded(ty: &ast::Type) -> String {
                 (Some("String"), 0) => "str".to_string(),
                 // A function-pointer type `fn(A, B) -> R`: its arguments are the parameters
                 // then the result, and every one is a `long long` (see `func_ptr_c_type`).
+                // A function type keeps its signature: `Fn<params..,result>`, which the C
+                // backend writes as a function pointer.
+                (Some("fn"), n) if n >= 1 => {
+                    let parts: Vec<String> = (0..n).map(|i| arg(i)).collect();
+                    format!("Fn<{}>", parts.join(","))
+                }
                 (Some("fn"), n) => func_ptr_c_type(n.saturating_sub(1)),
                 _ => last.unwrap_or_else(|| "long long".to_string()),
             }
@@ -2053,10 +2059,12 @@ impl Lower {
                             self.variant_c_type(init)
                         }
                         ExprKind::Closure { params, .. } => {
-                            // A closure value is a function pointer; type the local
-                            // with the uniform `long long (*)(long long, …)` so the C
-                            // declaration matches the lambda-lifted function.
-                            Some(func_ptr_c_type(params.len()))
+                            // A closure value is a function pointer with the signature the
+                            // checker gave it (`Fn<..>`), matching the lambda-lifted function.
+                            match self.hint_of_expr(init) {
+                                Some(h) if h.starts_with("Fn<") => Some(h),
+                                _ => Some(func_ptr_c_type(params.len())),
+                            }
                         }
                         ExprKind::Tuple(elems) => {
                             // Infer the generated struct type for the tuple shape
@@ -7197,7 +7205,18 @@ impl Lower {
             }
             // `unsafe` only gates what the block may do; codegen treats it as a plain block.
             ExprKind::Unsafe(b) => self.lower_block_value(b),
-            ExprKind::Closure { params, body, .. } => self.lower_closure(params, body),
+            ExprKind::Closure { params, body, .. } => {
+                // The lifted function takes the parameter types the closure was given.
+                if let Some(h) = self.hint_of_expr(e) {
+                    if let Some(("Fn", tys)) = mir::split_generic(&h) {
+                        if tys.len() == params.len() + 1 {
+                            self.closure_param_hint =
+                                Some(tys[..params.len()].iter().map(|t| t.to_string()).collect());
+                        }
+                    }
+                }
+                self.lower_closure(params, body)
+            }
             ExprKind::Cast(e, ty) => {
                 let operand = self.lower_expr(e)?;
                 let cty = type_to_c(ty, &self.aliases);
