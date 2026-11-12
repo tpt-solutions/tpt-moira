@@ -107,6 +107,9 @@ pub enum Rvalue {
     /// Field projection `operand.field`. When `deref` is true the operand is a
     /// pointer and the access is `operand->field` (used for the future `self`).
     Field(Operand, String, bool),
+    /// Address of a field `&operand.field` (`&operand->field` when `deref` is true).
+    /// Unlike `Ref` of a copied field, it points into the struct itself.
+    FieldAddr(Operand, String, bool),
     /// Address-of `&operand` (`true` for `&mut`).
     Ref(Operand, bool),
     /// Write `value` into `struct_operand.field`. When `deref` is true the
@@ -302,6 +305,13 @@ impl fmt::Display for Rvalue {
                     write!(f, "{}->{}", o, field)
                 } else {
                     write!(f, "{}.{}", o, field)
+                }
+            }
+            Rvalue::FieldAddr(o, field, deref) => {
+                if *deref {
+                    write!(f, "&{}->{}", o, field)
+                } else {
+                    write!(f, "&{}.{}", o, field)
                 }
             }
             Rvalue::Ref(o, _) => write!(f, "&{}", o),

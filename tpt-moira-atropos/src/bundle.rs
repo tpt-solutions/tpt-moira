@@ -95,7 +95,11 @@ fn rename_operand(op: &mut Operand, f: &dyn Fn(&str) -> String) {
 
 fn rename_rvalue(rv: &mut Rvalue, f: &dyn Fn(&str) -> String) {
     match rv {
-        Rvalue::Use(a) | Rvalue::Unary(_, a) | Rvalue::Field(a, _, _) | Rvalue::Ref(a, _) => {
+        Rvalue::Use(a)
+        | Rvalue::Unary(_, a)
+        | Rvalue::Field(a, _, _)
+        | Rvalue::FieldAddr(a, _, _)
+        | Rvalue::Ref(a, _) => {
             rename_operand(a, f)
         }
         Rvalue::Binary(_, a, b) | Rvalue::Index(a, b) | Rvalue::IndexRef(a, b) => {

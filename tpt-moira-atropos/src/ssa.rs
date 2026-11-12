@@ -180,6 +180,10 @@ fn build_function(f: &mir::Function) -> Result<SsaFunction, String> {
                     ),
                     // Arrays and indexing are emitted only by the C backend; the
                     // from-scratch native backend does not model array layout.
+                    mir::Rvalue::FieldAddr(..) => return Err(
+                        "the native backend does not support field addresses (use the C                           backend, `--emit c`)"
+                            .to_string(),
+                    ),
                     mir::Rvalue::Array(..)
                     | mir::Rvalue::Index(..)
                     | mir::Rvalue::IndexRef(..)

@@ -42,6 +42,9 @@ long long moira_char_is_numeric(long long c) { return isdigit((int)c) != 0; }
 long long moira_char_to_ascii_lowercase(long long c) { return tolower((int)c); }
 long long moira_char_to_ascii_uppercase(long long c) { return toupper((int)c); }
 char* moira_str_before(char* s, long long n) { return moira_str_dup_n(s, (size_t)n); }
+long long moira_line_next(char* s, long long i) { char* q = strchr(s + i, '\n'); return q ? (long long)(q - s) + 1 : (long long)strlen(s); }
+char* moira_line_text(char* s, long long i, long long next) { long long n = next - i; if (n > 0 && s[i + n - 1] == '\n') n--; if (n > 0 && s[i + n - 1] == '\r') n--; return moira_str_dup_n(s + i, (size_t)n); }
+char* moira_fs_read_to_string(char* path) { FILE* f = fopen(path, "rb"); if (!f) return NULL; fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET); char* b = (char*)malloc((size_t)sz + 1); size_t r = fread(b, 1, (size_t)sz, f); b[r] = 0; fclose(f); return b; }
 long long moira_str_starts_with_char(char* s, long long c) { return s[0] != 0 && s[0] == (char)c; }
 long long moira_str_ends_with_char(char* s, long long c) { size_t n = strlen(s); return n > 0 && s[n - 1] == (char)c; }
 long long moira_str_contains_char(char* s, long long c) { return strchr(s, (int)c) != NULL; }
@@ -708,6 +711,13 @@ fn emit_rvalue(rv: &mir::Rvalue) -> String {
                 format!("{}.{}", emit_operand(o), f)
             }
         }
+        mir::Rvalue::FieldAddr(o, f, deref) => {
+            if *deref {
+                format!("&{}->{}", emit_operand(o), f)
+            } else {
+                format!("&{}.{}", emit_operand(o), f)
+            }
+        }
         mir::Rvalue::Ref(o, _) => format!("&{}", emit_operand(o)),
         mir::Rvalue::Index(b, i) => format!("{}[{}]", emit_operand(b), emit_operand(i)),
         mir::Rvalue::IndexRef(b, i) => format!("&{}[{}]", emit_operand(b), emit_operand(i)),
@@ -909,7 +919,11 @@ fn map_typedef(k: &str, v: &str, struct_names: &std::collections::HashSet<&str>)
 
 /// The struct of a key type (a generic instance is named by its instance struct).
 fn key_struct<'a>(ty: &str, structs: &'a [mir::StructDef]) -> Option<&'a mir::StructDef> {
-    let name = if ty.contains('<') { mir::inst_c_name(ty) } else { ty.to_string() };
+    let name = if ty.contains('<') {
+        mir::inst_c_name(ty)
+    } else {
+        ty.to_string()
+    };
     structs.iter().find(|s| s.name == name)
 }
 
@@ -941,7 +955,12 @@ fn key_equal(ty: &str, a: &str, b: &str, structs: &[mir::StructDef]) -> String {
     if let Some(sd) = key_struct(ty, structs) {
         let mut parts: Vec<String> = Vec::new();
         for (f, ft) in &sd.fields {
-            parts.push(key_equal(ft, &format!("{a}.{f}"), &format!("{b}.{f}"), structs));
+            parts.push(key_equal(
+                ft,
+                &format!("{a}.{f}"),
+                &format!("{b}.{f}"),
+                structs,
+            ));
         }
         if parts.is_empty() {
             return "1".to_string();
