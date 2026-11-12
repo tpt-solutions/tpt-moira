@@ -530,3 +530,25 @@ fn main() {
         assert_eq!(lines, vec!["4", "9", "-1", "2"]);
     }
 }
+
+#[test]
+fn capturing_closure_passed_to_fn_runs() {
+    let src = r#"
+fn apply(f: fn(i64) -> i64, x: i64) -> i64 {
+    f(x)
+}
+
+fn main() {
+    let a: i64 = 2;
+    let add = |n: i64| n + a;
+    println!("{}", apply(add, 1));
+    let b: i64 = 5;
+    println!("{}", apply(|n: i64| n * b, 4));
+}
+"#;
+    let Some(out) = check_and_run("capturing_closure_fn_arg", src) else {
+        return;
+    };
+    assert_eq!(out.trim(), "3
+20");
+}

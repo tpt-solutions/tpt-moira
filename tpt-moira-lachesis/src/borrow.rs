@@ -315,6 +315,7 @@ fn operands_of(rv: &Rvalue) -> Vec<String> {
         | Rvalue::Unary(_, o)
         | Rvalue::Ref(o, _)
         | Rvalue::Field(o, _, _)
+        | Rvalue::FieldAddr(o, _, _)
         | Rvalue::Cast(o, _) => names(o),
         Rvalue::Array(_, elems) => elems.iter().flat_map(names).collect(),
         Rvalue::StoreIndex(b, i, v) => {

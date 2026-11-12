@@ -25,6 +25,9 @@ pub struct StructInfo {
     /// Generic parameters declared on the struct, e.g. `<T>` in `struct Foo<T>`.
     /// Field types may reference these as `Ty::Generic` parameters.
     pub generics: Generics,
+    /// Set when a same-named struct from another crate was merged into this entry:
+    /// its field list is then a union, so a literal cannot be checked for completeness.
+    pub merged: bool,
 }
 
 /// A function's resolved signature.
@@ -113,11 +116,59 @@ pub struct TypeChecker {
 /// `Vec<..>` hint. `None` for types the backend cannot name yet.
 /// The hint of a generic type with its arguments: `Option<T>`, `Result<T, E>`,
 /// `Map<K, V>` (for `HashMap<K, V>`) and `Tuple<..>`, when every argument has a hint.
+/// Record a struct under its bare name. A same-named struct from another crate is
+/// merged field by field: a field only one side declares is added. A field both sides
+/// declare with different types takes the checked crate's own type (`own`), or becomes
+/// `Unknown` when it comes from another crate (the shape is ambiguous there).
+fn merge_struct_fields(
+    cx: &mut TypeChecker,
+    name: &str,
+    fields: Vec<(String, Ty)>,
+    generics: &tpt_moira_clotho::ast::Generics,
+    own: bool,
+) {
+    match cx.structs.get_mut(name) {
+        Some(existing) => {
+            existing.merged = true;
+            for (fname, fty) in fields {
+                match existing.fields.iter_mut().find(|(n, _)| n == &fname) {
+                    Some((_, t)) => {
+                        if *t != fty {
+                            // The crate being checked knows its own declaration best;
+                            // a field the other crate declared differently is ambiguous.
+                            *t = if own { fty } else { Ty::Unknown };
+                        }
+                    }
+                    None => existing.fields.push((fname, fty)),
+                }
+            }
+        }
+        None => {
+            cx.structs.insert(
+                name.to_string(),
+                StructInfo {
+                    fields,
+                    generics: generics.clone(),
+                    merged: false,
+                },
+            );
+        }
+    }
+}
+
 fn hint_compound(ty: &Ty) -> Option<String> {
     match ty {
         Ty::Apply(name, args) if name == "Option" && args.len() == 1 => {
-            let parts: Option<Vec<String>> = args.iter().map(hint_elem_name).collect();
-            parts.map(|p| format!("Option<{}>", p.join(",")))
+            // A payload that is a reference to a struct is a pointer to the element
+            // (`Option<&T>` from `seq.get(i)`), so the payload keeps its `*`.
+            let payload = match &args[0] {
+                Ty::Ref(inner) | Ty::RefMut(inner) => match &**inner {
+                    Ty::Struct(n) if n != "String" && n != "Vec" => Some(format!("{n}*")),
+                    _ => hint_elem_name(&args[0]),
+                },
+                other => hint_elem_name(other),
+            };
+            payload.map(|p| format!("Option<{p}>"))
         }
         Ty::Apply(name, args) if name == "Result" && args.len() == 2 => {
             let parts: Option<Vec<String>> = args.iter().map(hint_elem_name).collect();
@@ -465,13 +516,7 @@ impl TypeChecker {
                         .map(|f| (f.name.node.clone(), cx.type_to_ty(&f.ty)))
                         .collect();
                     cx.generic_scope.pop();
-                    cx.structs.insert(
-                        s.name.node.clone(),
-                        StructInfo {
-                            fields,
-                            generics: s.generics.clone(),
-                        },
-                    );
+                    merge_struct_fields(&mut cx, &s.name.node, fields, &s.generics, true);
                     Self::register_tuple_ctor(&mut cx, s);
                 }
                 tpt_moira_clotho::ast::ItemKind::Impl(imp) => {
@@ -788,24 +833,7 @@ impl TypeChecker {
                     // instead of overwriting — field access on either shape
                     // then resolves (check-only leniency; codegen is per-crate
                     // and never sees the merged view).
-                    match cx.structs.get_mut(&s.name.node.clone()) {
-                        Some(existing) => {
-                            for (fname, fty) in fields {
-                                if !existing.fields.iter().any(|(n, _)| n == &fname) {
-                                    existing.fields.push((fname, fty));
-                                }
-                            }
-                        }
-                        None => {
-                            cx.structs.insert(
-                                s.name.node.clone(),
-                                StructInfo {
-                                    fields,
-                                    generics: s.generics.clone(),
-                                },
-                            );
-                        }
-                    }
+                    merge_struct_fields(cx, &s.name.node, fields, &s.generics, false);
                     Self::register_tuple_ctor(cx, s);
                 }
                 tpt_moira_clotho::ast::ItemKind::Impl(imp) => {
@@ -1454,6 +1482,11 @@ impl TypeChecker {
                                 .get(&(owner, name.clone()))
                                 .cloned()
                                 .unwrap_or(Ty::Unknown)
+                        } else if let Some(s) = self.fns.get(&name) {
+                            // A free function used as a value (e.g. `items.flat_map(names)`).
+                            // Checked after unit variants, since `fns` also holds
+                            // tuple-variant constructors keyed by bare name.
+                            Ty::Fn(s.params.clone(), Box::new(s.ret.clone()))
                         } else {
                             self.err(span, format!("cannot find value `{}`", name));
                             Ty::Unknown
@@ -1868,7 +1901,10 @@ impl TypeChecker {
                     self.implements_op(&lt, tr, span);
                     self.implements_op(&rt, tr, span);
                 }
-                self.expect(&lt, &rt, span);
+                // Comparisons are by value: `&str == str` and `&T == T` compare the referents.
+                let lv = self.strip_refs(&lt);
+                let rv = self.strip_refs(&rt);
+                self.expect(&lv, &rv, span);
                 Ty::Bool
             }
             BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem => {
@@ -2244,7 +2280,7 @@ impl TypeChecker {
                     }
                 }
                 for (dn, _) in &info.fields {
-                    if !fields.iter().any(|(fn2, _)| fn2.node == *dn) {
+                    if !info.merged && !fields.iter().any(|(fn2, _)| fn2.node == *dn) {
                         self.err(
                             span,
                             format!("missing field `{}` for struct `{}`", dn, name),
@@ -2316,6 +2352,15 @@ impl TypeChecker {
     /// prefixes are not modeled, so `std::path::Path::new` resolves the same
     /// as `Path::new`.
     fn resolve_call(&mut self, segments: &[String], span: Span) -> Option<FnSig> {
+        // `Self::f(..)` names the enclosing impl's type.
+        let resolved: Vec<String> = segments
+            .iter()
+            .map(|seg| match (seg.as_str(), &self.self_type) {
+                ("Self", Some(t)) => t.clone(),
+                _ => seg.clone(),
+            })
+            .collect();
+        let segments = resolved.as_slice();
         match segments.len() {
             1 => self.fns.get(&segments[0]).cloned().or_else(|| {
                 // A local bound to a closure (`let f = |x| ...; f(2)`) is
@@ -2412,13 +2457,29 @@ impl TypeChecker {
         // already fired) absorbs this call silently instead of cascading a
         // wall of "no method" diagnostics.
         if matches!(recv_ty, Ty::Unknown) || matches!(self.strip_refs(&recv_ty), Ty::Unknown) {
+            // A closure argument still binds its parameters (to `Unknown` items), so
+            // names used in its body resolve instead of reporting "cannot find value".
             for a in args {
-                self.infer_expr(a);
+                if matches!(a.kind, ExprKind::Closure { .. }) {
+                    self.closure_result(a, &Ty::Unknown);
+                } else {
+                    self.infer_expr(a);
+                }
             }
             return Ty::Unknown;
         }
         if let Some(t) = self.check_iter_method(&recv_ty, &method.node, args) {
             return t;
+        }
+        // `seq.get(i)` on a vector or slice of known element type is `Option<&T>`.
+        if method.node == "get" && args.len() == 1 {
+            if let Some(elem) = seq_elem_ty(&self.strip_refs(&recv_ty)) {
+                self.infer_expr(&args[0]);
+                if !matches!(elem, Ty::Unknown) {
+                    return Ty::Apply("Option".into(), vec![ref_item(elem)]);
+                }
+                return Ty::Unknown;
+            }
         }
         // `Option<&T>::cloned()` / `copied()` is `Option<T>` (the referent's type).
         if let Ty::Apply(n, targs) = self.strip_refs(&recv_ty) {
@@ -2428,6 +2489,12 @@ impl TypeChecker {
                 && (method.node == "cloned" || method.node == "copied")
             {
                 return Ty::Apply("Option".into(), vec![deref_item(targs[0].clone())]);
+            }
+            // `Option<T>::map(|x| body)` binds `x` to the payload and is `Option<body>`.
+            if n == "Option" && targs.len() == 1 && args.len() == 1 && method.node == "map" {
+                let payload = targs[0].clone();
+                let result = self.closure_result(&args[0], &payload);
+                return Ty::Apply("Option".into(), vec![result]);
             }
             // The payload of an `Option`/`Result` is the value of `unwrap`, `expect`
             // and `unwrap_or`.
@@ -2871,6 +2938,51 @@ impl TypeChecker {
             ("for_each", 1) => {
                 self.closure_result(&args[0], &item);
                 Some(Ty::Unit)
+            }
+            // `filter_map(|x| opt)` yields the payload of each `Some`.
+            ("filter_map", 1) => {
+                let r = self.closure_result(&args[0], &item);
+                let payload = match r {
+                    Ty::Apply(ref n, ref a) if n == "Option" && a.len() == 1 => a[0].clone(),
+                    _ => Ty::Unknown,
+                };
+                Some(iter_of(payload))
+            }
+            // `flat_map(|x| seq)` yields the items of each sequence it returns.
+            ("flat_map", 1) => {
+                let r = self.closure_result(&args[0], &item);
+                let inner = self.item_of(args[0].span, &r);
+                Some(iter_of(inner))
+            }
+            // `zip(other)` pairs the items of both iterators.
+            ("zip", 1) => {
+                let other = self.infer_expr(&args[0]);
+                let other_item = self.item_of(args[0].span, &other);
+                Some(iter_of(Ty::Tuple(vec![item, other_item])))
+            }
+            ("chain", 1) => {
+                self.infer_expr(&args[0]);
+                Some(iter_of(item))
+            }
+            ("take" | "skip" | "step_by", 1) => {
+                self.infer_expr(&args[0]);
+                Some(iter_of(item))
+            }
+            ("max" | "min", 0) => Some(Ty::Apply("Option".to_string(), vec![item])),
+            ("max_by_key" | "min_by_key", 1) => {
+                self.closure_result(&args[0], &item);
+                Some(Ty::Apply("Option".to_string(), vec![item]))
+            }
+            ("position", 1) => {
+                self.closure_result(&args[0], &item);
+                Some(Ty::Apply("Option".to_string(), vec![Ty::Usize]))
+            }
+            ("product", 0) => Some(deref_item(item)),
+            // `fold(init, |acc, x| ..)`: the accumulator has the initial value's type.
+            ("fold", 2) => {
+                let init = self.infer_expr(&args[0]);
+                self.infer_expr(&args[1]);
+                Some(init)
             }
             ("count", 0) => Some(Ty::Usize),
             // The collection is the context's (an annotation or a return type names it).
@@ -3511,6 +3623,9 @@ impl TypeChecker {
         // `Vec::pop` yields `Option<T>` (modeled opaquely).
         self.methods
             .insert(("Vec".into(), "pop".into()), sig(vec![], std("Option")));
+        // `Vec::drain(range)` yields the removed items (modeled opaquely, like `extend`).
+        self.methods
+            .insert(("Vec".into(), "drain".into()), sig(vec![Unknown], Unknown));
 
         // Register the modeled `std` types as (field-less) structs so `let v:
         // Vec<u8> = ...`, method receivers, and struct-typed expressions
@@ -3541,6 +3656,7 @@ impl TypeChecker {
                 .or_insert_with(|| StructInfo {
                     fields: Vec::new(),
                     generics: Generics::default(),
+                    merged: false,
                 });
         }
 
@@ -3580,6 +3696,13 @@ impl TypeChecker {
                 "strip_prefix",
                 vec![Unknown],
                 Apply("Option".into(), vec![Str]),
+            ),
+            // `lines()` yields the string's lines as string slices.
+            (
+                "str",
+                "lines",
+                vec![],
+                Apply("Iter".into(), vec![Str]),
             ),
             // `str` methods of the C string runtime (`moira_str_*`).
             ("str", "trim", vec![], Str),
@@ -3839,6 +3962,15 @@ impl TypeChecker {
                 // the conversion target is a string in this crate.
                 if (name == "Into" || name == "AsRef") && args.is_empty() {
                     return Ty::Str;
+                }
+                // A function-pointer type `fn(A, B) -> R` is a path `fn` whose arguments are
+                // the parameter types followed by the return type: a function type.
+                if name == "fn" && !args.is_empty() {
+                    let (ret, params) = args.split_last().expect("non-empty");
+                    return Ty::Fn(
+                        params.iter().map(|a| self.type_to_ty(a)).collect(),
+                        Box::new(self.type_to_ty(ret)),
+                    );
                 }
                 // `Self` resolves to the enclosing impl's concrete self type.
                 // A primitive self type (`impl Show for i32`) resolves to the

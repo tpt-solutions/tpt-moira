@@ -102,10 +102,9 @@ impl Allowlist {
         if !path.exists() {
             return Ok(Allowlist::default());
         }
-        let file = std::fs::File::open(path)?;
+        let text = std::fs::read_to_string(path)?;
         let mut entries = BTreeSet::new();
-        for line in std::io::BufReader::new(file).lines() {
-            let line = line?;
+        for line in text.lines() {
             let line = line.trim();
             if line.is_empty() || line.starts_with('#') {
                 continue;
