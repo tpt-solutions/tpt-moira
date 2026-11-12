@@ -137,6 +137,8 @@ pub struct TypeChecker {
     /// The parameter types a closure argument is expected to take, from the `Fn` type
     /// of the parameter it is passed to. Consumed by the next closure checked.
     closure_expected: Option<Vec<Ty>>,
+    /// The variables each closure literal captures, with their types, by the closure's span.
+    closure_caps: HashMap<(usize, usize), Vec<(String, Ty)>>,
 }
 
 /// The C-style name of a scalar, string or struct type, used inside a
@@ -469,6 +471,7 @@ impl Default for TypeChecker {
             expected_call_ty: None,
             method_own_generics: HashMap::new(),
             closure_expected: None,
+            closure_caps: HashMap::new(),
         }
     }
 }
@@ -527,6 +530,14 @@ impl TypeChecker {
         } else {
             Err(cx.errors)
         }
+    }
+
+    /// The captures of each closure literal of a program (see `closure_caps`).
+    pub fn closure_captures_of(
+        prog: &tpt_moira_clotho::ast::Program,
+        externs: &[(&str, &tpt_moira_clotho::ast::Program)],
+    ) -> HashMap<(usize, usize), Vec<(String, Ty)>> {
+        Self::check_program_cx(prog, externs).closure_caps
     }
 
     /// The generic calls of a program's bodies (see [`GenericCall`]), with the errors
@@ -1390,6 +1401,19 @@ impl TypeChecker {
         for p in params {
             bind_pat_names(&p.pat, &mut param_names);
         }
+        // Captures: names the body references that are locals of the enclosing scope.
+        let mut names: Vec<String> = Vec::new();
+        crate::mono::referenced_names(body, &mut names);
+        let mut caps: Vec<(String, Ty)> = Vec::new();
+        for n in names {
+            if param_names.contains(&n) || caps.iter().any(|(m, _)| m == &n) {
+                continue;
+            }
+            if let Some(t) = self.lookup(&n) {
+                caps.push((n, t));
+            }
+        }
+        self.closure_caps.insert((span.start, span.end), caps);
 
         // Capture analysis: names the body references that resolve to a variable
         // in the enclosing environment (and are not the closure's own parameters

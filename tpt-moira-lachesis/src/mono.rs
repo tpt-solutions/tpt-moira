@@ -30,13 +30,19 @@ pub fn monomorphize(prog: &Program, externs: &[(&str, &Program)]) -> Program {
         calls.insert((c.span.start, c.span.end), c);
     }
 
+    let closure_caps = TypeChecker::closure_captures_of(prog, externs);
+
     let mut generic_fns: HashMap<String, Function> = HashMap::new();
+    let mut plain_fns: HashMap<String, Function> = HashMap::new();
     let mut generic_structs: HashMap<String, StructDef> = HashMap::new();
     let mut generic_impls: Vec<ImplDef> = Vec::new();
     for item in &prog.items {
         match &item.kind {
             ItemKind::Function(f) if !f.generics.params.is_empty() => {
                 generic_fns.insert(f.name.node.clone(), f.clone());
+            }
+            ItemKind::Function(f) => {
+                plain_fns.insert(f.name.node.clone(), f.clone());
             }
             ItemKind::Struct(s) if !s.generics.params.is_empty() => {
                 generic_structs.insert(s.name.node.clone(), s.clone());
@@ -74,6 +80,9 @@ pub fn monomorphize(prog: &Program, externs: &[(&str, &Program)]) -> Program {
     let mut mono = Mono {
         calls,
         calls_by_start,
+        closure_caps,
+        plain_fns,
+        inline: None,
         generic_fns,
         generic_structs,
         generic_struct_names,
@@ -120,14 +129,26 @@ pub fn monomorphize(prog: &Program, externs: &[(&str, &Program)]) -> Program {
                 instance,
                 callee,
                 sub,
+                closure,
             } => {
-                let Some(generic) = mono.generic_fns.get(&callee).cloned() else {
+                let base = mono
+                    .generic_fns
+                    .get(&callee)
+                    .or_else(|| mono.plain_fns.get(&callee))
+                    .cloned();
+                let Some(mut f) = base else {
                     continue;
                 };
-                let mut f = generic;
                 f.name.node = instance;
                 f.generics = Generics::default();
+                if let Some(spec) = &closure {
+                    mono.inline = take_closure_param(&mut f, spec);
+                }
                 mono.rewrite_fn(&mut f, &sub);
+                mono.inline = None;
+                if let Some(spec) = &closure {
+                    insert_captures(&mut f, spec);
+                }
                 mono.out.push(Item {
                     visibility: Visibility::Private,
                     kind: ItemKind::Function(f),
@@ -139,6 +160,7 @@ pub fn monomorphize(prog: &Program, externs: &[(&str, &Program)]) -> Program {
                 method,
                 instance,
                 sub,
+                closure,
             } => {
                 let Some(mut f) = mono
                     .generic_methods
@@ -149,7 +171,14 @@ pub fn monomorphize(prog: &Program, externs: &[(&str, &Program)]) -> Program {
                 };
                 f.name.node = instance.clone();
                 f.generics = Generics::default();
+                if let Some(spec) = &closure {
+                    mono.inline = take_closure_param(&mut f, spec);
+                }
                 mono.rewrite_fn(&mut f, &sub);
+                mono.inline = None;
+                if let Some(spec) = &closure {
+                    insert_captures(&mut f, spec);
+                }
                 for item in mono.out.iter_mut() {
                     if let ItemKind::Impl(imp) = &mut item.kind {
                         if imp_self_name(imp) == Some(owner.as_str()) && imp.generics.params.is_empty()
@@ -231,11 +260,13 @@ pub fn monomorphize(prog: &Program, externs: &[(&str, &Program)]) -> Program {
 
 /// Work waiting to be generated.
 enum Work {
-    /// A function instance: `instance` is `callee` with `sub` substituted.
+    /// A function instance: `instance` is `callee` with `sub` substituted. With a
+    /// closure, the closure parameter is inlined and its captures are parameters.
     Fn {
         instance: String,
         callee: String,
         sub: HashMap<String, Ty>,
+        closure: Option<ClosureSpec>,
     },
     /// A struct instance: `name` with the concrete `args` for its parameters.
     Struct {
@@ -250,10 +281,69 @@ enum Work {
         method: String,
         instance: String,
         sub: HashMap<String, Ty>,
+        closure: Option<ClosureSpec>,
     },
 }
 
+/// A closure passed to an instance: the parameter at `param_index` is replaced by the
+/// closure's body, which is inlined at each call of it; the closure's captured variables
+/// become parameters at `caps_at`.
+#[derive(Clone)]
+struct ClosureSpec {
+    param_index: usize,
+    caps_at: usize,
+    closure_params: Vec<Param>,
+    body: Expr,
+    caps: Vec<(String, Type)>,
+}
+
+/// The closure parameter an instance is inlining: its name, its closure's parameter
+/// patterns, and its body.
+#[derive(Clone)]
+struct InlineCtx {
+    fname: String,
+    params: Vec<Pat>,
+    body: Expr,
+}
+
+/// Remove the closure parameter from an instance and return what is inlined for it.
+fn take_closure_param(f: &mut Function, spec: &ClosureSpec) -> Option<InlineCtx> {
+    let fname = match &f.params.get(spec.param_index)?.pat {
+        Pat::Ident(n) => n.node.clone(),
+        _ => return None,
+    };
+    f.params.remove(spec.param_index);
+    Some(InlineCtx {
+        fname,
+        params: spec.closure_params.iter().map(|p| p.pat.clone()).collect(),
+        body: spec.body.clone(),
+    })
+}
+
+/// Add the captured variables of a closure as parameters of the instance.
+fn insert_captures(f: &mut Function, spec: &ClosureSpec) {
+    let span = f.name.span;
+    for (i, (name, ty)) in spec.caps.iter().enumerate() {
+        f.params.insert(
+            spec.caps_at + i,
+            Param {
+                pat: Pat::Ident(Spanned {
+                    node: name.clone(),
+                    span,
+                }),
+                ty: ty.clone(),
+            },
+        );
+    }
+}
+
 struct Mono {
+    /// The captured variables of each closure literal, by span.
+    closure_caps: HashMap<(usize, usize), Vec<(String, Ty)>>,
+    /// Top-level functions that are not generic.
+    plain_fns: HashMap<String, Function>,
+    /// The closure parameter being inlined into the instance being rewritten.
+    inline: Option<InlineCtx>,
     /// Generic calls and struct literals, by callee/expression span.
     calls: HashMap<(usize, usize), GenericCall>,
     /// Associated calls (`Pair::new`), by the start of their path.
@@ -280,9 +370,222 @@ impl Mono {
                 instance: instance.clone(),
                 callee: callee.to_string(),
                 sub,
+                closure: None,
             });
         }
         Some(instance)
+    }
+
+    /// `f(args)` where `f` is the closure parameter being inlined: the closure's body, with
+    /// its parameters bound to the arguments.
+    fn try_inline(&mut self, e: &mut Expr, sub: &HashMap<String, Ty>) -> Option<ExprKind> {
+        let ctx = self.inline.clone()?;
+        let ExprKind::Call(callee, args) = &mut e.kind else {
+            return None;
+        };
+        let ExprKind::Path(p) = &callee.kind else {
+            return None;
+        };
+        if p.segments.len() != 1 || p.segments[0].node != ctx.fname {
+            return None;
+        }
+        for a in args.iter_mut() {
+            self.expr(a, sub);
+        }
+        let mut stmts = Vec::new();
+        for (pat, a) in ctx.params.iter().zip(args.iter()) {
+            stmts.push(Stmt {
+                kind: StmtKind::Local(Local {
+                    pat: pat.clone(),
+                    ty: None,
+                    init: Some(a.clone()),
+                    mutable: false,
+                }),
+            });
+        }
+        let mut body = ctx.body.clone();
+        self.expr(&mut body, sub);
+        Some(ExprKind::Block(Block {
+            stmts,
+            tail: Some(Box::new(body)),
+        }))
+    }
+
+    /// A call of a function that takes a closure literal: the function's instance that
+    /// inlines the closure, called with the closure's captured variables first.
+    fn specialize_call(&mut self, e: &mut Expr, sub: &HashMap<String, Ty>) -> Option<ExprKind> {
+        let ExprKind::Call(callee, args) = &e.kind else {
+            return None;
+        };
+        let ExprKind::Path(p) = &callee.kind else {
+            return None;
+        };
+        if p.segments.len() != 1 {
+            return None;
+        }
+        let ci = args
+            .iter()
+            .position(|a| matches!(a.kind, ExprKind::Closure { .. }))?;
+        let name = p.segments[0].node.clone();
+        let base = self
+            .generic_fns
+            .get(&name)
+            .or_else(|| self.plain_fns.get(&name))?
+            .clone();
+        if !is_closure_param(&base, ci) {
+            return None;
+        }
+        let closure = args[ci].clone();
+        let (cparams, cbody) = match &closure.kind {
+            ExprKind::Closure { params, body, .. } => (params.clone(), (**body).clone()),
+            _ => return None,
+        };
+        let caps = self.captures_of(&closure, sub)?;
+        let (base_inst, solved): (String, HashMap<String, Ty>) = if base.generics.params.is_empty() {
+            (name.clone(), HashMap::new())
+        } else {
+            let call = self.calls.get(&(callee.span.start, callee.span.end))?.clone();
+            let params: Vec<(String, Ty)> = call
+                .params
+                .iter()
+                .map(|(n, t)| (n.clone(), subst_ty(t, sub)))
+                .collect();
+            (instance_name(&name, &params)?, params.into_iter().collect())
+        };
+        let inst = format!("{}__cl{}", base_inst, closure.span.start);
+        if self.seen.insert(inst.clone()) {
+            self.queue.push(Work::Fn {
+                instance: inst.clone(),
+                callee: name.clone(),
+                sub: solved,
+                closure: Some(ClosureSpec {
+                    param_index: ci,
+                    caps_at: 0,
+                    closure_params: cparams,
+                    body: cbody,
+                    caps: caps.clone(),
+                }),
+            });
+        }
+        let (callee_span, args_span) = (callee.span, closure.span);
+        let mut new_args = Vec::new();
+        for (n, _) in &caps {
+            new_args.push(path_expr(n, args_span));
+        }
+        let rest: Vec<Expr> = args
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != ci)
+            .map(|(_, a)| a.clone())
+            .collect();
+        for mut a in rest {
+            self.expr(&mut a, sub);
+            new_args.push(a);
+        }
+        Some(ExprKind::Call(
+            Box::new(path_expr(&inst, callee_span)),
+            new_args,
+        ))
+    }
+
+    /// A method call (of a method with its own generics) that takes a closure literal.
+    fn specialize_method(&mut self, e: &mut Expr, sub: &HashMap<String, Ty>) -> Option<ExprKind> {
+        let ExprKind::MethodCall(recv, method, args) = &e.kind else {
+            return None;
+        };
+        let ci = args
+            .iter()
+            .position(|a| matches!(a.kind, ExprKind::Closure { .. }))?;
+        let call = self
+            .calls
+            .get(&(method.span.start, method.span.end))?
+            .clone();
+        if !call.method {
+            return None;
+        }
+        let owner = call.owner.clone()?;
+        let base = self
+            .generic_methods
+            .get(&(owner.clone(), method.node.clone()))?
+            .clone();
+        // The receiver is the method's first parameter, so the closure is at `ci + 1`.
+        if !is_closure_param(&base, ci + 1) {
+            return None;
+        }
+        let closure = args[ci].clone();
+        let (cparams, cbody) = match &closure.kind {
+            ExprKind::Closure { params, body, .. } => (params.clone(), (**body).clone()),
+            _ => return None,
+        };
+        let caps = self.captures_of(&closure, sub)?;
+        let params: Vec<(String, Ty)> = call
+            .params
+            .iter()
+            .map(|(n, t)| (n.clone(), subst_ty(t, sub)))
+            .collect();
+        let mut parts = Vec::new();
+        for (_, t) in &params {
+            parts.push(mangle(t)?);
+        }
+        let base_inst = format!("{}__{}", method.node, parts.join("_"));
+        let inst = format!("{}__cl{}", base_inst, closure.span.start);
+        if self.seen.insert(format!("{owner}::{inst}")) {
+            self.queue.push(Work::Method {
+                owner: owner.clone(),
+                method: method.node.clone(),
+                instance: inst.clone(),
+                sub: params.into_iter().collect(),
+                closure: Some(ClosureSpec {
+                    param_index: ci + 1,
+                    caps_at: 1,
+                    closure_params: cparams,
+                    body: cbody,
+                    caps: caps.clone(),
+                }),
+            });
+        }
+        let (method_span, args_span) = (method.span, closure.span);
+        let mut recv2 = (**recv).clone();
+        self.expr(&mut recv2, sub);
+        let mut new_args = Vec::new();
+        for (n, _) in &caps {
+            new_args.push(path_expr(n, args_span));
+        }
+        let rest: Vec<Expr> = args
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != ci)
+            .map(|(_, a)| a.clone())
+            .collect();
+        for mut a in rest {
+            self.expr(&mut a, sub);
+            new_args.push(a);
+        }
+        Some(ExprKind::MethodCall(
+            Box::new(recv2),
+            Spanned {
+                node: inst,
+                span: method_span,
+            },
+            new_args,
+        ))
+    }
+
+    /// The captured variables of a closure literal, as source types. `None` when a
+    /// capture has no source spelling or is itself a closure (not yet supported).
+    fn captures_of(&self, closure: &Expr, sub: &HashMap<String, Ty>) -> Option<Vec<(String, Type)>> {
+        let recorded = self
+            .closure_caps
+            .get(&(closure.span.start, closure.span.end))?;
+        let mut out = Vec::new();
+        for (n, t) in recorded {
+            let st = subst_ty(t, sub);
+            if matches!(st, Ty::Fn(..)) {
+                return None;
+            }
+            out.push((n.clone(), ty_to_ast(&st, closure.span)?));
+        }
+        Some(out)
     }
 
     /// The instance name of the struct `name` at `args`, requesting it if new.
@@ -317,6 +620,7 @@ impl Mono {
                 method: method.to_string(),
                 instance: instance.clone(),
                 sub,
+                closure: None,
             });
         }
         Some(instance)
@@ -417,6 +721,20 @@ impl Mono {
     }
 
     fn expr(&mut self, e: &mut Expr, sub: &HashMap<String, Ty>) {
+        // A call of the closure parameter being inlined becomes the closure's body.
+        if let Some(kind) = self.try_inline(e, sub) {
+            e.kind = kind;
+            return;
+        }
+        // A call passing a closure literal calls an instance that inlines it.
+        if let Some(kind) = self.specialize_call(e, sub) {
+            e.kind = kind;
+            return;
+        }
+        if let Some(kind) = self.specialize_method(e, sub) {
+            e.kind = kind;
+            return;
+        }
         let key = (e.span.start, e.span.end);
         match &mut e.kind {
             ExprKind::Call(callee, args) => {
@@ -642,6 +960,160 @@ impl Mono {
             args.push(solved.get(&n)?.clone());
         }
         self.request_struct(&owner, &args)
+    }
+}
+
+/// A path expression naming one variable or function.
+fn path_expr(name: &str, span: Span) -> Expr {
+    Expr {
+        kind: ExprKind::Path(Path {
+            segments: vec![Spanned {
+                node: name.to_string(),
+                span,
+            }],
+        }),
+        span,
+    }
+}
+
+/// Whether parameter `index` of `f` is a closure: a function type, or a generic parameter
+/// bounded by one.
+fn is_closure_param(f: &Function, index: usize) -> bool {
+    let Some(p) = f.params.get(index) else {
+        return false;
+    };
+    match &p.ty.kind {
+        TypeKind::Path(path, _) if path.segments.len() == 1 && path.segments[0].node == "fn" => true,
+        TypeKind::Path(path, args) if args.is_empty() && path.segments.len() == 1 => {
+            let name = &path.segments[0].node;
+            let inline = f.generics.params.iter().any(|g| {
+                &g.name.node == name && g.bounds.iter().any(|b| matches!(b, TypeBound::Fn(_)))
+            });
+            // A where-clause closure bound names the parameter too.
+            let clause = f.generics.where_clause.iter().any(|w| match &w.ty.kind {
+                TypeKind::Path(wp, _) => {
+                    wp.segments.len() == 1
+                        && &wp.segments[0].node == name
+                        && w.bounds.iter().any(|b| matches!(b, TypeBound::Fn(_)))
+                }
+                _ => false,
+            });
+            inline || clause
+        }
+        _ => false,
+    }
+}
+
+/// Every variable a piece of code refers to by a single name (including inside macro
+/// arguments), in order of first appearance.
+pub fn referenced_names(e: &Expr, out: &mut Vec<String>) {
+    fn push(out: &mut Vec<String>, n: &str) {
+        if !out.iter().any(|m| m == n) {
+            out.push(n.to_string());
+        }
+    }
+    fn block(b: &Block, out: &mut Vec<String>) {
+        for s in &b.stmts {
+            match &s.kind {
+                StmtKind::Local(l) => {
+                    if let Some(e) = &l.init {
+                        referenced_names(e, out);
+                    }
+                }
+                StmtKind::Expr(e) | StmtKind::Semi(e) => referenced_names(e, out),
+                StmtKind::Item(_) => {}
+            }
+        }
+        if let Some(t) = &b.tail {
+            referenced_names(t, out);
+        }
+    }
+    match &e.kind {
+        ExprKind::Path(p) => {
+            if p.segments.len() == 1 {
+                push(out, &p.segments[0].node);
+            }
+        }
+        ExprKind::Lit(_) | ExprKind::Break | ExprKind::Continue => {}
+        ExprKind::Macro(mc) => {
+            for t in &mc.tokens {
+                if let TokenKind::Ident(n) = &t.kind {
+                    push(out, n);
+                }
+            }
+        }
+        ExprKind::Binary(a, _, b) | ExprKind::Index(a, b) | ExprKind::ArrayRepeat(a, b) => {
+            referenced_names(a, out);
+            referenced_names(b, out);
+        }
+        ExprKind::Range(a, b, _) => {
+            if let Some(a) = a {
+                referenced_names(a, out);
+            }
+            if let Some(b) = b {
+                referenced_names(b, out);
+            }
+        }
+        ExprKind::Unary(_, a)
+        | ExprKind::Field(a, _)
+        | ExprKind::Ref(a, _)
+        | ExprKind::Deref(a)
+        | ExprKind::Await(a)
+        | ExprKind::Try(a)
+        | ExprKind::Cast(a, _) => referenced_names(a, out),
+        ExprKind::Call(f, args) => {
+            referenced_names(f, out);
+            for a in args {
+                referenced_names(a, out);
+            }
+        }
+        ExprKind::MethodCall(recv, _, args) => {
+            referenced_names(recv, out);
+            for a in args {
+                referenced_names(a, out);
+            }
+        }
+        ExprKind::Array(xs) | ExprKind::Tuple(xs) => {
+            for x in xs {
+                referenced_names(x, out);
+            }
+        }
+        ExprKind::Struct(_, fields, base) => {
+            for (_, x) in fields {
+                referenced_names(x, out);
+            }
+            if let Some(b) = base {
+                referenced_names(b, out);
+            }
+        }
+        ExprKind::Block(b) | ExprKind::Loop(b) | ExprKind::Unsafe(b) => block(b, out),
+        ExprKind::If(c, then, els) => {
+            referenced_names(c, out);
+            block(then, out);
+            if let Some(e2) = els {
+                referenced_names(e2, out);
+            }
+        }
+        ExprKind::While(c, b) => {
+            referenced_names(c, out);
+            block(b, out);
+        }
+        ExprKind::For(_, iter, b) => {
+            referenced_names(iter, out);
+            block(b, out);
+        }
+        ExprKind::Return(v) => {
+            if let Some(v) = v {
+                referenced_names(v, out);
+            }
+        }
+        ExprKind::Match(scrut, arms) => {
+            referenced_names(scrut, out);
+            for (_, body) in arms {
+                referenced_names(body, out);
+            }
+        }
+        ExprKind::Closure { body, .. } => referenced_names(body, out),
     }
 }
 
