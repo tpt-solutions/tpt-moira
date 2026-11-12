@@ -175,8 +175,12 @@ impl<'src> Lexer<'src> {
                 Some(b'\'') => {
                     self.bump(); // b
                     self.bump(); // opening quote
+                    // A byte char is a `u8` integer literal, not a `char`.
                     let c = self.lex_byte_char();
-                    return TokenKind::Char(c);
+                    return TokenKind::Int {
+                        value: c as u128,
+                        suffix: Some("u8".to_string()),
+                    };
                 }
                 Some(b'r') if matches!(self.peek_byte_at(2), Some(b'"') | Some(b'#')) => {
                     // `br"…"` raw byte string, or `br#"…"#` / `br##"…"##`. The
@@ -300,7 +304,7 @@ impl<'src> Lexer<'src> {
         }
     }
 
-    /// Lex a byte char literal `b'…'`, surfaced as `Char`.
+    /// Lex a byte char literal `b'…'`, returning its byte value as a `char`.
     fn lex_byte_char(&mut self) -> char {
         let c = match self.bump() {
             None => '\0',
