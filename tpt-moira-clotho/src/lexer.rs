@@ -563,8 +563,8 @@ impl<'src> Lexer<'src> {
             _ => return first as char,
         };
         let mut buf = [first, 0, 0, 0];
-        for slot in buf.iter_mut().take(len).skip(1) {
-            *slot = self.bump().unwrap_or(0);
+        for i in 1..len {
+            buf[i] = self.bump().unwrap_or(0);
         }
         std::str::from_utf8(&buf[..len])
             .ok()

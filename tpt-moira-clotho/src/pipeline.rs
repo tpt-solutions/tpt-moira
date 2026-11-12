@@ -55,17 +55,12 @@ pub fn compile_reader<R: Read + Send + 'static>(mut reader: R) -> ParseResult<Pr
     compile(&source)
 }
 
-/// Compile many independent sources in parallel. Each source goes through the
-/// full read→lex→parse→expand path on its own worker thread, so macro expansion
-/// of one unit never stalls on another unit's I/O.
+/// Compile many independent sources, returning the programs in input order (or every
+/// diagnostic). The sources are compiled one after another: the compiler's own source is
+/// built without threads (the backend has none), and the results do not depend on the
+/// order in which the sources are processed.
 pub fn compile_concurrent(sources: &[String]) -> Result<Vec<Program>, Vec<Diag>> {
-    let results = std::thread::scope(|s| {
-        let handles: Vec<_> = sources.iter().map(|src| s.spawn(|| compile(src))).collect();
-        handles
-            .into_iter()
-            .map(|h| h.join().unwrap())
-            .collect::<Vec<_>>()
-    });
+    let results: Vec<Result<Program, Diag>> = sources.iter().map(|src| compile(src)).collect();
 
     let mut ok = Vec::with_capacity(results.len());
     let mut errs = Vec::new();

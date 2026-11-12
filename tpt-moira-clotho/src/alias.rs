@@ -52,6 +52,14 @@ impl AliasTable {
         self.defs.is_empty()
     }
 
+    /// A copy of this table with one more non-generic name: `name` expands to `ty`
+    /// (used to map `Self` to the type of an `impl` block).
+    pub fn with_alias(&self, name: &str, ty: Type) -> AliasTable {
+        let mut table = self.clone();
+        table.defs.insert(name.to_string(), (Vec::new(), ty));
+        table
+    }
+
     /// Return `ty` with every alias use replaced by its aliased type.
     pub fn expand(&self, ty: &Type) -> Type {
         if self.defs.is_empty() {

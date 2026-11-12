@@ -235,7 +235,8 @@ impl Parser {
             }
         }
         let hoisted = std::mem::take(&mut self.hoisted);
-        items.extend(unique_hoisted(&items, hoisted));
+        let more = unique_hoisted(&items, hoisted);
+        items.extend(more);
         Ok(Program { items })
     }
 
@@ -1210,6 +1211,33 @@ impl Parser {
         )
     }
 
+    /// A block-like expression at statement level (`for`, `while`, `loop`, `if`, `match`,
+    /// or a `{..}` block). It ends at its closing brace, so no postfix operator (a call or
+    /// an index) follows it: a `(` after it begins the next expression.
+    fn parse_block_like(&mut self) -> ParseResult<Expr> {
+        let start = self.peek().span.start;
+        let e = match self.peek().kind.clone() {
+            TokenKind::While => self.parse_while()?,
+            TokenKind::Loop => self.parse_loop()?,
+            TokenKind::For => self.parse_for()?,
+            TokenKind::If => self.parse_if()?,
+            TokenKind::Match => self.parse_match()?,
+            _ => {
+                let block = self.parse_block()?;
+                let end = self.peek().span.start;
+                Expr {
+                    kind: ExprKind::Block(block),
+                    span: Span::new(start, end),
+                }
+            }
+        };
+        // A method call or `?` on the block (`match x {..}.len()`) still applies.
+        if self.check(&TokenKind::Dot) || self.check(&TokenKind::Question) {
+            return self.parse_postfix(e);
+        }
+        Ok(e)
+    }
+
     fn parse_stmt(&mut self) -> ParseResult<Stmt> {
         if self.peek_kind() == &TokenKind::Hash {
             let save = self.pos;
@@ -1282,7 +1310,7 @@ impl Parser {
             // A loop statement ends at its closing brace: the next `&`, `*`, `-` or
             // `|` begins a new statement rather than continuing the expression.
             TokenKind::While | TokenKind::Loop | TokenKind::For => {
-                let e = self.parse_atom(false)?;
+                let e = self.parse_block_like()?;
                 self.eat(&TokenKind::Semicolon);
                 Ok(Stmt {
                     kind: StmtKind::Semi(e),
@@ -1290,7 +1318,7 @@ impl Parser {
             }
             // Likewise an `if`, `match` or block statement.
             TokenKind::If | TokenKind::Match | TokenKind::LBrace => {
-                let e = self.parse_atom(false)?;
+                let e = self.parse_block_like()?;
                 if self.eat(&TokenKind::Semicolon) {
                     Ok(Stmt {
                         kind: StmtKind::Semi(e),
@@ -1379,7 +1407,7 @@ impl Parser {
             let rhs = if self.is_range_end(self.peek_kind()) {
                 None
             } else {
-                Some(Box::new(self.parse_pat()?))
+                Some(Box::new(self.parse_pat_single()?))
             };
             return Ok(Pat::Range(None, rhs, inclusive));
         }
@@ -1523,6 +1551,10 @@ impl Parser {
                         .map(|s| s.node.clone())
                         .unwrap_or_default();
                     Ok(Pat::Struct(name, fields))
+                } else if path.segments.len() > 1 {
+                    // A qualified unit variant, e.g. `Enum::Variant` (no payload): a path
+                    // test, not a binding of its first segment.
+                    Ok(Pat::Path(path))
                 } else {
                     // A plain binding pattern, e.g. `x` (no path, no payload).
                     Ok(Pat::Ident(name))
@@ -1539,7 +1571,7 @@ impl Parser {
             let rhs = if self.is_range_end(self.peek_kind()) {
                 None
             } else {
-                Some(Box::new(self.parse_pat()?))
+                Some(Box::new(self.parse_pat_single()?))
             };
             return Ok(Pat::Range(Some(Box::new(pat)), rhs, inclusive));
         }
@@ -2010,9 +2042,8 @@ impl Parser {
                         // trailing-comma form `(a,)` we must consume it here.
                         let mut elems = vec![first];
                         if !self.check(&TokenKind::RParen) {
-                            elems.extend(
-                                self.parse_delimited(TokenKind::RParen, |s| s.parse_expr())?,
-                            );
+                            let more = self.parse_delimited(TokenKind::RParen, |s| s.parse_expr())?;
+                            elems.extend(more);
                         } else {
                             self.expect(TokenKind::RParen)?;
                         }
@@ -2062,8 +2093,8 @@ impl Parser {
                 } else {
                     let mut elems = vec![first];
                     if self.eat(&TokenKind::Comma) {
-                        elems
-                            .extend(self.parse_delimited(TokenKind::RBracket, |s| s.parse_expr())?);
+                        let more = self.parse_delimited(TokenKind::RBracket, |s| s.parse_expr())?;
+                            elems.extend(more);
                     } else {
                         self.expect(TokenKind::RBracket)?;
                     }
