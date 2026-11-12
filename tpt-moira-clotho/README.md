@@ -91,8 +91,8 @@ advanced lifetime elision, and full macro expansion.
 |-------|--------|
 | Phase 1 — frontend | ✅ implemented |
 
-See the workspace [`spec.txt`](https://github.com/tpt-solutions/tpt-moira/blob/main/spec.txt)
-and [`TODO.md`](https://github.com/tpt-solutions/tpt-moira/blob/main/TODO.md) for the
+See the workspace [`spec.txt`](https://github.com/tpt-solutions/tpt-moira/blob/master/spec.txt)
+and [`TODO.md`](https://github.com/tpt-solutions/tpt-moira/blob/master/TODO.md) for the
 full design and roadmap.
 
 ## License

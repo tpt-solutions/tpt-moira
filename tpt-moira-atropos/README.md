@@ -69,8 +69,8 @@ println!("{ssa}");
 | Phase 1 — MIR + C backend | ✅ implemented |
 | Phase 1/4 — SSA + native backend | 🚧 in progress |
 
-See the workspace [`spec.txt`](https://github.com/tpt-solutions/tpt-moira/blob/main/spec.txt)
-and [`TODO.md`](https://github.com/tpt-solutions/tpt-moira/blob/main/TODO.md) for the
+See the workspace [`spec.txt`](https://github.com/tpt-solutions/tpt-moira/blob/master/spec.txt)
+and [`TODO.md`](https://github.com/tpt-solutions/tpt-moira/blob/master/TODO.md) for the
 full design and roadmap.
 
 ## License
