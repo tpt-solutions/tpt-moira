@@ -7,6 +7,61 @@
 
 use crate::mir;
 
+/// The C runtime for `str`/`String` methods. Each helper is named
+/// `moira_str_<method>`; a method call on a string receiver lowers to a call of it.
+const STR_RUNTIME: &str = r#"#include <ctype.h>
+static char* moira_str_dup_n(const char* s, size_t n) { char* r = (char*)malloc(n + 1); memcpy(r, s, n); r[n] = 0; return r; }
+char* moira_str_dup(char* s) { return moira_str_dup_n(s, strlen(s)); }
+char* moira_str_to_string(char* s) { return moira_str_dup(s); }
+char* moira_int_to_string(long long x) { char b[32]; sprintf(b, "%lld", x); return moira_str_dup(b); }
+char* moira_str_to_owned(char* s) { return moira_str_dup(s); }
+char* moira_str_trim_start(char* s) { while (*s && isspace((unsigned char)*s)) s++; return moira_str_dup(s); }
+char* moira_str_trim_end(char* s) { size_t n = strlen(s); while (n > 0 && isspace((unsigned char)s[n - 1])) n--; return moira_str_dup_n(s, n); }
+char* moira_str_trim(char* s) { return moira_str_trim_end(moira_str_trim_start(s)); }
+long long moira_str_len(char* s) { return (long long)strlen(s); }
+long long moira_str_is_empty(char* s) { return s[0] == 0; }
+long long moira_str_starts_with(char* s, char* p) { return strncmp(s, p, strlen(p)) == 0; }
+long long moira_str_ends_with(char* s, char* p) { size_t n = strlen(s), m = strlen(p); return m <= n && strcmp(s + n - m, p) == 0; }
+long long moira_str_contains(char* s, char* p) { return strstr(s, p) != NULL; }
+char* moira_str_to_ascii_lowercase(char* s) { char* r = moira_str_dup(s); for (char* q = r; *q; q++) *q = (char)tolower((unsigned char)*q); return r; }
+long long moira_str_push_str(char** s, char* t) { size_t a = strlen(*s), b = strlen(t); *s = (char*)realloc(*s, a + b + 1); memcpy(*s + a, t, b + 1); return 0; }
+long long moira_str_push_char(char** s, long long c) { size_t a = strlen(*s); *s = (char*)realloc(*s, a + 2); (*s)[a] = (char)c; (*s)[a + 1] = 0; return 0; }
+char* moira_str_after(char* s, long long n) { return moira_str_dup(s + n); }
+char* moira_char_str(long long c) { char* r = (char*)malloc(2); r[0] = (char)c; r[1] = 0; return r; }
+long long moira_str_find(char* s, char* p) { char* m = strstr(s, p); return m ? (long long)(m - s) : -1; }
+long long moira_char_is_ascii_alphanumeric(long long c) { return isalnum((int)c) != 0; }
+long long moira_char_is_ascii_digit(long long c) { return c >= '0' && c <= '9'; }
+long long moira_char_is_ascii_alphabetic(long long c) { return isalpha((int)c) != 0; }
+long long moira_char_is_ascii_whitespace(long long c) { return isspace((int)c) != 0; }
+long long moira_char_is_ascii_uppercase(long long c) { return c >= 'A' && c <= 'Z'; }
+long long moira_char_is_ascii_lowercase(long long c) { return c >= 'a' && c <= 'z'; }
+long long moira_char_is_alphanumeric(long long c) { return isalnum((int)c) != 0; }
+long long moira_char_is_numeric(long long c) { return isdigit((int)c) != 0; }
+long long moira_char_to_ascii_lowercase(long long c) { return tolower((int)c); }
+long long moira_char_to_ascii_uppercase(long long c) { return toupper((int)c); }
+char* moira_str_before(char* s, long long n) { return moira_str_dup_n(s, (size_t)n); }
+long long moira_str_starts_with_char(char* s, long long c) { return s[0] != 0 && s[0] == (char)c; }
+long long moira_str_ends_with_char(char* s, long long c) { size_t n = strlen(s); return n > 0 && s[n - 1] == (char)c; }
+long long moira_str_contains_char(char* s, long long c) { return strchr(s, (int)c) != NULL; }
+char* moira_str_replace(char* s, char* from, char* to) {
+    size_t fl = strlen(from), tl = strlen(to), cnt = 0;
+    if (fl == 0) return moira_str_dup(s);
+    for (char* p = s; (p = strstr(p, from)); p += fl) cnt++;
+    size_t len = strlen(s) - cnt * fl + cnt * tl;
+    char* r = (char*)malloc(len + 1);
+    char* w = r;
+    char* p = s;
+    char* m;
+    while ((m = strstr(p, from)) != NULL) {
+        memcpy(w, p, (size_t)(m - p)); w += m - p;
+        memcpy(w, to, tl); w += tl;
+        p = m + fl;
+    }
+    strcpy(w, p);
+    return r;
+}
+"#;
+
 /// Emit a whole program as a single C translation unit.
 ///
 /// Struct definitions are emitted sequentially (they are few and each function
@@ -30,8 +85,24 @@ pub fn emit_c(prog: &mir::MirProgram) -> String {
     out.push_str("void print_f64(double x) { printf(\"%f\\n\", x); }\n");
     out.push_str("void print_bool(long long x) { printf(\"%s\\n\", x ? \"true\" : \"false\"); }\n");
     out.push_str("void print_str(char* x) { printf(\"%s\\n\", x); }\n");
+    // Raw writers (no newline): `print!`/`println!` write their pieces with these and
+    // end the line with an explicit "\n" piece.
+    out.push_str("void __moira_w_i64(long long x) { printf(\"%lld\", x); }\n");
+    out.push_str("void __moira_w_usize(unsigned long long x) { printf(\"%llu\", x); }\n");
+    out.push_str("void __moira_w_f64(double x) { printf(\"%f\", x); }\n");
+    out.push_str("void __moira_w_bool(long long x) { printf(\"%s\", x ? \"true\" : \"false\"); }\n");
+    out.push_str("void __moira_w_str(char* x) { printf(\"%s\", x); }\n");
     // Failed `assert!`/`panic!`: report on stderr and exit with status 101.
     out.push_str("void __moira_panic(void) { fputs(\"moira: panic\\n\", stderr); exit(101); }\n\n");
+    // A string slice `s[a..b]` is a new NUL-terminated copy of the bytes from `a` to `b`.
+    out.push_str("char* moira_str_sub(char* s, long long a, long long b) { long long n = b - a; char* r = (char*)malloc((size_t)n + 1); memcpy(r, s + a, (size_t)n); r[n] = 0; return r; }\n\n");
+    out.push_str(STR_RUNTIME);
+    // Instances of the generic types (`Option<T>`, `Result<T,E>`, tuples) and the hash
+    // maps the program uses get their structs and helpers.
+    let (extra_structs, map_types) = instantiations(prog);
+    let mut owned_prog = prog.clone();
+    owned_prog.structs.extend(extra_structs);
+    let prog = &owned_prog;
 
     // Names of all struct types so that struct-typed fields/params can be
     // emitted with the required `struct` keyword in C.
@@ -54,6 +125,11 @@ pub fn emit_c(prog: &mir::MirProgram) -> String {
         "print_f64",
         "print_bool",
         "print_str",
+        "__moira_w_i64",
+        "__moira_w_usize",
+        "__moira_w_f64",
+        "__moira_w_bool",
+        "__moira_w_str",
         "__moira_panic",
     ] {
         void_names.insert(b);
@@ -91,11 +167,15 @@ pub fn emit_c(prog: &mir::MirProgram) -> String {
     for elem in &slice_elems {
         out.push_str(&slice_typedef(elem, &struct_names));
     }
+    for (k, v) in &map_types {
+        out.push_str(&map_typedef(k, v, &struct_names));
+    }
     if !vec_elems.is_empty() {
         out.push('\n');
     }
 
-    for s in &prog.structs {
+    for &i in &struct_order(prog) {
+        let s = &prog.structs[i];
         out.push_str(&format!("struct {} {{\n", s.name));
         for (fname, fty) in &s.fields {
             out.push_str(&format!("    {} {};\n", c_type(fty, &struct_names), fname));
@@ -109,6 +189,9 @@ pub fn emit_c(prog: &mir::MirProgram) -> String {
     for elem in &slice_elems {
         out.push_str(&slice_helpers(elem, &struct_names));
     }
+    for (k, v) in &map_types {
+        out.push_str(&map_helpers(k, v, &struct_names));
+    }
 
     // Prototypes first: a function may be called before it is defined (forward
     // references among top-level functions, and hoisted nested items).
@@ -118,16 +201,13 @@ pub fn emit_c(prog: &mir::MirProgram) -> String {
     }
     out.push('\n');
 
-    // Emit each function body on its own thread, then concatenate in the original
-    // (deterministic) order.
-    let bodies: Vec<String> = std::thread::scope(|s| {
-        let handles: Vec<_> = prog
-            .functions
-            .iter()
-            .map(|f| s.spawn(|| emit_function(f, &struct_names, &void_names)))
-            .collect();
-        handles.into_iter().map(|h| h.join().unwrap()).collect()
-    });
+    // Emit each function body in order. (The bodies were once emitted on threads;
+    // the subset has no threads, and the output is the same either way.)
+    let bodies: Vec<String> = prog
+        .functions
+        .iter()
+        .map(|f| emit_function(f, &struct_names, &void_names))
+        .collect();
     for b in bodies {
         out.push_str(&b);
         out.push('\n');
@@ -167,6 +247,31 @@ fn c_signature(f: &mir::Function, struct_names: &std::collections::HashSet<&str>
         params.join(", ")
     };
     format!("{} {}({})", ret, f.name, param_str)
+}
+
+/// The declared type of a temporary or local of `f`, if known.
+fn dest_type(f: &mir::Function, place: &str) -> Option<String> {
+    f.temp_types.get(place).cloned().or_else(|| {
+        f.locals
+            .iter()
+            .find(|(n, _)| n == place)
+            .and_then(|(_, t)| t.clone())
+    })
+}
+
+/// A struct literal of a prelude enum (`Option`, `Result`) names the instance struct of
+/// its destination's type (`Option<i32>` is `Option_i32`); other literals are unchanged.
+fn fix_struct_lit(f: &mir::Function, place: &str, rv: &mir::Rvalue) -> mir::Rvalue {
+    if let mir::Rvalue::StructLit(name, fields) = rv {
+        if let Some(dest) = dest_type(f, place) {
+            if let Some((base, _)) = mir::split_generic(&dest) {
+                if base == name {
+                    return mir::Rvalue::StructLit(mir::inst_c_name(&dest), fields.clone());
+                }
+            }
+        }
+    }
+    rv.clone()
 }
 
 fn emit_function(
@@ -270,8 +375,19 @@ fn emit_function(
                 {
                     out.push_str(&format!("    {};\n", emit_rvalue(&s.rvalue)));
                 }
+                // `Box::new(v)` (lowered to `moira_box_new(v)`): a fresh heap copy of `v`,
+                // typed by the destination's pointee.
+                mir::Rvalue::Call(mir::Operand::Func(n), args) if n == "moira_box_new" && args.len() == 1 => {
+                    let pointee = dest_type(f, &s.place)
+                        .and_then(|d| d.strip_suffix('*').map(|p| p.to_string()))
+                        .unwrap_or_else(|| "long long".to_string());
+                    let ct = c_type(&pointee, struct_names);
+                    out.push_str(&format!("    {} = ({}*)malloc(sizeof({}));\n", s.place, ct, ct));
+                    out.push_str(&format!("    *{} = {};\n", s.place, emit_operand(&args[0])));
+                }
                 _ => {
-                    out.push_str(&format!("    {} = {};\n", s.place, emit_rvalue(&s.rvalue)));
+                    let rv = fix_struct_lit(f, &s.place, &s.rvalue);
+                    out.push_str(&format!("    {} = {};\n", s.place, emit_rvalue(&rv)));
                 }
             }
         }
@@ -319,6 +435,51 @@ fn c_str_lit(s: &str) -> String {
 
 /// Map a Moira primitive type name to its C equivalent. Struct type names and
 /// unknown names pass through unchanged.
+/// The indices of `prog.structs` in an order where every struct comes after the
+/// structs its fields hold by value (a pointer field needs no definition first).
+fn struct_order(prog: &mir::MirProgram) -> Vec<usize> {
+    fn visit(
+        i: usize,
+        prog: &mir::MirProgram,
+        index: &std::collections::HashMap<&str, usize>,
+        state: &mut Vec<u8>,
+        order: &mut Vec<usize>,
+    ) {
+        if state[i] != 0 {
+            return;
+        }
+        state[i] = 1;
+        for (_, fty) in &prog.structs[i].fields {
+            if fty.ends_with('*') {
+                continue;
+            }
+            // A generic instance is the struct of its instance name.
+            let key = if mir::split_generic(fty).is_some() {
+                mir::inst_c_name(fty)
+            } else {
+                fty.clone()
+            };
+            if let Some(&j) = index.get(key.as_str()) {
+                visit(j, prog, index, state, order);
+            }
+        }
+        state[i] = 2;
+        order.push(i);
+    }
+    let index: std::collections::HashMap<&str, usize> = prog
+        .structs
+        .iter()
+        .enumerate()
+        .map(|(i, s)| (s.name.as_str(), i))
+        .collect();
+    let mut state = vec![0u8; prog.structs.len()];
+    let mut order = Vec::new();
+    for i in 0..prog.structs.len() {
+        visit(i, prog, &index, &mut state, &mut order);
+    }
+    order
+}
+
 /// Record the element type of every `Vec<T>` (into `vecs`) and `Slice<T>` (into
 /// `slices`) mentioned in the type string `ty`.
 fn collect_vec_elems(
@@ -430,6 +591,20 @@ fn c_type(ty: &str, struct_names: &std::collections::HashSet<&str>) -> String {
     if let Some(elem) = mir::slice_elem(ty) {
         return mir::slice_c_name(elem);
     }
+    if let Some((base, args)) = mir::split_generic(ty) {
+        match (base, args.len()) {
+            ("Map" | "Sorted", 2) => return mir::map_c_name(args[0], args[1]),
+            ("Option" | "Result" | "Tuple", _) => {
+                let name = mir::inst_c_name(ty);
+                return if struct_names.contains(name.as_str()) {
+                    format!("struct {name}")
+                } else {
+                    name
+                };
+            }
+            _ => {}
+        }
+    }
     // `Vec<T>` is a generated struct; `Vec<T>*` is a pointer to it.
     if let Some(base) = ty.strip_suffix('*') {
         return format!("{}*", c_type(base, struct_names));
@@ -527,7 +702,9 @@ fn emit_rvalue(rv: &mir::Rvalue) -> String {
                 .enumerate()
                 .map(|(i, e)| format!(".f{} = {}", i, emit_operand(e)))
                 .collect();
-            format!("(struct {}){{ {} }}", ty, inits.join(", "))
+            // A generic tuple (`Tuple<A,B>`) is named by its instance struct.
+            let name = if ty.contains('<') { mir::inst_c_name(ty) } else { ty.clone() };
+            format!("(struct {}){{ {} }}", name, inits.join(", "))
         }
         mir::Rvalue::Cast(o, ty) => format!("({}){}", ty, emit_operand(o)),
         mir::Rvalue::StoreField(s, f, v, deref) => {
@@ -592,4 +769,198 @@ fn emit_terminator(t: &mir::Terminator) -> String {
         }
         mir::Terminator::Unreachable => "    ;\n".to_string(),
     }
+}
+
+/// Scan a type string for generic instances: `Option<..>`, `Result<..>` and
+/// `Tuple<..>` values are structs; `Map<K,V>` is a hash map to generate.
+fn scan_generics(
+    ty: &str,
+    insts: &mut std::collections::BTreeSet<String>,
+    maps: &mut std::collections::BTreeSet<(String, String)>,
+) {
+    let (base, args) = match mir::split_generic(ty) {
+        Some(p) => p,
+        None => return,
+    };
+    match base {
+        "Option" | "Result" | "Tuple" => {
+            insts.insert(ty.to_string());
+        }
+        "Map" | "Sorted" if args.len() == 2 => {
+            maps.insert((args[0].to_string(), args[1].to_string()));
+        }
+        _ => {}
+    }
+    for a in args {
+        scan_generics(a, insts, maps);
+    }
+}
+
+/// The struct definitions of the generic instances in the program, and the hash maps
+/// it uses (as key/value pairs). A map's `get` returns `Option<V>`, so that instance is
+/// included. Instances the lowering already defined are skipped.
+fn instantiations(
+    prog: &mir::MirProgram,
+) -> (
+    Vec<mir::StructDef>,
+    std::collections::BTreeSet<(String, String)>,
+) {
+    let mut types: Vec<String> = Vec::new();
+    for s in &prog.structs {
+        for (_, t) in &s.fields {
+            types.push(t.clone());
+        }
+    }
+    for f in &prog.functions {
+        if let Some(r) = &f.ret {
+            types.push(r.clone());
+        }
+        for (_, t) in &f.locals {
+            if let Some(t) = t {
+                types.push(t.clone());
+            }
+        }
+        for t in f.temp_types.values() {
+            types.push(t.clone());
+        }
+    }
+    let mut insts: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut maps: std::collections::BTreeSet<(String, String)> = std::collections::BTreeSet::new();
+    for t in &types {
+        scan_generics(t, &mut insts, &mut maps);
+    }
+    let mut values: Vec<String> = Vec::new();
+    for (_, v) in &maps {
+        values.push(format!("Option<{v}>"));
+    }
+    for v in &values {
+        scan_generics(v, &mut insts, &mut maps);
+    }
+    let existing: std::collections::HashSet<String> =
+        prog.structs.iter().map(|s| s.name.clone()).collect();
+    let mut defs = Vec::new();
+    for inst in &insts {
+        let name = mir::inst_c_name(inst);
+        if existing.contains(&name) {
+            continue;
+        }
+        let (base, args) = match mir::split_generic(inst) {
+            Some(p) => p,
+            None => continue,
+        };
+        let mut fields: Vec<(String, String)> = Vec::new();
+        match base {
+            "Option" => {
+                fields.push(("tag".to_string(), "long long".to_string()));
+                fields.push(("f0".to_string(), args[0].to_string()));
+            }
+            "Result" => {
+                fields.push(("tag".to_string(), "long long".to_string()));
+                fields.push(("f0".to_string(), args[0].to_string()));
+                fields.push(("e0".to_string(), args[1].to_string()));
+            }
+            _ => {
+                for (i, a) in args.iter().enumerate() {
+                    fields.push((format!("f{i}"), a.to_string()));
+                }
+            }
+        }
+        defs.push(mir::StructDef { name, fields });
+    }
+    (defs, maps)
+}
+
+/// The typedef of the hash map `Map<k, v>`: parallel key and value arrays in insertion order.
+fn map_typedef(k: &str, v: &str, struct_names: &std::collections::HashSet<&str>) -> String {
+    let name = mir::map_c_name(k, v);
+    format!(
+        "typedef struct {name} {{ {kc}* keys; {vc}* vals; long long len; long long cap; }} {name};\n",
+        kc = c_type(k, struct_names),
+        vc = c_type(v, struct_names),
+    )
+}
+
+/// The helpers of the hash map `Map<k, v>`. Keys are compared with `strcmp` for strings,
+/// `memcmp` for struct keys, and `==` otherwise; iteration is in insertion order.
+fn map_helpers(k: &str, v: &str, struct_names: &std::collections::HashSet<&str>) -> String {
+    let name = mir::map_c_name(k, v);
+    let kc = c_type(k, struct_names);
+    let vc = c_type(v, struct_names);
+    let opt = c_type(&format!("Option<{v}>"), struct_names);
+    let eq = if kc == "char*" {
+        "strcmp(a, b) == 0".to_string()
+    } else if kc.starts_with("struct ") {
+        "memcmp(&a, &b, sizeof(a)) == 0".to_string()
+    } else {
+        "a == b".to_string()
+    };
+    let new = mir::map_fn_name(k, v, "new");
+    let find = mir::map_fn_name(k, v, "find");
+    let insert = mir::map_fn_name(k, v, "insert");
+    let get = mir::map_fn_name(k, v, "get");
+    let contains = mir::map_fn_name(k, v, "contains_key");
+    let len = mir::map_fn_name(k, v, "len");
+    let is_empty = mir::map_fn_name(k, v, "is_empty");
+    let mut s = String::new();
+    s.push_str(&format!(
+        "static {name} {new}(void) {{ {name} m; m.keys = NULL; m.vals = NULL; m.len = 0; m.cap = 0; return m; }}\n"
+    ));
+    s.push_str(&format!("static long long {find}({name}* m, {kc} k) {{\n"));
+    s.push_str("    for (long long i = 0; i < m->len; i++) {\n");
+    s.push_str(&format!("        {kc} a = m->keys[i];\n"));
+    s.push_str(&format!("        {kc} b = k;\n"));
+    s.push_str(&format!("        if ({eq}) return i;\n"));
+    s.push_str("    }\n    return -1;\n}\n");
+    // `insert` returns the value it replaced, as an `Option<V>` (as Rust's does).
+    s.push_str(&format!(
+        "static {opt} {insert}({name}* m, {kc} k, {vc} v) {{\n"
+    ));
+    s.push_str(&format!("    {opt} r;\n    memset(&r, 0, sizeof(r));\n"));
+    s.push_str(&format!("    long long i = {find}(m, k);\n"));
+    s.push_str("    if (i >= 0) { r.tag = 0; r.f0 = m->vals[i]; m->vals[i] = v; return r; }\n");
+    s.push_str("    r.tag = 1;\n");
+    s.push_str("    if (m->len == m->cap) {\n");
+    s.push_str("        long long nc = m->cap ? m->cap * 2 : 4;\n");
+    s.push_str(&format!(
+        "        m->keys = ({kc}*)realloc(m->keys, (size_t)nc * sizeof({kc}));\n"
+    ));
+    s.push_str(&format!(
+        "        m->vals = ({vc}*)realloc(m->vals, (size_t)nc * sizeof({vc}));\n"
+    ));
+    s.push_str("        m->cap = nc;\n    }\n");
+    s.push_str(
+        "    m->keys[m->len] = k;\n    m->vals[m->len] = v;\n    m->len++;\n    return r;\n}\n",
+    );
+    s.push_str(&format!("static {opt} {get}({name}* m, {kc} k) {{\n"));
+    s.push_str(&format!("    {opt} r;\n    memset(&r, 0, sizeof(r));\n"));
+    s.push_str(&format!("    long long i = {find}(m, k);\n"));
+    s.push_str(
+        "    r.tag = (i < 0) ? 1 : 0;\n    if (i >= 0) r.f0 = m->vals[i];\n    return r;\n}\n",
+    );
+    s.push_str(&format!(
+        "static long long {contains}({name}* m, {kc} k) {{ return {find}(m, k) >= 0; }}\n"
+    ));
+    s.push_str(&format!(
+        "static long long {len}({name}* m) {{ return m->len; }}\n"
+    ));
+    s.push_str(&format!(
+        "static long long {is_empty}({name}* m) {{ return m->len == 0; }}\n"
+    ));
+    // `rank(m, i)`: the slot of the i-th smallest key (sorted maps iterate through it).
+    let less = if kc == "char*" {
+        "strcmp(a, b) < 0".to_string()
+    } else {
+        "a < b".to_string()
+    };
+    let rank = mir::map_fn_name(k, v, "rank");
+    s.push_str(&format!("static long long {rank}({name}* m, long long i) {{\n"));
+    s.push_str("    for (long long j = 0; j < m->len; j++) {\n");
+    s.push_str("        long long below = 0;\n");
+    s.push_str("        for (long long t = 0; t < m->len; t++) {\n");
+    s.push_str(&format!("            {kc} a = m->keys[t];\n"));
+    s.push_str(&format!("            {kc} b = m->keys[j];\n"));
+    s.push_str(&format!("            if ({less}) below++;\n"));
+    s.push_str("        }\n");
+    s.push_str("        if (below == i) return j;\n    }\n    return -1;\n}\n\n");
+    s
 }

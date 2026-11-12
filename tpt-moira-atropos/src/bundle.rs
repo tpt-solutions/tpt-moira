@@ -14,7 +14,7 @@
 //! Prelude enums (`Option`, `Result`) and generated tuple/vector types are
 //! identical in every crate, so they are shared and never renamed.
 
-use crate::lower::{lower_program_typed, LowerError, TypeHints};
+use crate::lower::{lower_program_with_enums, LowerError, TypeHints};
 use crate::mir::{self, Operand, Rvalue};
 use std::collections::{BTreeMap, BTreeSet};
 use tpt_moira_clotho::ast::Program;
@@ -136,6 +136,13 @@ fn rename_rvalue(rv: &mut Rvalue, f: &dyn Fn(&str) -> String) {
     }
 }
 
+/// Rename the type strings of a list of named fields.
+fn rename_field_types(fields: &mut Vec<(String, String)>, f: &dyn Fn(&str) -> String) {
+    for (_, ty) in fields.iter_mut() {
+        *ty = rename_type_str(ty, f);
+    }
+}
+
 /// Apply `f` to every name in one crate's MIR program.
 fn rename_program(p: &mut mir::MirProgram, f: &dyn Fn(&str) -> String) {
     for s in &mut p.structs {
@@ -172,9 +179,7 @@ fn rename_program(p: &mut mir::MirProgram, f: &dyn Fn(&str) -> String) {
         a.poll_name = f(&a.poll_name);
         a.run_name = f(&a.run_name);
         a.output_ty = rename_type_str(&a.output_ty, f);
-        for (_, ty) in &mut a.fut_fields {
-            *ty = rename_type_str(ty, f);
-        }
+        rename_field_types(&mut a.fut_fields, f);
     }
 }
 
@@ -214,22 +219,39 @@ pub fn lower_bundle(
     externs: &[(String, Program, TypeHints)],
 ) -> Result<mir::MirProgram, LowerError> {
     let in_crate = |name: &str, e: LowerError| LowerError(format!("in crate `{name}`: {}", e.0));
-    let mut units: Vec<mir::MirProgram> =
-        vec![lower_program_typed(root, root_hints).map_err(|e| in_crate("<root>", e))?];
-    let mut prefixes: Vec<Option<String>> = vec![None];
+    // Each unit also learns the enums of the other units (for patterns on them), but
+    // only the owning unit emits an enum's struct.
+    let mut asts: Vec<&Program> = vec![root];
+    let mut hint_list: Vec<&TypeHints> = vec![root_hints];
+    let mut names: Vec<String> = vec!["<root>".to_string()];
     for (name, prog, hints) in externs {
-        units.push(lower_program_typed(prog, hints).map_err(|e| in_crate(name, e))?);
-        prefixes.push(Some(name.clone()));
+        asts.push(prog);
+        hint_list.push(hints);
+        names.push(name.clone());
+    }
+    let mut units: Vec<mir::MirProgram> = Vec::new();
+    let mut prefixes: Vec<Option<String>> = Vec::new();
+    for i in 0..asts.len() {
+        let extra: Vec<&Program> = (0..asts.len())
+            .filter(|&j| j != i)
+            .map(|j| asts[j])
+            .collect();
+        let unit = lower_program_with_enums(asts[i], hint_list[i], &extra)
+            .map_err(|e| in_crate(&names[i], e))?;
+        units.push(unit);
+        prefixes.push(if i == 0 { None } else { Some(names[i].clone()) });
     }
 
     // Which unit defines each non-shared function and struct.
     let mut defined_by: BTreeMap<String, BTreeSet<usize>> = BTreeMap::new();
     for (idx, unit) in units.iter().enumerate() {
-        let names = unit
-            .functions
-            .iter()
-            .map(|f| f.name.clone())
-            .chain(unit.structs.iter().map(|s| s.name.clone()));
+        let mut names: Vec<String> = Vec::new();
+        for f in &unit.functions {
+            names.push(f.name.clone());
+        }
+        for s in &unit.structs {
+            names.push(s.name.clone());
+        }
         for n in names {
             if !is_shared(&n) {
                 defined_by.entry(n).or_default().insert(idx);

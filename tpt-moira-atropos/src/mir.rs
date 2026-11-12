@@ -403,3 +403,52 @@ pub fn vec_c_name(elem: &str) -> String {
 pub fn vec_fn_name(elem: &str, method: &str) -> String {
     format!("moira_vec_{}_{}", mangle(elem), method)
 }
+
+/// Split a generic type string `Base<A,B>` into its base name and top-level
+/// arguments (`["A", "B"]`); commas nested inside `<..>` do not split.
+pub fn split_generic(ty: &str) -> Option<(&str, Vec<&str>)> {
+    let open = ty.find('<')?;
+    if !ty.ends_with('>') {
+        return None;
+    }
+    let base = &ty[..open];
+    let inner = &ty[open + 1..ty.len() - 1];
+    let mut args = Vec::new();
+    let mut depth = 0i32;
+    let mut start = 0usize;
+    for (i, ch) in inner.char_indices() {
+        match ch {
+            '<' => depth += 1,
+            '>' => depth -= 1,
+            ',' if depth == 0 => {
+                args.push(inner[start..i].trim());
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    if !inner.trim().is_empty() {
+        args.push(inner[start..].trim());
+    }
+    Some((base, args))
+}
+
+/// The C struct name of a generic type instance (`Option<i32>` is `Option_i32`).
+/// A type without arguments is its own name.
+pub fn inst_c_name(ty: &str) -> String {
+    match split_generic(ty) {
+        Some((base, _)) => format!("{base}_{}", mangle(&ty[base.len() + 1..ty.len() - 1])),
+        None => ty.to_string(),
+    }
+}
+
+/// The C typedef name of the hash map `Map<k, v>`.
+pub fn map_c_name(k: &str, v: &str) -> String {
+    format!("moira_map_{}_{}", mangle(k), mangle(v))
+}
+
+/// The name of a generated hash-map helper (`new`, `insert`, `get`, `find`,
+/// `contains_key`, `len`, `is_empty`).
+pub fn map_fn_name(k: &str, v: &str, method: &str) -> String {
+    format!("moira_map_{}_{}_{}", mangle(k), mangle(v), method)
+}

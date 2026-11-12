@@ -41,6 +41,10 @@ fn hint_applies(hint: &str) -> bool {
         || hint == "str"
         || hint == "Option"
         || hint == "Result"
+        || hint.starts_with("Option<")
+        || hint.starts_with("Result<")
+        || hint.starts_with("Map<")
+        || hint.starts_with("Tuple<")
         || mir::vec_elem(hint).is_some()
         || mir::slice_elem(hint).is_some()
         || mir::vec_ptr_elem(hint).is_some()
@@ -60,7 +64,35 @@ fn in_fn(name: &str, e: LowerError) -> LowerError {
 }
 
 pub fn lower_program_typed(prog: &Program, hints: &TypeHints) -> Result<mir::MirProgram> {
+    lower_program_with_enums(prog, hints, &[])
+}
+
+/// Lower `prog`, which may match on the enums of `extra` programs (other crates of a
+/// bundle). Those enums' variants are registered, but their structs are not emitted:
+/// the program that defines them emits them.
+pub fn lower_program_with_enums(
+    prog: &Program,
+    hints: &TypeHints,
+    extra: &[&Program],
+) -> Result<mir::MirProgram> {
     let shared = std::sync::Arc::new(hints.clone());
+    // The enum items of `prog`, then those of `extra`.
+    let mut enum_items: Vec<&ast::Item> = prog.items.iter().collect();
+    let mut extra_enums: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for p in extra {
+        for it in &p.items {
+            if let ItemKind::Enum(e) = &it.kind {
+                if !prog
+                    .items
+                    .iter()
+                    .any(|own| matches!(&own.kind, ItemKind::Enum(o) if o.name.node == e.name.node))
+                {
+                    extra_enums.insert(e.name.node.clone());
+                }
+            }
+            enum_items.push(it);
+        }
+    }
     let mut out = mir::MirProgram::default();
 
     let aliases = AliasTable::from_program(prog);
@@ -111,7 +143,7 @@ pub fn lower_program_typed(prog: &Program, hints: &TypeHints) -> Result<mir::Mir
             vec![("Ok".to_string(), 1), ("Err".to_string(), 1)],
         ),
     ];
-    for item in &prog.items {
+    for item in &enum_items {
         if let ItemKind::Enum(e) = &item.kind {
             enum_defs.push((
                 e.name.node.clone(),
@@ -130,14 +162,98 @@ pub fn lower_program_typed(prog: &Program, hints: &TypeHints) -> Result<mir::Mir
     // Each enum becomes a tagged struct `{ long long tag; long long f0; .. }`
     // with one payload slot per field of its widest variant; each variant maps
     // its constructor name to the enum + tag + arity.
+    // User enums: the C type of each variant's payload fields, by enum and tag. A
+    // generic parameter of the enum has no C type here, so such a field stays `long long`.
+    let mut payload_tys: HashMap<(String, i128), Vec<String>> = HashMap::new();
+    for item in &enum_items {
+        if let ItemKind::Enum(e) = &item.kind {
+            let params: Vec<String> = e
+                .generics
+                .params
+                .iter()
+                .map(|p| p.name.node.clone())
+                .collect();
+            for (tag, v) in e.variants.iter().enumerate() {
+                let tys: Vec<String> = v
+                    .fields
+                    .as_ref()
+                    .map(|fs| {
+                        fs.iter()
+                            .map(|f| {
+                                let c = type_to_c(&f.ty, &aliases);
+                                if mentions_any(&c, &params) {
+                                    "long long".to_string()
+                                } else {
+                                    c
+                                }
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                payload_tys.insert((e.name.node.clone(), tag as i128), tys);
+            }
+        }
+    }
+    // Struct-like variants: the field names of each, in declaration order.
+    let mut variant_fields: HashMap<(String, i128), Vec<String>> = HashMap::new();
+    for item in &enum_items {
+        if let ItemKind::Enum(e) = &item.kind {
+            for (tag, v) in e.variants.iter().enumerate() {
+                // A tuple variant's fields are unnamed; only struct-like variants have names.
+                if let Some(fs) = v.fields.as_ref().filter(|fs| {
+                    !fs.is_empty() && fs.iter().all(|f| !f.name.node.is_empty())
+                }) {
+                    variant_fields.insert(
+                        (e.name.node.clone(), tag as i128),
+                        fs.iter().map(|f| f.name.node.clone()).collect(),
+                    );
+                }
+            }
+        }
+    }
+    // A struct literal or pattern naming a struct is not a variant, even when a
+    // variant shares its name.
+    let struct_names: std::collections::HashSet<String> = prog
+        .items
+        .iter()
+        .chain(extra.iter().flat_map(|p| p.items.iter()))
+        .filter_map(|it| match &it.kind {
+            ItemKind::Struct(s) => Some(s.name.node.clone()),
+            _ => None,
+        })
+        .collect();
+    // The methods of every `impl` block (this crate's and the extra crates'): a method
+    // `m` of type `T` lowers to the function `T__m`.
+    let mut methods: HashMap<(String, String), (String, u8, String)> = HashMap::new();
+    add_impl_methods(&prog.items, &aliases, &mut methods);
+    for p in extra {
+        add_impl_methods(&p.items, &aliases, &mut methods);
+    }
     let mut enum_structs: Vec<mir::StructDef> = Vec::new();
     let mut variants: HashMap<String, (String, i128, usize)> = HashMap::new();
     let mut qualified: HashMap<String, (String, i128, usize)> = HashMap::new();
     for (ename, vars) in &enum_defs {
         let max_arity = vars.iter().map(|(_, a)| *a).max().unwrap_or(0);
         let mut fields = vec![("tag".to_string(), "long long".to_string())];
-        for i in 0..max_arity {
-            fields.push((format!("f{}", i), "long long".to_string()));
+        if is_prelude_enum(ename) {
+            for i in 0..max_arity {
+                fields.push((format!("f{}", i), "long long".to_string()));
+            }
+            if ename == "Result" {
+                fields.push(("e0".to_string(), "long long".to_string()));
+            }
+        } else {
+            // A user enum has a typed slot per payload field of every variant.
+            for (tag, (_, arity)) in vars.iter().enumerate() {
+                for i in 0..*arity {
+                    let ty = payload_tys
+                        .get(&(ename.clone(), tag as i128))
+                        .and_then(|v| v.get(i))
+                        .cloned()
+                        .unwrap_or_else(|| "long long".to_string());
+                    fields.push((payload_field(ename, tag as i128, i), ty));
+                }
+            }
         }
         enum_structs.push(mir::StructDef {
             name: ename.clone(),
@@ -153,6 +269,9 @@ pub fn lower_program_typed(prog: &Program, hints: &TypeHints) -> Result<mir::Mir
     }
 
     for st in &enum_structs {
+        if extra_enums.contains(&st.name) {
+            continue;
+        }
         if !out.structs.iter().any(|s| s.name == st.name) {
             out.structs.push(st.clone());
         }
@@ -179,7 +298,54 @@ pub fn lower_program_typed(prog: &Program, hints: &TypeHints) -> Result<mir::Mir
             // Enums are lowered as tagged structs, registered above.
             ItemKind::Enum(_) => {}
             ItemKind::Use(_) => { /* ignored in Phase 1 */ }
-            ItemKind::Impl(_) => { /* trait impls are consumed by the type checker */ }
+            // Each method is a function `Type__method`; `Self` names the impl's type.
+            ItemKind::Impl(imp) => {
+                let Some(ty) = impl_type_name(&imp.for_ty) else {
+                    continue;
+                };
+                let impl_aliases = aliases.with_alias("Self", imp.for_ty.clone());
+                for sub in &imp.items {
+                    let ItemKind::Function(f) = &sub.kind else {
+                        continue;
+                    };
+                    if sub.is_cfg_test() {
+                        continue;
+                    }
+                    // A trait method whose signature names a type the subset does not
+                    // model (`&mut Formatter`) is not emitted.
+                    if !imp.trait_name.node.is_empty() && !signature_is_modeled(f, &struct_names) {
+                        continue;
+                    }
+                    let mut g = f.clone();
+                    g.name.node = format!("{ty}__{}", f.name.node);
+                    let mut l = Lower::new(&out.structs, shared.clone());
+                    l.async_fns = async_names.clone();
+                    l.all_fn_names = all_fn_names.clone();
+                    l.const_values = const_values.clone();
+                    l.variants = variants.clone();
+                    l.qualified_variants = qualified.clone();
+                    l.payload_tys = payload_tys.clone();
+                    l.variant_fields = variant_fields.clone();
+                    l.struct_names = struct_names.clone();
+                    l.methods = methods.clone();
+                    l.self_ty = Some(ty.clone());
+                    l.aliases = impl_aliases.clone();
+                    let func = match l.lower_function(&g) {
+                        Ok(func) => func,
+                        // A trait method outside the codegen subset (e.g. one that uses
+                        // `write!`) is not emitted; the inherent methods must lower.
+                        Err(_) if !imp.trait_name.node.is_empty() => continue,
+                        Err(e) => return Err(in_fn(&g.name.node, e)),
+                    };
+                    let tuple_structs: Vec<mir::StructDef> =
+                        l.tuple_structs.values().cloned().collect();
+                    out.functions.push(func);
+                    for c in l.closures.drain(..) {
+                        out.functions.push(c);
+                    }
+                    out.structs.extend(tuple_structs);
+                }
+            }
             ItemKind::Module(_) => { /* resolved/inlined by the frontend */ }
             // Literal constants were folded into `const_values` above; their
             // uses become constant operands, so the item itself needs no code.
@@ -210,12 +376,18 @@ pub fn lower_program_typed(prog: &Program, hints: &TypeHints) -> Result<mir::Mir
                     l.const_values = const_values.clone();
                     l.variants = variants.clone();
                     l.qualified_variants = qualified.clone();
+                    l.payload_tys = payload_tys.clone();
+                    l.variant_fields = variant_fields.clone();
+                    l.struct_names = struct_names.clone();
+                    l.methods = methods.clone();
                     l.aliases = aliases.clone();
                     let func = l.lower_function(f).map_err(|e| in_fn(&f.name.node, e))?;
                     let tuple_structs: Vec<mir::StructDef> =
                         l.tuple_structs.values().cloned().collect();
                     out.functions.push(func);
-                    out.functions.extend(l.closures.drain(..));
+                    for f in l.closures.drain(..) {
+                        out.functions.push(f);
+                    }
                     out.structs.extend(tuple_structs);
                 }
             }
@@ -253,6 +425,10 @@ struct SeqIter<'a> {
     mutable: bool,
     /// The bytes of a string (`s.chars()`, `s.bytes()`).
     chars: bool,
+    /// `v.drain(..)`: the sequence is emptied after the loop.
+    drain: bool,
+    /// `s.char_indices()`: each item is `(byte index, byte)`.
+    indices: bool,
 }
 
 fn seq_iter(iter: &Expr) -> SeqIter<'_> {
@@ -263,6 +439,8 @@ fn seq_iter(iter: &Expr) -> SeqIter<'_> {
         rev: false,
         mutable: false,
         chars: false,
+        drain: false,
+        indices: false,
     };
     if let ExprKind::MethodCall(r, m, args) = &e.kind {
         if m.node == "enumerate" && args.is_empty() {
@@ -277,13 +455,20 @@ fn seq_iter(iter: &Expr) -> SeqIter<'_> {
         }
     }
     if let ExprKind::MethodCall(r, m, args) = &e.kind {
-        if (m.node == "chars" || m.node == "bytes") && args.is_empty() {
-            si.chars = true;
+        if m.node == "drain" && args.len() == 1 {
+            si.drain = true;
             e = &**r;
         }
     }
     if let ExprKind::MethodCall(r, m, args) = &e.kind {
-        if (m.node == "iter" || m.node == "iter_mut") && args.is_empty() {
+        if (m.node == "chars" || m.node == "bytes" || m.node == "char_indices") && args.is_empty() {
+            si.chars = true;
+            si.indices = m.node == "char_indices";
+            e = &**r;
+        }
+    }
+    if let ExprKind::MethodCall(r, m, args) = &e.kind {
+        if (m.node == "iter" || m.node == "iter_mut" || m.node == "into_iter") && args.is_empty() {
             si.mutable = m.node == "iter_mut";
             e = &**r;
         }
@@ -300,6 +485,8 @@ fn seq_iter(iter: &Expr) -> SeqIter<'_> {
 /// applied to each item, in application order (`(method, closure argument)`).
 struct IterChain<'a> {
     seq: Option<&'a Expr>,
+    /// A string source `s.chars()` / `s.bytes()`: its items are its characters' codes.
+    chars: Option<&'a Expr>,
     /// A range source `lo..hi` (or `lo..=hi`): its items are the integers.
     range: Option<(&'a Expr, &'a Expr, bool)>,
     stages: Vec<(String, Option<&'a Expr>)>,
@@ -321,28 +508,6 @@ fn closure_takes_pair(arg: &Expr) -> bool {
         }
         _ => false,
     }
-}
-
-/// The argument list of an adapter closure call: its captured variables, then the
-/// item. After `enumerate` the item is the pair `(position, item)`, which only a
-/// closure with an `(index, item)` pattern takes (as two arguments).
-fn call_args(
-    caps: Vec<mir::Operand>,
-    pos: &Option<String>,
-    item: &str,
-    arg: &Expr,
-) -> Result<Vec<mir::Operand>> {
-    let mut args = caps;
-    if closure_takes_pair(arg) != pos.is_some() {
-        return Err(LowerError(
-            "an `enumerate` item needs a closure with an `(index, item)` pattern".into(),
-        ));
-    }
-    if let Some(p) = pos {
-        args.push(mir::Operand::var(p.clone()));
-    }
-    args.push(mir::Operand::var(item));
-    Ok(args)
 }
 
 /// The names a closure parameter binds: one name, or the two names of an
@@ -398,6 +563,68 @@ fn macro_name(m: &ast::MacroCall) -> String {
         .unwrap_or_default()
 }
 
+/// Whether a struct is one of the prelude enums, whose payload slots stay untyped
+/// (`f{i}` of `long long`) because their types depend on the instantiation.
+fn is_prelude_enum(name: &str) -> bool {
+    name == "Option" || name == "Result"
+}
+
+/// The struct field holding payload `i` of variant `tag` of enum `ename`. User enums
+/// name the slot by variant; the prelude enums keep the uniform `f{i}`.
+fn payload_field(ename: &str, tag: i128, i: usize) -> String {
+    if ename == "Result" && tag == 1 {
+        // `Result`'s error payload has its own slot, so `Result<T, E>` can type it.
+        format!("e{i}")
+    } else if is_prelude_enum(ename) {
+        format!("f{i}")
+    } else {
+        format!("v{tag}_{i}")
+    }
+}
+
+/// Whether the C type string `ty` names any of `names` as an identifier.
+fn mentions_any(ty: &str, names: &[String]) -> bool {
+    ty.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .any(|tok| names.iter().any(|n| n == tok))
+}
+
+/// Which part of a map a `for` loop yields.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MapIter {
+    /// `(key, value)` pairs (`&m`, `m.iter()`), or the keys of a set.
+    Pairs,
+    /// `m.keys()`.
+    Keys,
+    /// `m.values()`.
+    Values,
+}
+
+/// The key and value types of a `Map<K,V>` type string.
+fn map_args(ty: &str) -> Option<(String, String)> {
+    match mir::split_generic(ty) {
+        Some(("Map", a)) | Some(("Sorted", a)) if a.len() == 2 => {
+            Some((a[0].to_string(), a[1].to_string()))
+        }
+        _ => None,
+    }
+}
+
+/// Whether `e` is `HashMap::new()` or `HashMap::with_capacity(..)`.
+fn is_hashmap_ctor(e: &Expr) -> bool {
+    if let ExprKind::Call(callee, _) = &e.kind {
+        if let ExprKind::Path(p) = &callee.kind {
+            let segs: Vec<&str> = p.segments.iter().map(|s| s.node.as_str()).collect();
+            return segs.len() == 2
+                && (segs[0] == "HashMap"
+                || segs[0] == "HashSet"
+                || segs[0] == "BTreeMap"
+                || segs[0] == "BTreeSet")
+                && (segs[1] == "new" || segs[1] == "with_capacity");
+        }
+    }
+    false
+}
+
 /// The expression inside parentheses: the parser reads `(e)` as a block whose
 /// only content is `e`.
 fn unparen(e: &Expr) -> &Expr {
@@ -422,6 +649,148 @@ fn range_bounds(e: &Expr) -> Option<(Option<&Expr>, Option<&Expr>, bool)> {
 
 /// If `e` is `Vec::new()` or `Vec::with_capacity(..)`, the constructor name
 /// (`"new"` or `"with_capacity"`).
+/// Record the methods of the `impl` blocks in `items` (see `Lower::methods`).
+fn add_impl_methods(
+    items: &[ast::Item],
+    aliases: &AliasTable,
+    methods: &mut HashMap<(String, String), (String, u8, String)>,
+) {
+    for it in items {
+        if let ItemKind::Impl(imp) = &it.kind {
+            if let Some(ty) = impl_type_name(&imp.for_ty) {
+                let impl_aliases = aliases.with_alias("Self", imp.for_ty.clone());
+                for sub in &imp.items {
+                    if let ItemKind::Function(f) = &sub.kind {
+                        let ret = match &f.ret {
+                            Some(t) => type_to_c(t, &impl_aliases),
+                            None => "void".to_string(),
+                        };
+                        methods.insert(
+                            (ty.clone(), f.name.node.clone()),
+                            (format!("{ty}__{}", f.name.node), self_kind(f), ret),
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Whether every type in a function's signature is one the subset models: a primitive,
+/// a struct or enum of the program, a generic parameter, or a std container it knows.
+fn signature_is_modeled(f: &ast::Function, struct_names: &std::collections::HashSet<String>) -> bool {
+    const KNOWN: &[&str] = &[
+        "bool", "char", "str", "String", "i8", "i16", "i32", "i64", "i128", "isize", "u8",
+        "u16", "u32", "u64", "u128", "usize", "f32", "f64", "Self", "Option", "Result", "Vec",
+        "HashMap", "HashSet", "BTreeMap", "BTreeSet", "Box",
+    ];
+    fn known(t: &ast::Type, struct_names: &std::collections::HashSet<String>, generics: &[String]) -> bool {
+        match &t.kind {
+            ast::TypeKind::Path(p, args) => {
+                let name = p.segments.last().map(|s| s.node.as_str()).unwrap_or("");
+                (KNOWN.contains(&name) || struct_names.contains(name) || generics.iter().any(|g| g == name))
+                    && args.iter().all(|a| known(a, struct_names, generics))
+            }
+            ast::TypeKind::Ref(i) | ast::TypeKind::RefMut(i) | ast::TypeKind::Slice(i) => {
+                known(i, struct_names, generics)
+            }
+            ast::TypeKind::Array(i, _) => known(i, struct_names, generics),
+            ast::TypeKind::Tuple(ts) => ts.iter().all(|t| known(t, struct_names, generics)),
+            ast::TypeKind::Infer | ast::TypeKind::Never => true,
+            ast::TypeKind::Future(_) => false,
+        }
+    }
+    let generics: Vec<String> = f.generics.params.iter().map(|g| g.name.node.clone()).collect();
+    f.params.iter().all(|p| known(&p.ty, struct_names, &generics))
+        && f.ret.as_ref().map_or(true, |t| known(t, struct_names, &generics))
+}
+
+/// Rename the variables of a block (its statements and terminator) by `map`.
+fn rename_block(block: &mut mir::Block, map: &HashMap<String, String>) {
+    for stmt in block.stmts.iter_mut() {
+        if let Some(n) = map.get(&stmt.place) {
+            stmt.place = n.clone();
+        }
+        rename_rvalue(&mut stmt.rvalue, map);
+    }
+    match &mut block.term {
+        mir::Terminator::If(op, _, _) | mir::Terminator::Switch(op, _, _) => rename_op(op, map),
+        mir::Terminator::Return(Some(op)) => rename_op(op, map),
+        _ => {}
+    }
+}
+
+fn rename_op(op: &mut mir::Operand, map: &HashMap<String, String>) {
+    if let mir::Operand::Var(n) = op {
+        if let Some(m) = map.get(n) {
+            *n = m.clone();
+        }
+    }
+}
+
+fn rename_rvalue(rv: &mut mir::Rvalue, map: &HashMap<String, String>) {
+    use mir::Rvalue as R;
+    match rv {
+        R::Use(a) | R::Unary(_, a) | R::Field(a, _, _) | R::Ref(a, _) | R::Cast(a, _) => {
+            rename_op(a, map)
+        }
+        R::Binary(_, a, b) | R::Index(a, b) | R::IndexRef(a, b) => {
+            rename_op(a, map);
+            rename_op(b, map);
+        }
+        R::Call(c, args) => {
+            rename_op(c, map);
+            for a in args.iter_mut() {
+                rename_op(a, map);
+            }
+        }
+        R::StructLit(_, fields) => {
+            for (_, a) in fields.iter_mut() {
+                rename_op(a, map);
+            }
+        }
+        R::StoreIndex(a, b, c) => {
+            rename_op(a, map);
+            rename_op(b, map);
+            rename_op(c, map);
+        }
+        R::StoreField(a, _, b, _) => {
+            rename_op(a, map);
+            rename_op(b, map);
+        }
+        R::Array(_, ops) | R::Tuple(_, ops) => {
+            for a in ops.iter_mut() {
+                rename_op(a, map);
+            }
+        }
+    }
+}
+
+/// Whether `e` is the bare name `self`.
+fn is_self_path(e: &Expr) -> bool {
+    matches!(&e.kind, ExprKind::Path(p) if p.segments.len() == 1 && p.segments[0].node == "self")
+}
+
+/// The name of the type an `impl` block is for (its last path segment).
+fn impl_type_name(t: &ast::Type) -> Option<String> {
+    match &t.kind {
+        ast::TypeKind::Path(p, _) => p.segments.last().map(|s| s.node.clone()),
+        _ => None,
+    }
+}
+
+/// How a method takes its receiver: 0 for an associated function (no `self`), 1 for
+/// `&self` / `&mut self`, 2 for `self` by value.
+fn self_kind(f: &ast::Function) -> u8 {
+    match f.params.first() {
+        Some(p) if matches!(&p.pat, ast::Pat::Ident(n) if n.node == "self") => match &p.ty.kind {
+            ast::TypeKind::Ref(_) | ast::TypeKind::RefMut(_) => 1,
+            _ => 2,
+        },
+        _ => 0,
+    }
+}
+
 fn vec_constructor(e: &Expr) -> Option<&'static str> {
     let callee = match &e.kind {
         ExprKind::Call(callee, _) => callee,
@@ -452,16 +821,38 @@ fn type_to_c_expanded(ty: &ast::Type) -> String {
     match &ty.kind {
         ast::TypeKind::Path(p, args) => {
             let last = p.segments.last().map(|s| s.node.clone());
-            if last.as_deref() == Some("Vec") && args.len() == 1 {
-                mir::vec_type(&type_to_c_expanded(&args[0]))
-            } else {
-                last.unwrap_or_else(|| "long long".to_string())
+            let arg = |i: usize| type_to_c_expanded(&args[i]);
+            match (last.as_deref(), args.len()) {
+                (Some("Vec"), 1) => mir::vec_type(&arg(0)),
+                // A box is a heap pointer to its value (recursive types need it).
+                (Some("Box"), 1) => format!("{}*", arg(0)),
+                // `impl Into<String>` / `impl AsRef<str>` parameters take the named type.
+                (Some("Into" | "AsRef"), 1) => arg(0),
+                // The parser drops the arguments of `impl Trait<..>`; a bare `Into`/`AsRef`
+                // parameter is a string conversion in this crate (`impl Into<String>`).
+                (Some("Into" | "AsRef"), 0) => "str".to_string(),
+                (Some("Option"), 1) => format!("Option<{}>", arg(0)),
+                (Some("Result"), 2) => format!("Result<{},{}>", arg(0), arg(1)),
+                (Some("HashMap"), 2) => format!("Map<{},{}>", arg(0), arg(1)),
+                // A set is a map to `bool` (keys only).
+                (Some("HashSet"), 1) => format!("Map<{},bool>", arg(0)),
+                // The sorted collections are sorted maps (a set maps to `bool`).
+                (Some("BTreeMap"), 2) => format!("Sorted<{},{}>", arg(0), arg(1)),
+                (Some("BTreeSet"), 1) => format!("Sorted<{},bool>", arg(0)),
+                // `String` and `str` are one C type (`char*`).
+                (Some("String"), 0) => "str".to_string(),
+                _ => last.unwrap_or_else(|| "long long".to_string()),
             }
+        }
+        ast::TypeKind::Tuple(elems) if !elems.is_empty() => {
+            let parts: Vec<String> = elems.iter().map(type_to_c_expanded).collect();
+            format!("Tuple<{}>", parts.join(","))
         }
         ast::TypeKind::Ref(inner) | ast::TypeKind::RefMut(inner) => {
             // A reference to a slice is the slice value itself.
             let c = type_to_c_expanded(inner);
-            if mir::slice_elem(&c).is_some() {
+            // A string is already a pointer (`char*`): a reference to it is the same.
+            if mir::slice_elem(&c).is_some() || c == "str" {
                 c
             } else {
                 format!("{c}*")
@@ -490,6 +881,9 @@ struct Lower {
     /// Lengths of `let`-bound array literals (e.g. `let xs = [1, 2, 3];`), so a
     /// later `for x in xs { .. }` can iterate the known-length array.
     array_lens: HashMap<String, usize>,
+    /// The C element type of each `let`-bound array literal (an enum for an array of
+    /// variants, else `long long`), so a `for` over it binds elements of that type.
+    array_elems: HashMap<String, String>,
     /// Literal top-level constants (`const X: i32 = 3;`) folded into uses:
     /// `lower_expr` substitutes the constant operand for the path.
     const_values: HashMap<String, i128>,
@@ -500,6 +894,28 @@ struct Lower {
     variants: HashMap<String, (String, i128, usize)>,
     /// The same variants keyed `Enum::Variant`, for paths that name their enum.
     qualified_variants: HashMap<String, (String, i128, usize)>,
+    /// The C type of each user-enum payload field, by `(enum, variant tag)`.
+    payload_tys: HashMap<(String, i128), Vec<String>>,
+    /// The field names of each struct-like variant, by `(enum, variant tag)`, in
+    /// declaration order (the payload slots are positional).
+    variant_fields: HashMap<(String, i128), Vec<String>>,
+    /// The item types the next closure lifted takes as its parameters (set by the
+    /// iterator chain that applies it, consumed by `lower_closure`).
+    closure_param_hint: Option<Vec<String>>,
+    /// A counter that makes the names of match-arm bindings unique.
+    arm_counter: usize,
+    /// The C return type of each closure lifted so far (by its lifted function name).
+    closure_rets: HashMap<String, String>,
+    /// The C type a value is expected to have, when its context decides it (the element
+    /// type of a `vec!` item). Consumed by the first tuple lowered under it.
+    expect_ty: Option<String>,
+    /// The methods of every `impl` block: `(type, method) -> (C function name, kind)`,
+    /// kind 0 for an associated function, 1 for a `&self` method, 2 for `self`.
+    methods: HashMap<(String, String), (String, u8, String)>,
+    /// The type of the `impl` block being lowered (what `Self` names), if any.
+    self_ty: Option<String>,
+    /// The names of the structs in the program and its extra crates.
+    struct_names: std::collections::HashSet<String>,
     /// Captured variables per lambda-lifted closure (lifted fn name ->
     /// captured local names, in the order they appear as leading parameters).
     closure_captures: HashMap<String, Vec<String>>,
@@ -540,6 +956,8 @@ fn tuple_struct_name(elem_c_tys: &[String]) -> String {
     let mut name = String::from("__tuple");
     for t in elem_c_tys {
         name.push('_');
+        // A generic component (`Tuple<usize,usize>`) names its instance struct.
+        let t = if t.contains('<') { mir::inst_c_name(t) } else { t.clone() };
         name.push_str(t.replace(' ', "_").replace('*', "p").as_str());
     }
     name
@@ -767,9 +1185,19 @@ impl Lower {
             types: HashMap::new(),
             loops: Vec::new(),
             array_lens: HashMap::new(),
+            array_elems: HashMap::new(),
             const_values: HashMap::new(),
             variants: HashMap::new(),
             qualified_variants: HashMap::new(),
+            payload_tys: HashMap::new(),
+            variant_fields: HashMap::new(),
+            methods: HashMap::new(),
+            self_ty: None,
+            expect_ty: None,
+            closure_rets: HashMap::new(),
+            arm_counter: 0,
+            closure_param_hint: None,
+            struct_names: std::collections::HashSet::new(),
             closure_captures: HashMap::new(),
             closure_bindings: HashMap::new(),
             async_fns: std::collections::HashSet::new(),
@@ -867,7 +1295,7 @@ impl Lower {
 
         // Validate linearity, then count the `.await` points (each needs a
         // nested future slot + a resume block).
-        let mut await_points = Vec::new();
+        let mut await_points: Vec<Expr> = Vec::new();
         let mut err = None;
         scan_awaits(&f.body, &mut await_points, &mut err);
         if let Some(e) = err {
@@ -960,7 +1388,7 @@ impl Lower {
         // `0` runs the body from the top; each `.await`'s resume label `k+1`
         // jumps to that await's resume block; anything else means the future has
         // already finished, so report READY.
-        let resume_blocks = self
+        let resume_blocks: Vec<usize> = self
             .async_ctx
             .as_ref()
             .map(|c| c.resume_blocks.clone())
@@ -1101,10 +1529,12 @@ impl Lower {
     /// passed to an unrelated function still lowers to its bare pointer
     /// (invoking such a pointer with captures is not representable in the
     /// subset and remains a documented limitation).
-    fn lower_closure(&mut self, params: &[ast::Param], body: &Expr) -> Result<mir::Operand> {
+    fn lower_closure(&mut self, params: &Vec<ast::Param>, body: &Expr) -> Result<mir::Operand> {
+        let param_tys_hint: Vec<String> = self.closure_param_hint.take().unwrap_or_default();
         let mut param_names = std::collections::HashSet::new();
         for p in params {
-            for n in closure_param_names(&p.pat)? {
+            let names: Vec<String> = closure_param_names(&p.pat)?;
+            for n in names {
                 param_names.insert(n);
             }
         }
@@ -1130,10 +1560,23 @@ impl Lower {
         // Enum variants and constants are program-wide: a closure body names them too.
         sub.variants = self.variants.clone();
         sub.qualified_variants = self.qualified_variants.clone();
+        sub.payload_tys = self.payload_tys.clone();
+        sub.variant_fields = self.variant_fields.clone();
+        sub.methods = self.methods.clone();
+        sub.closure_rets = self.closure_rets.clone();
+        sub.self_ty = self.self_ty.clone();
+        sub.struct_names = self.struct_names.clone();
         sub.const_values = self.const_values.clone();
         sub.closure_counter = self.closure_counter;
         sub.func.name = name.clone();
-        sub.func.ret = Some("long long".to_string());
+        // A closure returns the type its body has (a `long long` unless the checker
+        // says otherwise, e.g. a `String` built by `to_string()`).
+        let body_ret = self
+            .hint_of_expr(body)
+            .filter(|h| h != "long long" && !h.is_empty())
+            .unwrap_or_else(|| "long long".to_string());
+        self.closure_rets.insert(name.clone(), body_ret.clone());
+        sub.func.ret = Some(body_ret);
         // Captured variables become leading `long long` parameters.
         for cap in &captures {
             sub.func.params.push(cap.clone());
@@ -1141,13 +1584,22 @@ impl Lower {
                 .locals
                 .push((cap.clone(), Some("long long".to_string())));
         }
-        for p in params {
-            // Structural lowering: closure parameters are `long long` so the lifted
-            // signature matches the uniform function-pointer type. An `(index, item)`
-            // pattern is two parameters.
-            for n in closure_param_names(&p.pat)? {
+        // The item types the closure is applied to (set by the iterator chain that uses it).
+        let param_tys: Vec<String> = param_tys_hint;
+        for (k, p) in params.iter().enumerate() {
+            // A parameter names one value, typed by the hint when there is one; a tuple
+            // pattern (`|(i, x)|`) binds several untyped names.
+            let names_of_p: Vec<String> = closure_param_names(&p.pat)?;
+            let ty = match (names_of_p.len(), param_tys.get(k)) {
+                (1, Some(t)) => t.clone(),
+                _ => "long long".to_string(),
+            };
+            for n in names_of_p {
                 sub.func.params.push(n.clone());
-                sub.func.locals.push((n, Some("long long".to_string())));
+                sub.func.locals.push((n.clone(), Some(ty.clone())));
+                if ty != "long long" {
+                    sub.types.insert(n, ty.clone());
+                }
             }
         }
         sub.new_block();
@@ -1195,11 +1647,10 @@ impl Lower {
                     for e in elems {
                         operands.push(self.lower_expr(e)?);
                     }
+                    let elem_ct = self.array_elem_ct(elems);
                     self.array_lens.insert(name.clone(), elems.len());
-                    self.emit(
-                        name.clone(),
-                        mir::Rvalue::Array("long long".to_string(), operands),
-                    );
+                    self.array_elems.insert(name.clone(), elem_ct.clone());
+                    self.emit(name.clone(), mir::Rvalue::Array(elem_ct, operands));
                     return Ok(());
                 }
                 // Infer the declared local type: prefer an explicit annotation,
@@ -1210,7 +1661,13 @@ impl Lower {
                     (Some(t), _) => Some(type_to_c(t, &self.aliases)),
                     (None, Some(init)) => match &init.kind {
                         ExprKind::Struct(path, _, _) => {
-                            path.segments.last().map(|s| s.node.clone())
+                            // A struct-like variant is typed by its enum.
+                            let segs: Vec<&str> =
+                                path.segments.iter().map(|s| s.node.as_str()).collect();
+                            match self.struct_variant_of(&segs) {
+                                Some((ename, _, _)) => Some(ename),
+                                None => path.segments.last().map(|s| s.node.clone()),
+                            }
                         }
                         _ if self.variant_c_type(init).is_some() => {
                             // A variant construction (`let o = Some(5);`) types
@@ -1240,7 +1697,16 @@ impl Lower {
                                 .collect();
                             Some(self.tuple_type(c_tys))
                         }
-                        _ => None,
+                        // A compound value (`let f = v.first();`, `let v = Vec::new();`)
+                        // is typed by the checker's hint for its initializer.
+                        _ if self.user_call_ret(init).is_some() => self.user_call_ret(init),
+                        _ => self.hint_of_expr(init).filter(|h| {
+                            h == "str"
+                                || self.struct_names.contains(h)
+                                || ["Option<", "Result<", "Vec<", "Map<", "Sorted<"]
+                                    .iter()
+                                    .any(|p| h.starts_with(p))
+                        }),
                     },
                     (None, None) => None,
                 };
@@ -1259,6 +1725,21 @@ impl Lower {
                 if let Some(init) = &local.init {
                     // `let v: Vec<T> = Vec::new()` / `Vec::with_capacity(n)`: the
                     // declared type names the element type of the constructor.
+                    // `let m: HashMap<K, V> = HashMap::new()`: the declared type names the map.
+                    if let (Some((k, v)), true) =
+                        (ty.as_deref().and_then(map_args), is_hashmap_ctor(init))
+                    {
+                        let t = self.fresh_temp(format!("Map<{k},{v}>"));
+                        self.emit(
+                            t.clone(),
+                            mir::Rvalue::Call(
+                                mir::Operand::Func(mir::map_fn_name(&k, &v, "new")),
+                                vec![],
+                            ),
+                        );
+                        self.emit(name.clone(), mir::Rvalue::Use(mir::Operand::var(t)));
+                        return Ok(());
+                    }
                     if let (Some(elem), Some(vec_ty)) =
                         (ty.as_deref().and_then(mir::vec_elem), vec_constructor(init))
                     {
@@ -1289,7 +1770,7 @@ impl Lower {
                     if ty.is_none() {
                         if let mir::Operand::Var(src) = &v {
                             let t = self.temp_type_of(src);
-                            if mir::slice_elem(&t).is_some() || mir::vec_elem(&t).is_some() {
+                            if mir::slice_elem(&t).is_some() || mir::vec_elem(&t).is_some() || t == "str" {
                                 self.types.insert(name.clone(), t.clone());
                                 for (ln, lt) in self.func.locals.iter_mut() {
                                     if *ln == name && lt.is_none() {
@@ -1397,6 +1878,10 @@ impl Lower {
                         .and_then(|s| s.fields.get(i))
                         .map(|(_, t)| t.clone())
                 })
+                .or_else(|| match mir::split_generic(&base_ty) {
+                    Some(("Tuple", args)) => args.get(i).map(|s| s.to_string()),
+                    _ => None,
+                })
                 .unwrap_or_else(|| "long long".to_string());
             if !self.func.locals.iter().any(|(n, _)| n == &name) {
                 self.func.locals.push((name.clone(), Some(ct.clone())));
@@ -1417,7 +1902,12 @@ impl Lower {
     /// so the returned value needs no conversion.
     fn lower_try(&mut self, inner: &Expr) -> Result<mir::Operand> {
         let ret = self.func.ret.clone().unwrap_or_default();
-        let err_variant = match ret.as_str() {
+        // The return type may be an instance (`Result<i32, str>`); its base names the enum.
+        let ret_base = match mir::split_generic(&ret) {
+            Some((base, _)) => base.to_string(),
+            None => ret.clone(),
+        };
+        let err_variant = match ret_base.as_str() {
             "Option" => "None",
             "Result" => "Err",
             _ => {
@@ -1462,11 +1952,39 @@ impl Lower {
             ok_blk,
         ));
         self.current = err_blk;
-        self.set_term(mir::Terminator::Return(Some(mir::Operand::var(
-            name.clone(),
-        ))));
+        // The error value is returned as is when the function returns the same
+        // instance; otherwise a value of the return type carries the error (`e0`).
+        let op_ty = self.temp_type_of(&name);
+        if op_ty == ret || ret == ret_base && op_ty == ret_base {
+            self.set_term(mir::Terminator::Return(Some(mir::Operand::var(
+                name.clone(),
+            ))));
+        } else {
+            let mut fields = vec![("tag".to_string(), mir::Operand::Const(err_tag))];
+            if ret_base == "Result" {
+                let e = self.fresh_temp("long long");
+                self.emit(
+                    e.clone(),
+                    mir::Rvalue::Field(mir::Operand::var(name.clone()), "e0".into(), false),
+                );
+                fields.push(("e0".to_string(), mir::Operand::var(e)));
+            }
+            let t = self.fresh_temp(ret.clone());
+            let lit_name = if mir::split_generic(&ret).is_some() {
+                mir::inst_c_name(&ret)
+            } else {
+                ret_base.clone()
+            };
+            self.emit(t.clone(), mir::Rvalue::StructLit(lit_name, fields));
+            self.set_term(mir::Terminator::Return(Some(mir::Operand::var(t))));
+        }
         self.current = ok_blk;
-        let payload = self.fresh_temp("long long");
+        let op_ty = self.temp_type_of(&name);
+        let payload_ty = match mir::split_generic(&op_ty) {
+            Some((_, args)) if !args.is_empty() => args[0].to_string(),
+            _ => "long long".to_string(),
+        };
+        let payload = self.fresh_temp(payload_ty);
         self.emit(
             payload.clone(),
             mir::Rvalue::Field(mir::Operand::var(name), "f0".into(), false),
@@ -1494,6 +2012,51 @@ impl Lower {
             Some(b) => b,
             None => return Err(LowerError("slice index must be a range".into())),
         };
+        // A string slice `&s[a..b]` is a new NUL-terminated copy of those bytes.
+        let base_str = match &base.kind {
+            ExprKind::Path(p) if p.segments.len() == 1 => {
+                let n = p.segments[0].node.clone();
+                self.temp_type_of(&n) == "str"
+                    || self.hint_of_expr(base).as_deref() == Some("str")
+            }
+            _ => self.hint_of_expr(base).as_deref() == Some("str"),
+        };
+        if base_str {
+            let s = match self.lower_expr(base)? {
+                mir::Operand::Var(n) => n,
+                _ => return Err(LowerError("a string slice needs a named string".into())),
+            };
+            let lo = match start {
+                Some(e) => self.lower_expr(e)?,
+                None => mir::Operand::Const(0),
+            };
+            let hi = match end {
+                Some(e) => {
+                    let h = self.lower_expr(e)?;
+                    if inclusive {
+                        let t = self.fresh_temp("long long");
+                        self.emit(t.clone(), mir::Rvalue::Binary(mir::BinOp::Add, h, mir::Operand::Const(1)));
+                        mir::Operand::var(t)
+                    } else {
+                        h
+                    }
+                }
+                None => {
+                    let t = self.fresh_temp("long long");
+                    self.emit(
+                        t.clone(),
+                        mir::Rvalue::Call(mir::Operand::Func("strlen".into()), vec![mir::Operand::var(s.clone())]),
+                    );
+                    mir::Operand::var(t)
+                }
+            };
+            let t = self.fresh_temp("str");
+            self.emit(
+                t.clone(),
+                mir::Rvalue::Call(mir::Operand::Func("moira_str_sub".into()), vec![mir::Operand::var(s), lo, hi]),
+            );
+            return Ok(mir::Operand::var(t));
+        }
         // A sequence the lowering cannot see locally (a field, a call result) is
         // typed from its hint.
         let found = match self.vec_local(base) {
@@ -1601,6 +2164,7 @@ impl Lower {
                 stages.reverse();
                 return Some(IterChain {
                     seq: None,
+                    chars: None,
                     range: Some((lo, hi, inclusive)),
                     stages,
                 });
@@ -1617,6 +2181,7 @@ impl Lower {
                     return if self.is_sequence(seq) {
                         Some(IterChain {
                             seq: Some(seq),
+                            chars: None,
                             range: None,
                             stages,
                         })
@@ -1629,6 +2194,16 @@ impl Lower {
                 }
                 "cloned" | "copied" | "enumerate" if args.is_empty() => {
                     stages.push((name.to_string(), None))
+                }
+                // `s.chars()` / `s.bytes()` on a string: a source of characters.
+                "chars" | "bytes" if args.is_empty() && self.hint_of_expr(&**r).as_deref() == Some("str") => {
+                    stages.reverse();
+                    return Some(IterChain {
+                        seq: None,
+                        chars: Some(&**r),
+                        range: None,
+                        stages,
+                    });
                 }
                 _ => return None,
             }
@@ -1693,9 +2268,35 @@ impl Lower {
                     )));
                 }
             }
+            // An associated function used as the adapter's function (`map(T::f)`).
+            ExprKind::Path(p) if p.segments.len() >= 2 => {
+                // `mir::Operand::var`: the type and the function are its last two segments.
+                let n = p.segments.len();
+                let mut segs: Vec<String> = vec![
+                    p.segments[n - 2].node.clone(),
+                    p.segments[n - 1].node.clone(),
+                ];
+                if segs[0] == "Self" {
+                    segs[0] = self.self_ty.clone().unwrap_or_default();
+                }
+                match self.methods.get(&(segs[0].clone(), segs[1].clone())) {
+                    Some((cname, _, _)) => cname.clone(),
+                    None => {
+                        return Err(LowerError(format!(
+                            "`{}::{}` is not a closure or a function",
+                            segs[0], segs[1]
+                        )))
+                    }
+                }
+            }
             _ => match self.lower_expr(arg)? {
                 mir::Operand::Func(name) => name,
-                _ => return Err(LowerError("iterator adapters take a closure".into())),
+                _ => {
+                    return Err(LowerError(format!(
+                        "iterator adapters take a closure (argument at bytes {}..{})",
+                        arg.span.start, arg.span.end
+                    )))
+                }
             },
         };
         let caps = self
@@ -1738,28 +2339,56 @@ impl Lower {
                 }
                 Err((lo_op, hi_op))
             }
-            (None, None) => return Err(LowerError("empty iterator chain".into())),
+            (None, None) => match chain.chars {
+                Some(recv) => Ok(self.chars_to_vec(recv)?),
+                None => return Err(LowerError("empty iterator chain".into())),
+            },
         };
+        let elem = match &source {
+            Ok((_, elem, _)) => elem.clone(),
+            Err(_) => "long long".to_string(),
+        };
+        // Each closure takes the item that reaches it: the source's element, then what the
+        // previous stage produced (a `map`'s result type; an `enumerate` pair is untyped).
+        let mut cur = elem.clone();
+        let mut stage_callees: Vec<Option<(String, Vec<mir::Operand>)>> = Vec::new();
+        for (name, arg) in &chain.stages {
+            let callee = match arg {
+                Some(a) => {
+                    self.closure_param_hint = Some(vec![cur.clone()]);
+                    let r = self.closure_callee(a);
+                    self.closure_param_hint = None;
+                    Some(r?)
+                }
+                None => None,
+            };
+            match (name.as_str(), &callee) {
+                ("map", Some((f, _))) => {
+                    cur = self
+                        .closure_rets
+                        .get(f)
+                        .cloned()
+                        .unwrap_or_else(|| "long long".to_string())
+                }
+                ("enumerate", _) => cur = "long long".to_string(),
+                _ => {}
+            }
+            stage_callees.push(callee);
+        }
         let term_callee = match term_args.first() {
-            Some(a) => Some(self.closure_callee(a)?),
+            Some(a) => {
+                self.closure_param_hint = Some(vec![cur.clone()]);
+                let r = self.closure_callee(a);
+                self.closure_param_hint = None;
+                Some(r?)
+            }
             None => None,
         };
         if matches!(terminal, "any" | "all" | "find") && term_callee.is_none() {
             return Err(LowerError(format!("`{terminal}` needs a closure")));
         }
-        let mut stage_callees: Vec<Option<(String, Vec<mir::Operand>)>> = Vec::new();
-        for (_, arg) in &chain.stages {
-            stage_callees.push(match arg {
-                Some(a) => Some(self.closure_callee(a)?),
-                None => None,
-            });
-        }
 
         // The result, initialised before the loop.
-        let elem = match &source {
-            Ok((_, elem, _)) => elem.clone(),
-            Err(_) => "long long".to_string(),
-        };
         let out_elem = self
             .hint_of_expr(e)
             .and_then(|h| mir::vec_elem(&h).map(|s| s.to_string()))
@@ -1785,7 +2414,7 @@ impl Lower {
                 res = Some(r);
             }
             "find" => {
-                let r = self.fresh_temp("Option");
+                let r = self.fresh_temp(format!("Option<{elem}>"));
                 self.emit(
                     r.clone(),
                     mir::Rvalue::StructLit(
@@ -1869,15 +2498,18 @@ impl Lower {
             match name.as_str() {
                 "map" => {
                     let (f, caps) = callee.expect("map has a closure");
-                    let args = call_args(caps, &pos, &item, arg.expect("map has a closure"))?;
-                    let r = self.fresh_temp("long long");
+                    let args =
+                        self.chain_args(caps, &pos, &item, arg.expect("map has a closure"))?;
+                    let ret = self.closure_rets.get(&f).cloned().unwrap_or_else(|| "long long".to_string());
+                    let r = self.fresh_temp(ret);
                     self.emit(r.clone(), mir::Rvalue::Call(mir::Operand::Func(f), args));
                     item = r;
                     pos = None;
                 }
                 "filter" => {
                     let (f, caps) = callee.expect("filter has a closure");
-                    let args = call_args(caps, &pos, &item, arg.expect("filter has a closure"))?;
+                    let args =
+                        self.chain_args(caps, &pos, &item, arg.expect("filter has a closure"))?;
                     let keep_test = self.fresh_temp("long long");
                     self.emit(
                         keep_test.clone(),
@@ -1962,7 +2594,7 @@ impl Lower {
             "for_each" => {
                 let (f, caps) = term_callee.clone().expect("for_each has a closure");
                 let arg = term_args.first().expect("for_each has a closure");
-                let args = call_args(caps, &pos, &item, arg)?;
+                let args = self.chain_args(caps, &pos, &item, arg)?;
                 let t = self.fresh_temp("long long");
                 self.emit(t, mir::Rvalue::Call(mir::Operand::Func(f), args));
                 self.set_term(mir::Terminator::Goto(step));
@@ -1971,7 +2603,7 @@ impl Lower {
                 // any / all / find: the closure decides, and a hit leaves the loop.
                 let (f, caps) = term_callee.clone().expect("checked above");
                 let arg = term_args.first().expect("checked above");
-                let args = call_args(caps, &pos, &item, arg)?;
+                let args = self.chain_args(caps, &pos, &item, arg)?;
                 let c = self.fresh_temp("long long");
                 self.emit(c.clone(), mir::Rvalue::Call(mir::Operand::Func(f), args));
                 let r = res.clone().expect("has a result");
@@ -2026,7 +2658,14 @@ impl Lower {
         seq: &Expr,
         pat: &ast::Pat,
         body: &ast::Block,
+        indices: bool,
     ) -> Result<mir::Operand> {
+        // `char_indices()`: the pattern is `(index, byte)`.
+        let (ip, cp) = match (indices, pat) {
+            (true, ast::Pat::Tuple(ps)) if ps.len() == 2 => (Some(&ps[0]), &ps[1]),
+            (true, _) => return Err(LowerError("`char_indices` needs an `(index, char)` pattern".into())),
+            (false, other) => (None, other),
+        };
         let s = match self.lower_expr(seq)? {
             mir::Operand::Var(n) => n,
             _ => return Err(LowerError("`chars()` needs a named string".into())),
@@ -2067,7 +2706,10 @@ impl Lower {
             ch.clone(),
             mir::Rvalue::Index(mir::Operand::var(s), mir::Operand::var(idx.clone())),
         );
-        self.lower_bind_pattern(pat, mir::Operand::var(ch), "char")?;
+        if let Some(ip) = ip {
+            self.lower_bind_pattern(ip, mir::Operand::var(idx.clone()), "long long")?;
+        }
+        self.lower_bind_pattern(cp, mir::Operand::var(ch), "char")?;
         self.lower_block_value(body)?;
         self.loops.pop();
         self.set_term(mir::Terminator::Goto(step));
@@ -2085,6 +2727,1213 @@ impl Lower {
 
         self.current = exit;
         Ok(mir::Operand::Unit)
+    }
+
+    /// The map a receiver names: a local (or parameter) of type `Map<K,V>` or
+    /// `&mut Map<K,V>`, as `(name, K, V, is_pointer)`.
+    fn map_local(&self, e: &Expr) -> Option<(String, String, String, bool)> {
+        let p = match &e.kind {
+            ExprKind::Path(p) if p.segments.len() == 1 => p,
+            _ => return None,
+        };
+        let name = p.segments[0].node.clone();
+        let ty = self.types.get(&name).cloned().or_else(|| {
+            self.func
+                .locals
+                .iter()
+                .find(|(n, _)| *n == name)
+                .and_then(|(_, t)| t.clone())
+        })?;
+        if let Some((k, v)) = map_args(&ty) {
+            return Some((name, k, v, false));
+        }
+        let base = ty.strip_suffix('*')?;
+        map_args(base).map(|(k, v)| (name, k, v, true))
+    }
+
+    /// A map the checker types (a field, a call result): lowered, and typed by its hint.
+    fn map_from_hint(&mut self, e: &Expr) -> Result<Option<(String, String, String, bool)>> {
+        let hint = match self.hint_of_expr(e) {
+            Some(h) if h.starts_with("Map<") => h,
+            _ => return Ok(None),
+        };
+        let (k, v) = match map_args(&hint) {
+            Some(kv) => kv,
+            None => return Ok(None),
+        };
+        let name = match self.lower_expr(e)? {
+            mir::Operand::Var(n) => n,
+            _ => return Err(LowerError("a map must be a named value".into())),
+        };
+        if self.temp_type_of(&name) == "long long" {
+            self.types.insert(name.clone(), hint.clone());
+        }
+        let is_ptr = self.temp_type_of(&name).ends_with('*');
+        Ok(Some((name, k, v, is_ptr)))
+    }
+
+    /// Whether a map expression is a sorted collection (a `BTreeMap` or `BTreeSet`).
+    fn is_sorted_expr(&self, e: &Expr) -> bool {
+        let by_hint = self.hint_of_expr(e).map_or(false, |h| h.starts_with("Sorted<"));
+        let by_local = match &e.kind {
+            ExprKind::Path(p) if p.segments.len() == 1 => {
+                let name = &p.segments[0].node;
+                self.types
+                    .get(name)
+                    .cloned()
+                    .or_else(|| {
+                        self.func
+                            .locals
+                            .iter()
+                            .find(|(n, _)| n == name)
+                            .and_then(|(_, t)| t.clone())
+                    })
+                    .map_or(false, |t| t.starts_with("Sorted<"))
+            }
+            _ => false,
+        };
+        by_hint || by_local
+    }
+
+    /// A key argument of a map method: `&k` passes `k` itself.
+    fn lower_key_arg(&mut self, e: &Expr) -> Result<mir::Operand> {
+        match &e.kind {
+            ExprKind::Ref(inner, _) => self.lower_expr(inner),
+            _ => self.lower_expr(e),
+        }
+    }
+
+    /// `m.insert(k, v)`, `m.get(&k)`, `m.contains_key(&k)`, `m.len()`, `m.is_empty()`
+    /// on a map local: calls to the generated helpers. `None` for other methods.
+    fn lower_map_method(
+        &mut self,
+        recv: &Expr,
+        method: &str,
+        args: &[Expr],
+    ) -> Result<Option<mir::Operand>> {
+        let (mname, k, v, is_ptr) = match self.map_local(recv) {
+            Some(m) => m,
+            None => return Ok(None),
+        };
+        let (helper, ret_ty) = match (method, args.len()) {
+            // A set's `insert(x)` and `contains(&x)` are the map's with the value `true`.
+            ("insert", 1) => ("insert", format!("Option<{v}>")),
+            ("insert", 2) => ("insert", format!("Option<{v}>")),
+            ("get", 1) => ("get", format!("Option<{v}>")),
+            ("contains" | "contains_key", 1) => ("contains_key", "long long".to_string()),
+            ("len", 0) => ("len", "long long".to_string()),
+            ("is_empty", 0) => ("is_empty", "bool".to_string()),
+            _ => return Ok(None),
+        };
+        let recv_ptr = if is_ptr {
+            mir::Operand::var(mname.clone())
+        } else {
+            let p = self.fresh_temp(format!("Map<{k},{v}>*"));
+            self.emit(
+                p.clone(),
+                mir::Rvalue::Ref(mir::Operand::var(mname.clone()), true),
+            );
+            mir::Operand::var(p)
+        };
+        let mut ops = vec![recv_ptr];
+        match helper {
+            "insert" => {
+                ops.push(self.lower_key_arg(&args[0])?);
+                if args.len() == 2 {
+                    ops.push(self.lower_expr(&args[1])?);
+                } else {
+                    ops.push(mir::Operand::Const(1));
+                }
+            }
+            "get" | "contains_key" => ops.push(self.lower_key_arg(&args[0])?),
+            _ => {}
+        }
+        let t = self.fresh_temp(ret_ty);
+        self.emit(
+            t.clone(),
+            mir::Rvalue::Call(mir::Operand::Func(mir::map_fn_name(&k, &v, helper)), ops),
+        );
+        Ok(Some(mir::Operand::var(t)))
+    }
+
+    /// `for (k, v) in &m` (or `m.iter()`): an index loop over the map's keys and values.
+    fn lower_map_for(
+        &mut self,
+        mname: &str,
+        k: &str,
+        v: &str,
+        is_ptr: bool,
+        pat: &ast::Pat,
+        body: &ast::Block,
+        which: MapIter,
+        sorted: bool,
+    ) -> Result<mir::Operand> {
+        // A set (`HashSet<K>`, a map to `bool`) iterates its keys: a single pattern.
+        // `values()` binds each value; `keys()` and a set bind each key; a map's
+        // `(key, value)` pattern binds both.
+        // A set (its value type is `bool`) yields its keys, whatever the pattern.
+        let is_set = v == "bool";
+        let (kp, vp) = match (which, pat) {
+            (MapIter::Values, other) => (other, None),
+            (MapIter::Keys, other) => (other, None),
+            (MapIter::Pairs, ast::Pat::Tuple(ps)) if ps.len() == 2 && !is_set => {
+                (&ps[0], Some(&ps[1]))
+            }
+            (MapIter::Pairs, other) => (other, None),
+        };
+        let values_only = which == MapIter::Values;
+        let len = self.fresh_temp("long long");
+        self.emit(
+            len.clone(),
+            mir::Rvalue::Field(mir::Operand::var(mname), "len".into(), is_ptr),
+        );
+        let keys = self.fresh_temp(format!("{k}*"));
+        self.emit(
+            keys.clone(),
+            mir::Rvalue::Field(mir::Operand::var(mname), "keys".into(), is_ptr),
+        );
+        let vals = self.fresh_temp(format!("{v}*"));
+        self.emit(
+            vals.clone(),
+            mir::Rvalue::Field(mir::Operand::var(mname), "vals".into(), is_ptr),
+        );
+        let idx = self.fresh_temp("long long");
+        self.emit(idx.clone(), mir::Rvalue::Use(mir::Operand::Const(0)));
+
+        let head = self.new_block();
+        let body_blk = self.new_block();
+        let step = self.new_block();
+        let exit = self.new_block();
+        self.set_term(mir::Terminator::Goto(head));
+
+        self.current = head;
+        let cmp = self.fresh_temp("long long");
+        self.emit(
+            cmp.clone(),
+            mir::Rvalue::Binary(
+                mir::BinOp::Lt,
+                mir::Operand::var(idx.clone()),
+                mir::Operand::var(len),
+            ),
+        );
+        self.set_term(mir::Terminator::If(mir::Operand::var(cmp), body_blk, exit));
+
+        self.current = body_blk;
+        self.loops.push((exit, step));
+        // A sorted map (`BTreeMap`, `BTreeSet`) yields its entries by ascending key: the
+        // slot read is the position of the `idx`-th smallest key.
+        let at = if sorted {
+            let ptr = if is_ptr {
+                mir::Operand::var(mname)
+            } else {
+                let p = self.fresh_temp(format!("Map<{k},{v}>*"));
+                self.emit(p.clone(), mir::Rvalue::Ref(mir::Operand::var(mname), true));
+                mir::Operand::var(p)
+            };
+            let j = self.fresh_temp("long long");
+            self.emit(
+                j.clone(),
+                mir::Rvalue::Call(
+                    mir::Operand::Func(mir::map_fn_name(k, v, "rank")),
+                    vec![ptr, mir::Operand::var(idx.clone())],
+                ),
+            );
+            mir::Operand::var(j)
+        } else {
+            mir::Operand::var(idx.clone())
+        };
+        let kv = self.fresh_temp(k);
+        self.emit(
+            kv.clone(),
+            mir::Rvalue::Index(mir::Operand::var(keys), at.clone()),
+        );
+        let vv = self.fresh_temp(v);
+        self.emit(vv.clone(), mir::Rvalue::Index(mir::Operand::var(vals), at));
+        if values_only {
+            self.lower_bind_pattern(kp, mir::Operand::var(vv.clone()), v)?;
+        } else {
+            self.lower_bind_pattern(kp, mir::Operand::var(kv), k)?;
+        }
+        if let Some(vp) = vp {
+            self.lower_bind_pattern(vp, mir::Operand::var(vv), v)?;
+        }
+        self.lower_block_value(body)?;
+        self.loops.pop();
+        self.set_term(mir::Terminator::Goto(step));
+
+        self.current = step;
+        self.emit(
+            idx.clone(),
+            mir::Rvalue::Binary(
+                mir::BinOp::Add,
+                mir::Operand::var(idx.clone()),
+                mir::Operand::Const(1),
+            ),
+        );
+        self.set_term(mir::Terminator::Goto(head));
+
+        self.current = exit;
+        Ok(mir::Operand::Unit)
+    }
+
+    /// The argument list of an adapter closure call: its captured variables, then the
+    /// item. After `enumerate` the item is the pair `(position, item)`, which a closure
+    /// with an `(index, item)` pattern takes as two arguments. Without `enumerate` a
+    /// closure with a pair pattern takes the two fields of a tuple item.
+    fn chain_args(
+        &mut self,
+        caps: Vec<mir::Operand>,
+        pos: &Option<String>,
+        item: &str,
+        arg: &Expr,
+    ) -> Result<Vec<mir::Operand>> {
+        let mut args = caps;
+        let pair = closure_takes_pair(arg);
+        match (pair, pos) {
+            (true, Some(p)) => {
+                args.push(mir::Operand::var(p.clone()));
+                args.push(mir::Operand::var(item));
+            }
+            (true, None) => {
+                let item_ty = self.temp_type_of(item);
+                let parts: Vec<String> = match mir::split_generic(&item_ty) {
+                    Some(("Tuple", a)) if a.len() == 2 => a.iter().map(|s| s.to_string()).collect(),
+                    _ => vec!["long long".to_string(), "long long".to_string()],
+                };
+                for (i, pty) in parts.into_iter().enumerate() {
+                    let t = self.fresh_temp(pty);
+                    self.emit(
+                        t.clone(),
+                        mir::Rvalue::Field(mir::Operand::var(item), format!("f{i}"), false),
+                    );
+                    args.push(mir::Operand::var(t));
+                }
+            }
+            (false, None) => args.push(mir::Operand::var(item)),
+            (false, Some(_)) => {
+                return Err(LowerError(
+                    "an `enumerate` item needs a closure with an `(index, item)` pattern".into(),
+                ))
+            }
+        }
+        Ok(args)
+    }
+
+    /// `for (a, b) in x.iter().zip(y.iter())` over two named sequences: an index loop
+    /// to the shorter length, binding each side's item.
+    fn lower_zip_for(
+        &mut self,
+        left: (String, String, bool),
+        right: (String, String, bool),
+        pat: &ast::Pat,
+        body: &ast::Block,
+    ) -> Result<mir::Operand> {
+        let (an, ae, ap) = left;
+        let (bn, be, bp) = right;
+        let (p1, p2) = match pat {
+            ast::Pat::Tuple(ps) if ps.len() == 2 => (&ps[0], &ps[1]),
+            _ => return Err(LowerError("`zip` needs a `(a, b)` pattern".into())),
+        };
+        let len_a = self.fresh_temp("long long");
+        self.emit(
+            len_a.clone(),
+            mir::Rvalue::Field(mir::Operand::var(an.clone()), "len".into(), ap),
+        );
+        let len_b = self.fresh_temp("long long");
+        self.emit(
+            len_b.clone(),
+            mir::Rvalue::Field(mir::Operand::var(bn.clone()), "len".into(), bp),
+        );
+        let data_a = self.fresh_temp(format!("{ae}*"));
+        self.emit(
+            data_a.clone(),
+            mir::Rvalue::Field(mir::Operand::var(an), "data".into(), ap),
+        );
+        let data_b = self.fresh_temp(format!("{be}*"));
+        self.emit(
+            data_b.clone(),
+            mir::Rvalue::Field(mir::Operand::var(bn), "data".into(), bp),
+        );
+        let idx = self.fresh_temp("long long");
+        self.emit(idx.clone(), mir::Rvalue::Use(mir::Operand::Const(0)));
+
+        let head = self.new_block();
+        let body_blk = self.new_block();
+        let step = self.new_block();
+        let exit = self.new_block();
+        self.set_term(mir::Terminator::Goto(head));
+
+        self.current = head;
+        let in_a = self.fresh_temp("long long");
+        self.emit(
+            in_a.clone(),
+            mir::Rvalue::Binary(
+                mir::BinOp::Lt,
+                mir::Operand::var(idx.clone()),
+                mir::Operand::var(len_a),
+            ),
+        );
+        let in_b = self.fresh_temp("long long");
+        self.emit(
+            in_b.clone(),
+            mir::Rvalue::Binary(
+                mir::BinOp::Lt,
+                mir::Operand::var(idx.clone()),
+                mir::Operand::var(len_b),
+            ),
+        );
+        let both = self.fresh_temp("long long");
+        self.emit(
+            both.clone(),
+            mir::Rvalue::Binary(
+                mir::BinOp::And,
+                mir::Operand::var(in_a),
+                mir::Operand::var(in_b),
+            ),
+        );
+        self.set_term(mir::Terminator::If(mir::Operand::var(both), body_blk, exit));
+
+        self.current = body_blk;
+        self.loops.push((exit, step));
+        let av = self.fresh_temp(ae.clone());
+        self.emit(
+            av.clone(),
+            mir::Rvalue::Index(mir::Operand::var(data_a), mir::Operand::var(idx.clone())),
+        );
+        let bv = self.fresh_temp(be.clone());
+        self.emit(
+            bv.clone(),
+            mir::Rvalue::Index(mir::Operand::var(data_b), mir::Operand::var(idx.clone())),
+        );
+        self.lower_bind_pattern(p1, mir::Operand::var(av), &ae)?;
+        self.lower_bind_pattern(p2, mir::Operand::var(bv), &be)?;
+        self.lower_block_value(body)?;
+        self.loops.pop();
+        self.set_term(mir::Terminator::Goto(step));
+
+        self.current = step;
+        self.emit(
+            idx.clone(),
+            mir::Rvalue::Binary(
+                mir::BinOp::Add,
+                mir::Operand::var(idx.clone()),
+                mir::Operand::Const(1),
+            ),
+        );
+        self.set_term(mir::Terminator::Goto(head));
+
+        self.current = exit;
+        Ok(mir::Operand::Unit)
+    }
+
+    /// `opt.is_some()`, `.unwrap()`, `.unwrap_or(d)` and the like on an `Option` or
+    /// `Result` value, typed by the checker's hint for the receiver. `None` for any
+    /// other receiver or method (nothing is lowered then).
+    /// The declared return type of a call to an `impl` method or associated function
+    /// (`Type::f(..)`, `recv.m(..)`), if `e` is one.
+    fn user_call_ret(&self, e: &Expr) -> Option<String> {
+        match &e.kind {
+            ExprKind::Call(callee, _) => match &callee.kind {
+                ExprKind::Path(p) if p.segments.len() == 2 => {
+                    let mut ty = p.segments[0].node.clone();
+                    if ty == "Self" {
+                        ty = self.self_ty.clone()?;
+                    }
+                    self.methods
+                        .get(&(ty, p.segments[1].node.clone()))
+                        .map(|(_, _, r)| r.clone())
+                }
+                _ => None,
+            },
+            ExprKind::MethodCall(recv, m, _) => {
+                let hint = self.hint_of_expr(recv)?;
+                let ty = hint.trim_end_matches('*').to_string();
+                self.methods
+                    .get(&(ty, m.node.clone()))
+                    .filter(|(_, kind, _)| *kind != 0)
+                    .map(|(_, _, r)| r.clone())
+            }
+            _ => None,
+        }
+    }
+
+    /// `s.strip_prefix(p)` (or `strip_suffix`): an `Option<str>` built from a branch on the
+    /// test, with the rest of the string as its payload.
+    /// The character codes of a string, as a new vector of `long long` (the source of a
+    /// `chars()` chain). The loop runs to the string's terminating NUL.
+    fn chars_to_vec(&mut self, recv: &Expr) -> Result<(String, String, bool)> {
+        let s = match self.lower_expr(recv)? {
+            mir::Operand::Var(n) => n,
+            other => {
+                // A literal is copied into a named string first.
+                let t = self.fresh_temp("char*");
+                self.emit(t.clone(), mir::Rvalue::Use(other));
+                t
+            }
+        };
+        let out = self.fresh_temp(mir::vec_type("char"));
+        self.emit(
+            out.clone(),
+            mir::Rvalue::Call(mir::Operand::Func(mir::vec_fn_name("char", "new")), vec![]),
+        );
+        let idx = self.fresh_temp("long long");
+        self.emit(idx.clone(), mir::Rvalue::Use(mir::Operand::Const(0)));
+        let head = self.new_block();
+        let body = self.new_block();
+        let exit = self.new_block();
+        self.set_term(mir::Terminator::Goto(head));
+        self.current = head;
+        let item = self.fresh_temp("char");
+        self.emit(item.clone(), mir::Rvalue::Index(mir::Operand::var(s.clone()), mir::Operand::var(idx.clone())));
+        let more = self.fresh_temp("long long");
+        self.emit(more.clone(), mir::Rvalue::Binary(mir::BinOp::Ne, mir::Operand::var(item.clone()), mir::Operand::Const(0)));
+        self.set_term(mir::Terminator::If(mir::Operand::var(more), body, exit));
+        self.current = body;
+        self.emit_vec_push(&out, "char", mir::Operand::var(item));
+        self.emit(idx.clone(), mir::Rvalue::Binary(mir::BinOp::Add, mir::Operand::var(idx), mir::Operand::Const(1)));
+        self.set_term(mir::Terminator::Goto(head));
+        self.current = exit;
+        Ok((out, "char".to_string(), false))
+    }
+
+    /// `s.find(p)`: an `Option<usize>` of the first match of `p` (a string or a `char`).
+    fn lower_find(&mut self, recv: &Expr, pat: &Expr) -> Result<mir::Operand> {
+        let s = self.lower_expr(recv)?;
+        let p = self.pattern_string(pat)?;
+        let idx = self.fresh_temp("long long");
+        self.emit(idx.clone(), mir::Rvalue::Call(mir::Operand::Func("moira_str_find".to_string()), vec![s, p]));
+        let found = self.fresh_temp("long long");
+        self.emit(found.clone(), mir::Rvalue::Binary(mir::BinOp::Ge, mir::Operand::var(idx.clone()), mir::Operand::Const(0)));
+        let r = self.fresh_temp("Option<usize>");
+        let some = self.new_block();
+        let none = self.new_block();
+        let join = self.new_block();
+        self.set_term(mir::Terminator::If(mir::Operand::var(found), some, none));
+        self.current = some;
+        self.emit(r.clone(), mir::Rvalue::StructLit("Option".to_string(), vec![("tag".to_string(), mir::Operand::Const(0)), ("f0".to_string(), mir::Operand::var(idx))]));
+        self.set_term(mir::Terminator::Goto(join));
+        self.current = none;
+        self.emit(r.clone(), mir::Rvalue::StructLit("Option".to_string(), vec![("tag".to_string(), mir::Operand::Const(1))]));
+        self.set_term(mir::Terminator::Goto(join));
+        self.current = join;
+        Ok(mir::Operand::var(r))
+    }
+
+    /// A string pattern as a C string: a `char` literal becomes a one-character string.
+    fn pattern_string(&mut self, pat: &Expr) -> Result<mir::Operand> {
+        if let ExprKind::Lit(ast::Lit::Char(_)) = &pat.kind {
+            let c = self.lower_expr(pat)?;
+            let t = self.fresh_temp("char*");
+            self.emit(t.clone(), mir::Rvalue::Call(mir::Operand::Func("moira_char_str".to_string()), vec![c]));
+            return Ok(mir::Operand::var(t));
+        }
+        self.lower_expr(pat)
+    }
+
+    fn lower_strip(&mut self, e: &Expr, recv: &Expr, pat: &Expr, suffix: bool) -> Result<mir::Operand> {
+        let _ = e;
+        let s = self.lower_expr(recv)?;
+        let p = self.pattern_string(pat)?;
+        let test = if suffix { "moira_str_ends_with" } else { "moira_str_starts_with" };
+        let cond = self.fresh_temp("long long");
+        self.emit(cond.clone(), mir::Rvalue::Call(mir::Operand::Func(test.to_string()), vec![s.clone(), p.clone()]));
+        let r = self.fresh_temp("Option<str>");
+        let some = self.new_block();
+        let none = self.new_block();
+        let join = self.new_block();
+        self.set_term(mir::Terminator::If(mir::Operand::var(cond), some, none));
+        self.current = some;
+        let n = self.fresh_temp("long long");
+        self.emit(n.clone(), mir::Rvalue::Call(mir::Operand::Func("moira_str_len".to_string()), vec![p]));
+        let rest = self.fresh_temp("char*");
+        if suffix {
+            let total = self.fresh_temp("long long");
+            self.emit(total.clone(), mir::Rvalue::Call(mir::Operand::Func("moira_str_len".to_string()), vec![s.clone()]));
+            let keep = self.fresh_temp("long long");
+            self.emit(keep.clone(), mir::Rvalue::Binary(mir::BinOp::Sub, mir::Operand::var(total), mir::Operand::var(n)));
+            self.emit(rest.clone(), mir::Rvalue::Call(mir::Operand::Func("moira_str_before".to_string()), vec![s, mir::Operand::var(keep)]));
+        } else {
+            self.emit(rest.clone(), mir::Rvalue::Call(mir::Operand::Func("moira_str_after".to_string()), vec![s, mir::Operand::var(n)]));
+        }
+        self.emit(
+            r.clone(),
+            mir::Rvalue::StructLit("Option".to_string(), vec![("tag".to_string(), mir::Operand::Const(0)), ("f0".to_string(), mir::Operand::var(rest))]),
+        );
+        self.set_term(mir::Terminator::Goto(join));
+        self.current = none;
+        self.emit(
+            r.clone(),
+            mir::Rvalue::StructLit("Option".to_string(), vec![("tag".to_string(), mir::Operand::Const(1))]),
+        );
+        self.set_term(mir::Terminator::Goto(join));
+        self.current = join;
+        Ok(mir::Operand::var(r))
+    }
+
+    /// A heap copy of a string value (so a `String` can grow in place).
+    fn heap_string(&mut self, v: mir::Operand) -> Result<mir::Operand> {
+        let t = self.fresh_temp("char*");
+        self.emit(t.clone(), mir::Rvalue::Call(mir::Operand::Func("moira_str_dup".to_string()), vec![v]));
+        Ok(mir::Operand::var(t))
+    }
+
+    /// `v.clone()` on a value: a vector is copied element by element into a new vector, a
+    /// string is duplicated, and any other value is copied. A user type's own `clone`
+    /// method is dispatched by `lower_user_method` instead.
+    fn lower_value_method(
+        &mut self,
+        e: &Expr,
+        recv: &Expr,
+        method: &str,
+        args: &[Expr],
+    ) -> Result<Option<mir::Operand>> {
+        if method != "clone" || !args.is_empty() {
+            return Ok(None);
+        }
+        let hint = self.hint_of_expr(recv);
+        if let Some(h) = &hint {
+            let base = h.trim_end_matches('*');
+            if self.methods.contains_key(&(base.to_string(), "clone".to_string())) {
+                return Ok(None);
+            }
+        }
+        let _ = e;
+        let op = self.lower_expr(recv)?;
+        // The representation is the operand's own C type when it is known: a binding
+        // through `&self` holds the payload by value even though the checker types it `&T`.
+        let actual = match &op {
+            mir::Operand::Var(n) => Some(self.temp_type_of(n)).filter(|t| t != "long long"),
+            _ => None,
+        };
+        let ty = match (actual, hint) {
+            (Some(t), _) => t,
+            (None, Some(h)) => h,
+            (None, None) => "long long".to_string(),
+        };
+        // A pointer is read through (a clone of `&T` is a `T`).
+        let (base, is_ptr) = match ty.strip_suffix('*') {
+            Some(b) => (b.to_string(), true),
+            None => (ty.clone(), false),
+        };
+        if base == "str" || base == "char*" {
+            let value = if is_ptr {
+                let v = self.fresh_temp("char*");
+                self.emit(v.clone(), mir::Rvalue::Unary(mir::UnOp::Deref, op));
+                mir::Operand::var(v)
+            } else {
+                op
+            };
+            return Ok(Some(self.heap_string(value)?));
+        }
+        if let Some(elem) = mir::vec_elem(&base).map(|s| s.to_string()) {
+            let name = match &op {
+                mir::Operand::Var(n) => n.clone(),
+                _ => return Err(LowerError("`clone` of an unnamed vector".into())),
+            };
+            return Ok(Some(self.emit_vec_clone(&name, &elem, is_ptr)));
+        }
+        if is_ptr {
+            let v = self.fresh_temp(base);
+            self.emit(v.clone(), mir::Rvalue::Unary(mir::UnOp::Deref, op));
+            return Ok(Some(mir::Operand::var(v)));
+        }
+        Ok(Some(op))
+    }
+
+    /// A new vector holding the items of `src` (a vector, or a pointer to one).
+    fn emit_vec_clone(&mut self, src: &str, elem: &str, is_ptr: bool) -> mir::Operand {
+        let out = self.fresh_temp(mir::vec_type(elem));
+        self.emit(
+            out.clone(),
+            mir::Rvalue::Call(mir::Operand::Func(mir::vec_fn_name(elem, "new")), vec![]),
+        );
+        let len = self.fresh_temp("long long");
+        self.emit(len.clone(), mir::Rvalue::Field(mir::Operand::var(src), "len".into(), is_ptr));
+        let data = self.fresh_temp(format!("{elem}*"));
+        self.emit(data.clone(), mir::Rvalue::Field(mir::Operand::var(src), "data".into(), is_ptr));
+        let idx = self.fresh_temp("long long");
+        self.emit(idx.clone(), mir::Rvalue::Use(mir::Operand::Const(0)));
+        let head = self.new_block();
+        let body = self.new_block();
+        let exit = self.new_block();
+        self.set_term(mir::Terminator::Goto(head));
+        self.current = head;
+        let cmp = self.fresh_temp("long long");
+        self.emit(
+            cmp.clone(),
+            mir::Rvalue::Binary(mir::BinOp::Lt, mir::Operand::var(idx.clone()), mir::Operand::var(len)),
+        );
+        self.set_term(mir::Terminator::If(mir::Operand::var(cmp), body, exit));
+        self.current = body;
+        let item = self.fresh_temp(elem.to_string());
+        self.emit(item.clone(), mir::Rvalue::Index(mir::Operand::var(data), mir::Operand::var(idx.clone())));
+        self.emit_vec_push(&out, elem, mir::Operand::var(item));
+        self.emit(
+            idx.clone(),
+            mir::Rvalue::Binary(mir::BinOp::Add, mir::Operand::var(idx), mir::Operand::Const(1)),
+        );
+        self.set_term(mir::Terminator::Goto(head));
+        self.current = exit;
+        mir::Operand::var(out)
+    }
+
+    /// `T::default()` / `Default::default()` / `Vec::default()` for a type the checker
+    /// names: an empty vector, an empty string, zero for a number, or a zeroed struct.
+    fn lower_default_call(&mut self, e: &Expr, args: &[Expr]) -> Result<Option<mir::Operand>> {
+        if !args.is_empty() {
+            return Ok(None);
+        }
+        let Some(hint) = self.hint_of_expr(e) else {
+            return Ok(None);
+        };
+        if let Some(elem) = mir::vec_elem(&hint).map(|s| s.to_string()) {
+            let t = self.fresh_temp(mir::vec_type(&elem));
+            self.emit(
+                t.clone(),
+                mir::Rvalue::Call(mir::Operand::Func(mir::vec_fn_name(&elem, "new")), vec![]),
+            );
+            return Ok(Some(mir::Operand::var(t)));
+        }
+        if hint == "str" {
+            return Ok(Some(self.heap_string(mir::Operand::CStr(String::new()))?));
+        }
+        if matches!(
+            hint.as_str(),
+            "bool" | "long long" | "int64_t" | "int" | "double" | "i8" | "i16" | "i32" | "i64"
+                | "i128" | "isize" | "u8" | "u16" | "u32" | "u64" | "u128" | "usize" | "f32" | "f64"
+        ) {
+            return Ok(Some(mir::Operand::Const(0)));
+        }
+        if self.struct_names.contains(&hint) {
+            let t = self.fresh_temp(hint.clone());
+            self.emit(t.clone(), mir::Rvalue::StructLit(hint, Vec::new()));
+            return Ok(Some(mir::Operand::var(t)));
+        }
+        // An enum: its `#[default]` variant (the attribute is not kept in the AST, so the
+        // variant named `Unreachable` is used, else the first variant).
+        if self.variants.values().any(|(e, _, _)| *e == hint) {
+            let tag = self
+                .qualified_variants
+                .get(&format!("{hint}::Unreachable"))
+                .map(|v| v.1)
+                .unwrap_or(0);
+            let t = self.fresh_temp(hint.clone());
+            self.emit(
+                t.clone(),
+                mir::Rvalue::StructLit(hint, vec![("tag".to_string(), mir::Operand::Const(tag))]),
+            );
+            return Ok(Some(mir::Operand::var(t)));
+        }
+        Ok(None)
+    }
+
+    /// `s.m(args)` on a `str`/`String` receiver for a method of the C string runtime
+    /// (`moira_str_<m>`, see the codegen prelude). `None` otherwise.
+    fn lower_str_method(
+        &mut self,
+        e: &Expr,
+        recv: &Expr,
+        method: &str,
+        args: &[Expr],
+    ) -> Result<Option<mir::Operand>> {
+        // An integer's `to_string()` formats it (the runtime's `moira_int_to_string`).
+        if method == "to_string" && args.is_empty() {
+            // The receiver's type: the checker's hint, else the lowering's own (a closure
+            // parameter's type comes from the iterator item).
+            let recv_ty = self.hint_of_expr(recv).or_else(|| match &recv.kind {
+                ExprKind::Path(p) if p.segments.len() == 1 => {
+                    let n = &p.segments[0].node;
+                    self.types.get(n).cloned().or_else(|| {
+                        self.func
+                            .locals
+                            .iter()
+                            .find(|(l, _)| l == n)
+                            .and_then(|(_, t)| t.clone())
+                    })
+                }
+                _ => None,
+            });
+            let is_int = recv_ty.map_or(false, |h| {
+                matches!(
+                    h.as_str(),
+                    "i8" | "i16" | "i32" | "i64" | "i128" | "isize" | "u8" | "u16" | "u32"
+                        | "u64" | "u128" | "usize" | "long long" | "int64_t" | "int"
+                        | "unsigned long long"
+                )
+            });
+            if is_int {
+                let v = self.lower_expr(recv)?;
+                let t = self.fresh_temp("char*");
+                self.emit(t.clone(), mir::Rvalue::Call(mir::Operand::Func("moira_int_to_string".to_string()), vec![v]));
+                return Ok(Some(mir::Operand::var(t)));
+            }
+        }
+        // A method of a `char` (the C runtime's `moira_char_<method>`).
+        let recv_is_char = match self.hint_of_expr(recv).as_deref() {
+            Some(h) => h == "char",
+            None => match &recv.kind {
+                ExprKind::Path(p) if p.segments.len() == 1 => {
+                    let n = &p.segments[0].node;
+                    self.types.get(n).map_or(false, |t| t == "char")
+                        || self.func.locals.iter().any(|(l, t)| l == n && t.as_deref() == Some("char"))
+                }
+                _ => false,
+            },
+        };
+        if recv_is_char && args.is_empty() {
+            const CHAR_METHODS: &[&str] = &[
+                "is_ascii_alphanumeric", "is_ascii_digit", "is_ascii_alphabetic",
+                "is_ascii_whitespace", "is_ascii_uppercase", "is_ascii_lowercase",
+                "is_alphanumeric", "is_numeric", "to_ascii_lowercase", "to_ascii_uppercase",
+            ];
+            if CHAR_METHODS.contains(&method) {
+                let c = self.lower_expr(recv)?;
+                let t = self.fresh_temp(if method.starts_with("to_") { "char" } else { "long long" });
+                self.emit(t.clone(), mir::Rvalue::Call(mir::Operand::Func(format!("moira_char_{method}")), vec![c]));
+                return Ok(Some(mir::Operand::var(t)));
+            }
+        }
+        // A string converts to itself with `into()`.
+        if method == "into" && args.is_empty() {
+            let is_string = match self.hint_of_expr(recv) {
+                Some(h) => h == "str",
+                None => match &recv.kind {
+                    ExprKind::Path(p) if p.segments.len() == 1 => {
+                        let n = &p.segments[0].node;
+                        self.types.get(n).map_or(false, |t| t == "char*" || t == "str")
+                            || self.func.locals.iter().any(|(l, t)| {
+                                l == n && matches!(t.as_deref(), Some("char*") | Some("str"))
+                            })
+                    }
+                    _ => false,
+                },
+            };
+            if is_string {
+                return Ok(Some(self.lower_expr(recv)?));
+            }
+        }
+        const STR_METHODS: &[&str] = &[
+            "trim", "trim_start", "trim_end", "starts_with", "ends_with", "contains",
+            "to_string", "to_owned", "to_ascii_lowercase", "replace", "len", "is_empty", "into",
+            "push_str", "push", "strip_prefix", "strip_suffix", "find",
+        ];
+        if !STR_METHODS.contains(&method) {
+            return Ok(None);
+        }
+        let is_str = self
+            .hint_of_expr(recv)
+            .map_or(false, |h| matches!(h.trim_end_matches('*'), "str" | "String"));
+        if !is_str {
+            return Ok(None);
+        }
+        // `s.strip_prefix(p)` / `s.strip_suffix(p)`: `Some(rest)` when `s` starts (ends) with
+        // `p`, else `None`. A `char` pattern is a one-character string.
+        // `s.find(p)`: `Some(index)` of the first match, else `None`.
+        if method == "find" && args.len() == 1 {
+            return self.lower_find(recv, &args[0]).map(Some);
+        }
+        if (method == "strip_prefix" || method == "strip_suffix") && args.len() == 1 {
+            return self.lower_strip(e, recv, &args[0], method == "strip_suffix").map(Some);
+        }
+        // A `char` pattern of `starts_with` / `ends_with` / `contains`.
+        if matches!(method, "starts_with" | "ends_with" | "contains")
+            && args.len() == 1
+            && matches!(args[0].kind, ExprKind::Lit(ast::Lit::Char(_)))
+            && self.hint_of_expr(recv).map_or(false, |h| h == "str")
+        {
+            let s = self.lower_expr(recv)?;
+            let c = self.lower_expr(&args[0])?;
+            let t = self.fresh_temp("long long");
+            self.emit(
+                t.clone(),
+                mir::Rvalue::Call(mir::Operand::Func(format!("moira_str_{method}_char")), vec![s, c]),
+            );
+            return Ok(Some(mir::Operand::var(t)));
+        }
+        // `s.push_str(t)` / `s.push(c)` grow the string's heap buffer in place: the
+        // runtime takes the string's address (a `char**`).
+        if method == "push_str" || method == "push" {
+            if args.len() != 1 {
+                return Ok(None);
+            }
+            let place = self.lower_expr(recv)?;
+            let ptr = match &place {
+                mir::Operand::Var(n) if self.temp_type_of(n) == "char**" => place.clone(),
+                mir::Operand::Var(_) => {
+                    let p = self.fresh_temp("char**");
+                    self.emit(p.clone(), mir::Rvalue::Ref(place.clone(), true));
+                    mir::Operand::var(p)
+                }
+                _ => return Err(LowerError("a string can only be pushed to a named place".into())),
+            };
+            let arg = self.lower_expr(&args[0])?;
+            let helper = if method == "push" { "moira_str_push_char" } else { "moira_str_push_str" };
+            let t = self.fresh_temp("long long");
+            self.emit(t.clone(), mir::Rvalue::Call(mir::Operand::Func(helper.to_string()), vec![ptr, arg]));
+            return Ok(Some(mir::Operand::Unit));
+        }
+        let mut ops = vec![self.lower_expr(recv)?];
+        for a in args {
+            ops.push(self.lower_expr(a)?);
+        }
+        let ret = self.hint_of_expr(e).unwrap_or_else(|| "long long".to_string());
+        let t = self.fresh_temp(ret);
+        self.emit(
+            t.clone(),
+            mir::Rvalue::Call(mir::Operand::Func(format!("moira_str_{method}")), ops),
+        );
+        Ok(Some(mir::Operand::var(t)))
+    }
+
+    /// `recv.m(args)` where the receiver's type (from the checker's hint) has a method
+    /// `m` in an `impl` block: a call to `Type__m`, with the receiver as its first
+    /// argument (a pointer for `&self`, the value for `self`). `None` otherwise.
+    fn lower_user_method(
+        &mut self,
+        e: &Expr,
+        recv: &Expr,
+        method: &str,
+        args: &[Expr],
+    ) -> Result<Option<mir::Operand>> {
+        // A `clone()` the checker could not type: the receiver's C type decides it.
+        if method == "clone" && args.is_empty() && self.hint_of_expr(recv).is_none() {
+            let op = self.lower_expr(recv)?;
+            let ty = match &op {
+                mir::Operand::Var(n) => self.temp_type_of(n),
+                _ => "long long".to_string(),
+            };
+            if ty == "char*" {
+                let t = self.fresh_temp("char*");
+                self.emit(t.clone(), mir::Rvalue::Call(mir::Operand::Func("moira_str_dup".to_string()), vec![op]));
+                return Ok(Some(mir::Operand::var(t)));
+            }
+            if let Some(pointee) = ty.strip_suffix('*') {
+                let t = self.fresh_temp(pointee.to_string());
+                self.emit(t.clone(), mir::Rvalue::Unary(mir::UnOp::Deref, op));
+                return Ok(Some(mir::Operand::var(t)));
+            }
+            return Ok(Some(op));
+        }
+        // `self` names the impl's type (the checker does not type the receiver parameter).
+        let hint = match self.hint_of_expr(recv) {
+            Some(h) => h,
+            None if is_self_path(recv) => match &self.self_ty {
+                Some(t) => t.clone(),
+                None => return Ok(None),
+            },
+            None => return Ok(None),
+        };
+        let ty = hint.trim_end_matches('*').to_string();
+        // A derived `clone()` of a user struct or enum is a copy of the value.
+        let user_type = self.struct_names.contains(&ty)
+            || self.variants.values().any(|(e, _, _)| *e == ty);
+        if method == "clone" && args.is_empty() && user_type {
+            return Ok(Some(self.lower_expr(recv)?));
+        }
+        let Some((cname, kind, ret)) = self.methods.get(&(ty.clone(), method.to_string())).cloned() else {
+            return Ok(None);
+        };
+        if kind == 0 {
+            return Ok(None);
+        }
+        let op = self.lower_expr(recv)?;
+        let is_ptr = match &op {
+            mir::Operand::Var(n) => self.temp_type_of(n).ends_with('*'),
+            _ => false,
+        };
+        let self_arg = if kind == 1 {
+            if is_ptr {
+                op
+            } else {
+                let p = self.fresh_temp(format!("{ty}*"));
+                self.emit(p.clone(), mir::Rvalue::Ref(op, true));
+                mir::Operand::var(p)
+            }
+        } else if is_ptr {
+            let v = self.fresh_temp(ty.clone());
+            self.emit(v.clone(), mir::Rvalue::Unary(mir::UnOp::Deref, op));
+            mir::Operand::var(v)
+        } else {
+            op
+        };
+        let mut ops = vec![self_arg];
+        for a in args {
+            ops.push(self.lower_expr(a)?);
+        }
+        // A unit-returning function is called as a statement (codegen knows it is void).
+        if ret == "void" {
+            let t = self.fresh_temp("long long");
+            self.emit(t, mir::Rvalue::Call(mir::Operand::Func(cname), ops));
+            return Ok(Some(mir::Operand::Unit));
+        }
+        let t = self.fresh_temp(ret);
+        self.emit(t.clone(), mir::Rvalue::Call(mir::Operand::Func(cname), ops));
+        Ok(Some(mir::Operand::var(t)))
+    }
+
+    /// `Type::f(args)` / `Self::f(args)` for an associated function (or a method called
+    /// with its receiver first) of an `impl` block. `None` for other paths.
+    fn lower_assoc_call(
+        &mut self,
+        e: &Expr,
+        path: &ast::Path,
+        args: &[Expr],
+    ) -> Result<Option<mir::Operand>> {
+        // `mir::Operand::var(..)`: the type and the function are the last two segments.
+        let n = path.segments.len();
+        if n < 2 {
+            return Ok(None);
+        }
+        let mut segs: Vec<String> = vec![
+            path.segments[n - 2].node.clone(),
+            path.segments[n - 1].node.clone(),
+        ];
+        if segs[0] == "Self" {
+            match &self.self_ty {
+                Some(t) => segs[0] = t.clone(),
+                None => return Ok(None),
+            }
+        }
+        let Some((cname, _kind, ret)) = self.methods.get(&(segs[0].clone(), segs[1].clone())).cloned() else {
+            return Ok(None);
+        };
+        let mut ops = Vec::new();
+        for a in args {
+            ops.push(self.lower_expr(a)?);
+        }
+        // A unit-returning function is called as a statement (codegen knows it is void).
+        if ret == "void" {
+            let t = self.fresh_temp("long long");
+            self.emit(t, mir::Rvalue::Call(mir::Operand::Func(cname), ops));
+            return Ok(Some(mir::Operand::Unit));
+        }
+        let t = self.fresh_temp(ret);
+        self.emit(t.clone(), mir::Rvalue::Call(mir::Operand::Func(cname), ops));
+        Ok(Some(mir::Operand::var(t)))
+    }
+
+    fn lower_enum_method(
+        &mut self,
+        recv: &Expr,
+        method: &str,
+        args: &[Expr],
+    ) -> Result<Option<mir::Operand>> {
+        let known = matches!(
+            method,
+            "is_some" | "is_none" | "is_ok" | "is_err" | "unwrap" | "expect" | "unwrap_or"
+        );
+        if !known {
+            return Ok(None);
+        }
+        let hint = match self.hint_of_expr(recv) {
+            Some(h) => h,
+            None => return Ok(None),
+        };
+        let (base, targs) = match mir::split_generic(&hint) {
+            Some((b, a)) if b == "Option" || b == "Result" => {
+                (b.to_string(), a.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+            }
+            _ => return Ok(None),
+        };
+        // The tag of the variant that holds a value: `Some` and `Ok` are variant 0 (the first declared).
+        let ok_tag: i128 = 0;
+        let payload_ty = targs.first().cloned().unwrap_or_else(|| "long long".to_string());
+        let op = self.lower_expr(recv)?;
+        let ptr = self.scrutinee_is_pointer(&op);
+        let tag = self.fresh_temp("long long");
+        self.emit(tag.clone(), mir::Rvalue::Field(op.clone(), "tag".into(), ptr));
+        let test = |this: &mut Self, want: i128| -> mir::Operand {
+            let c = this.fresh_temp("long long");
+            this.emit(
+                c.clone(),
+                mir::Rvalue::Binary(mir::BinOp::Eq, mir::Operand::var(tag.clone()), mir::Operand::Const(want)),
+            );
+            mir::Operand::var(c)
+        };
+        match method {
+            "is_some" | "is_ok" => Ok(Some(test(self, ok_tag))),
+            "is_none" | "is_err" => Ok(Some(test(self, 1 - ok_tag))),
+            "unwrap" | "expect" => {
+                let v = self.fresh_temp(payload_ty);
+                self.emit(v.clone(), mir::Rvalue::Field(op, "f0".into(), ptr));
+                Ok(Some(mir::Operand::var(v)))
+            }
+            _ => {
+                // `unwrap_or(d)`: the payload when present, else `d`.
+                let Some(default) = args.first() else {
+                    return Err(LowerError("`unwrap_or` needs a default value".into()));
+                };
+                let r = self.fresh_temp(payload_ty.clone());
+                let cond = test(self, ok_tag);
+                let then_blk = self.new_block();
+                let else_blk = self.new_block();
+                let join = self.new_block();
+                self.set_term(mir::Terminator::If(cond, then_blk, else_blk));
+                self.current = then_blk;
+                let v = self.fresh_temp(payload_ty);
+                self.emit(v.clone(), mir::Rvalue::Field(op, "f0".into(), ptr));
+                self.emit(r.clone(), mir::Rvalue::Use(mir::Operand::var(v)));
+                self.set_term(mir::Terminator::Goto(join));
+                self.current = else_blk;
+                let d = self.lower_expr(default)?;
+                self.emit(r.clone(), mir::Rvalue::Use(d));
+                self.set_term(mir::Terminator::Goto(join));
+                self.current = join;
+                Ok(Some(mir::Operand::var(r)))
+            }
+        }
+    }
+
+    /// `v.first()` / `v.last()` on a sequence: `Some(&v[0])` / `Some(&v[len-1])`, or
+    /// `None` when empty. `None` for other receivers.
+    fn lower_first_last(
+        &mut self,
+        recv: &Expr,
+        method: &str,
+        args: &[Expr],
+    ) -> Result<Option<mir::Operand>> {
+        let is_len = method == "len";
+        if !(is_len || method == "first" || method == "last")
+            || !args.is_empty()
+            || !self.is_sequence(recv)
+        {
+            return Ok(None);
+        }
+        let (an, ae, ap) = self.chain_sequence(recv)?;
+        if is_len {
+            // `seq.len()` on a sequence reached through a field or a pattern binding.
+            let n = self.fresh_temp("long long");
+            self.emit(n.clone(), mir::Rvalue::Field(mir::Operand::var(an), "len".into(), ap));
+            return Ok(Some(mir::Operand::var(n)));
+        }
+        let r = self.fresh_temp(format!("Option<{ae}>"));
+        let len = self.fresh_temp("long long");
+        self.emit(len.clone(), mir::Rvalue::Field(mir::Operand::var(an.clone()), "len".into(), ap));
+        let data = self.fresh_temp(format!("{ae}*"));
+        self.emit(data.clone(), mir::Rvalue::Field(mir::Operand::var(an), "data".into(), ap));
+        let nonempty = self.fresh_temp("long long");
+        self.emit(
+            nonempty.clone(),
+            mir::Rvalue::Binary(mir::BinOp::Lt, mir::Operand::Const(0), mir::Operand::var(len.clone())),
+        );
+        let some_blk = self.new_block();
+        let none_blk = self.new_block();
+        let join = self.new_block();
+        self.set_term(mir::Terminator::If(mir::Operand::var(nonempty), some_blk, none_blk));
+        self.current = some_blk;
+        let idx = if method == "first" {
+            mir::Operand::Const(0)
+        } else {
+            let i = self.fresh_temp("long long");
+            self.emit(
+                i.clone(),
+                mir::Rvalue::Binary(mir::BinOp::Sub, mir::Operand::var(len), mir::Operand::Const(1)),
+            );
+            mir::Operand::var(i)
+        };
+        let item = self.fresh_temp(ae.clone());
+        self.emit(item.clone(), mir::Rvalue::Index(mir::Operand::var(data), idx));
+        self.emit(
+            r.clone(),
+            mir::Rvalue::StructLit(
+                "Option".to_string(),
+                vec![("tag".to_string(), mir::Operand::Const(0)), ("f0".to_string(), mir::Operand::var(item))],
+            ),
+        );
+        self.set_term(mir::Terminator::Goto(join));
+        self.current = none_blk;
+        self.emit(
+            r.clone(),
+            mir::Rvalue::StructLit("Option".to_string(), vec![("tag".to_string(), mir::Operand::Const(1))]),
+        );
+        self.set_term(mir::Terminator::Goto(join));
+        self.current = join;
+        Ok(Some(mir::Operand::var(r)))
+    }
+
+    /// `v.extend(seq)` on a vector local: a loop that pushes each item of `seq` (a
+    /// sequence, or `seq.drain(..)`, which also empties its source).
+    fn lower_vec_extend(
+        &mut self,
+        recv: &Expr,
+        arg: &Expr,
+    ) -> Result<Option<mir::Operand>> {
+        let (vname, elem, vptr) = match self.vec_local(recv) {
+            Some(v) => v,
+            None => return Ok(None),
+        };
+        // The source: `x.drain(..)` (emptied afterwards) or a sequence.
+        // Adapters that only re-walk the same items (`x.iter().cloned()`) are skipped.
+        let mut src = arg;
+        let mut drain = false;
+        loop {
+            match &src.kind {
+                ExprKind::MethodCall(r, m, a)
+                    if m.node == "drain" && a.len() == 1 =>
+                {
+                    src = &**r;
+                    drain = true;
+                    break;
+                }
+                ExprKind::MethodCall(r, m, a)
+                    if a.is_empty()
+                        && matches!(m.node.as_str(), "iter" | "cloned" | "copied" | "into_iter") =>
+                {
+                    src = &**r;
+                }
+                _ => break,
+            }
+        }
+        if !self.is_sequence(src) {
+            return Err(LowerError("`extend` needs a sequence argument".into()));
+        }
+        let (an, ae, ap) = self.chain_sequence(src)?;
+        let len = self.fresh_temp("long long");
+        self.emit(len.clone(), mir::Rvalue::Field(mir::Operand::var(an.clone()), "len".into(), ap));
+        let data = self.fresh_temp(format!("{ae}*"));
+        self.emit(data.clone(), mir::Rvalue::Field(mir::Operand::var(an.clone()), "data".into(), ap));
+        let idx = self.fresh_temp("long long");
+        self.emit(idx.clone(), mir::Rvalue::Use(mir::Operand::Const(0)));
+        let head = self.new_block();
+        let body_blk = self.new_block();
+        let exit = self.new_block();
+        self.set_term(mir::Terminator::Goto(head));
+        self.current = head;
+        let cmp = self.fresh_temp("long long");
+        self.emit(cmp.clone(), mir::Rvalue::Binary(mir::BinOp::Lt, mir::Operand::var(idx.clone()), mir::Operand::var(len)));
+        self.set_term(mir::Terminator::If(mir::Operand::var(cmp), body_blk, exit));
+        self.current = body_blk;
+        let item = self.fresh_temp(ae.clone());
+        self.emit(item.clone(), mir::Rvalue::Index(mir::Operand::var(data), mir::Operand::var(idx.clone())));
+        // The receiver's pointer, then the push.
+        let ptr = if vptr {
+            mir::Operand::var(vname.clone())
+        } else {
+            let p = self.fresh_temp(format!("{}*", mir::vec_type(&elem)));
+            self.emit(p.clone(), mir::Rvalue::Ref(mir::Operand::var(vname.clone()), true));
+            mir::Operand::var(p)
+        };
+        let pushed = self.fresh_temp("long long");
+        self.emit(
+            pushed,
+            mir::Rvalue::Call(
+                mir::Operand::Func(mir::vec_fn_name(&elem, "push")),
+                vec![ptr, mir::Operand::var(item)],
+            ),
+        );
+        self.emit(
+            idx.clone(),
+            mir::Rvalue::Binary(mir::BinOp::Add, mir::Operand::var(idx.clone()), mir::Operand::Const(1)),
+        );
+        self.set_term(mir::Terminator::Goto(head));
+        self.current = exit;
+        if drain {
+            self.emit(
+                "__scratch".to_string(),
+                mir::Rvalue::StoreField(mir::Operand::var(an), "len".to_string(), mir::Operand::Const(0), ap),
+            );
+        }
+        Ok(Some(mir::Operand::Unit))
     }
 
     /// Lower a `for` over a sequence (a `Vec`, a slice, or a vector reached
@@ -2225,6 +4074,18 @@ impl Lower {
         self.set_term(mir::Terminator::Goto(head));
 
         self.current = exit;
+        if si.drain {
+            // `drain(..)` removes the items: the vector is empty afterwards.
+            self.emit(
+                "__scratch".to_string(),
+                mir::Rvalue::StoreField(
+                    mir::Operand::var(name),
+                    "len".to_string(),
+                    mir::Operand::Const(0),
+                    is_ptr,
+                ),
+            );
+        }
         Ok(mir::Operand::Unit)
     }
 
@@ -2252,6 +4113,11 @@ impl Lower {
                     .get(elem_ct)
                     .and_then(|s| s.fields.get(i))
                     .map(|(_, t)| t.clone())
+                    .or_else(|| match mir::split_generic(elem_ct) {
+                        // A tuple type string names its element types.
+                        Some(("Tuple", args)) => args.get(i).map(|s| s.to_string()),
+                        _ => None,
+                    })
                     .unwrap_or_else(|| "long long".to_string());
                 if !self.func.locals.iter().any(|(n, _)| n == &name) {
                     self.func.locals.push((name.clone(), Some(ct.clone())));
@@ -2416,7 +4282,22 @@ impl Lower {
             Some(h) => h.clone(),
             None => return,
         };
-        if hint_applies(&hint) && self.temp_type_of(&name) == "long long" {
+        // A constructor (`Ok(x)`) is typed by its bare enum; a function returning an
+        // instance of that enum gives the arguments (`return Ok(x)`, a tail `Ok(x)`).
+        let hint = match (hint.as_str(), self.func.ret.clone()) {
+            ("Option" | "Result", Some(ret))
+                if mir::split_generic(&ret).map(|(b, _)| b) == Some(hint.as_str()) =>
+            {
+                ret
+            }
+            _ => hint,
+        };
+        let current = self.temp_type_of(&name);
+        let refines_enum =
+            (current == "Option" || current == "Result") && hint.starts_with(&current);
+        // A struct the program defines is hinted by its name.
+        let defined = self.structs.iter().any(|s| s.name == hint);
+        if (hint_applies(&hint) || defined) && (current == "long long" || refines_enum) {
             self.types.insert(name, hint);
         }
     }
@@ -2440,13 +4321,8 @@ impl Lower {
                 let f: f64 = text.parse().unwrap_or(0.0);
                 Ok(mir::Operand::Const(f as i128))
             }
-            ExprKind::Lit(ast::Lit::Str(_)) => {
-                // String literals are not yet backed by data in the codegen
-                // subset; lower to a zero placeholder operand so type-checked
-                // programs (e.g. `s.push_str("hi")`) still lower + borrow-check.
-                // Real allocation/string layout is a documented codegen follow-up.
-                Ok(mir::Operand::Const(0))
-            }
+            // A string literal is a C string constant (`"hi"` is a `char*`).
+            ExprKind::Lit(ast::Lit::Str(text)) => Ok(mir::Operand::CStr(text.clone())),
             ExprKind::Lit(ast::Lit::Char(c)) => Ok(mir::Operand::Const(*c as i128)),
             ExprKind::Path(p) => {
                 let name = p
@@ -2463,7 +4339,7 @@ impl Lower {
                 // A nullary variant (`None`) is the enum's tagged struct with
                 // just the tag set.
                 if let Some((ename, tag, 0)) = self.variants.get(&name).cloned() {
-                    let t = self.fresh_temp(&format!("struct {}", ename));
+                    let t = self.fresh_temp(ename.clone());
                     self.emit(
                         t.clone(),
                         mir::Rvalue::StructLit(
@@ -2576,11 +4452,82 @@ impl Lower {
                     AUnOp::Deref => mir::UnOp::Deref,
                 };
                 let o = self.lower_expr(e)?;
+                if matches!(mop, mir::UnOp::Deref) {
+                    // Reading through a non-pointer (a match-ergonomics binding) is the value.
+                    let oty = match &o {
+                        mir::Operand::Var(n) => self.temp_type_of(n),
+                        _ => String::new(),
+                    };
+                    if oty != "long long" && oty.strip_suffix('*').is_none() {
+                        return Ok(o);
+                    }
+                    let pointee = oty.strip_suffix('*').unwrap_or("long long");
+                    let t = self.fresh_temp(pointee.to_string());
+                    self.emit(t.clone(), mir::Rvalue::Unary(mop, o));
+                    return Ok(mir::Operand::var(t));
+                }
                 let t = self.fresh_temp("long long");
                 self.emit(t.clone(), mir::Rvalue::Unary(mop, o));
                 Ok(mir::Operand::var(t))
             }
             ExprKind::Call(callee, args) => {
+                if let ExprKind::Path(p) = &callee.kind {
+                    if let Some(v) = self.lower_assoc_call(e, p, args)? {
+                        return Ok(v);
+                    }
+                }
+                // `T::default()` / `Default::default()`, typed by the checker.
+                if let ExprKind::Path(p) = &callee.kind {
+                    if p.segments.last().map_or(false, |s| s.node == "default") {
+                        if let Some(v) = self.lower_default_call(e, args)? {
+                            return Ok(v);
+                        }
+                    }
+                }
+                // `String::from(s)`: a string is already its `char*`, so the value is `s`.
+                if let ExprKind::Path(p) = &callee.kind {
+                    let segs: Vec<&str> = p.segments.iter().map(|s| s.node.as_str()).collect();
+                    if segs == ["String", "from"] && args.len() == 1 {
+                        let v = self.lower_expr(&args[0])?;
+                        return self.heap_string(v);
+                    }
+                    if segs == ["String", "new"] && args.is_empty() {
+                        return self.heap_string(mir::Operand::CStr(String::new()));
+                    }
+                }
+                // `Box::new(v)`: a heap copy of `v`, typed as a pointer to its type.
+                if let ExprKind::Path(p) = &callee.kind {
+                    let segs: Vec<&str> = p.segments.iter().map(|s| s.node.as_str()).collect();
+                    if segs == ["Box", "new"] && args.len() == 1 {
+                        let v = self.lower_expr(&args[0])?;
+                        let elem = match &v {
+                            mir::Operand::Var(n) => self.temp_type_of(n),
+                            _ => "long long".to_string(),
+                        };
+                        let t = self.fresh_temp(format!("{elem}*"));
+                        self.emit(
+                            t.clone(),
+                            mir::Rvalue::Call(mir::Operand::Func("moira_box_new".to_string()), vec![v]),
+                        );
+                        return Ok(mir::Operand::var(t));
+                    }
+                }
+                // `Vec::new()` / `Vec::with_capacity(n)` in an expression position (a
+                // struct field, an argument): the checker's hint gives the element type.
+                if let Some(vec_ty) = vec_constructor(e) {
+                    if let Some(elem) = self.hint_of_expr(e).as_deref().and_then(mir::vec_elem) {
+                        let elem = elem.to_string();
+                        let t = self.fresh_temp(mir::vec_type(&elem));
+                        self.emit(
+                            t.clone(),
+                            mir::Rvalue::Call(
+                                mir::Operand::Func(mir::vec_fn_name(&elem, vec_ty)),
+                                vec![],
+                            ),
+                        );
+                        return Ok(mir::Operand::var(t));
+                    }
+                }
                 // A tuple-variant constructor (`Some(5)`, `Ok(v)`, user
                 // `MyEnum::Var(x)`) lowers to a tagged-struct literal, not a
                 // function call.
@@ -2603,7 +4550,7 @@ impl Lower {
                             !self.all_fn_names.contains(&vname)
                         };
                         if qualifier_ok && arity == args.len() {
-                            return self.lower_variant_construction(&ename, tag, arity, args);
+                            return self.lower_variant_construction(&ename, tag, arity, args, self.hint_of_expr(e));
                         }
                     }
                 }
@@ -2619,7 +4566,12 @@ impl Lower {
                                 .last()
                                 .map(|s| s.node.clone())
                                 .unwrap_or_default(),
-                            _ => return Err(LowerError("call target must be a path".into())),
+                            _ => {
+                                return Err(LowerError(format!(
+                                    "call target must be a path (bytes {}..{})",
+                                    callee.span.start, callee.span.end
+                                )))
+                            }
                         };
                         // A call to an `async fn` has no bare body; it lowers either to
                         // the future constructor (`__ctor`, used by `.await`) or to the
@@ -2726,6 +4678,19 @@ impl Lower {
                     }
                 }
                 let o = self.lower_expr(e)?;
+                // A reference needs a place: a constant is first copied into a temporary.
+                let o = match o {
+                    mir::Operand::Var(_) => o,
+                    other => {
+                        let ty = match &other {
+                            mir::Operand::CStr(_) => "char*",
+                            _ => "long long",
+                        };
+                        let t = self.fresh_temp(ty);
+                        self.emit(t.clone(), mir::Rvalue::Use(other));
+                        mir::Operand::var(t)
+                    }
+                };
                 let inner = self.temp_type_of(&name_of(&o));
                 if mir::slice_elem(&inner).is_some() {
                     return Ok(o);
@@ -2735,11 +4700,37 @@ impl Lower {
                 Ok(mir::Operand::var(t))
             }
             ExprKind::Struct(path, fields, _base) => {
-                let name = path
+                // `E::V { a, b }`: a struct-like variant, built in declaration order.
+                let segs: Vec<&str> = path.segments.iter().map(|s| s.node.as_str()).collect();
+                if let Some((ename, tag, arity)) = self.struct_variant_of(&segs) {
+                    let names = self
+                        .variant_fields
+                        .get(&(ename.clone(), tag))
+                        .cloned()
+                        .unwrap_or_default();
+                    let mut args: Vec<ast::Expr> = Vec::new();
+                    for n in &names {
+                        match fields.iter().find(|(f, _)| f.node == *n) {
+                            Some((_, e)) => args.push(e.clone()),
+                            None => {
+                                return Err(LowerError(format!(
+                                    "variant literal is missing field `{n}`"
+                                )))
+                            }
+                        }
+                    }
+                    return self.lower_variant_construction(&ename, tag, arity, &args, self.hint_of_expr(e));
+                }
+                let mut name = path
                     .segments
                     .last()
                     .map(|s| s.node.clone())
                     .unwrap_or_default();
+                if name == "Self" {
+                    if let Some(t) = &self.self_ty {
+                        name = t.clone();
+                    }
+                }
                 let mut fvals = Vec::new();
                 for (fname, fval) in fields {
                     fvals.push((fname.node.clone(), self.lower_expr(fval)?));
@@ -2799,7 +4790,12 @@ impl Lower {
                 // `pat` over `arr[0..len]` via an index variable). `pat` may be a
                 // tuple pattern (`for (a, b) in arr_of_tuples`), in which case each
                 // element is destructured into its components.
-                let array_len: Option<i128> = match &iter.kind {
+                // `for x in &arr` iterates the same array as `for x in arr`.
+                let arr_expr: &Expr = match &iter.kind {
+                    ExprKind::Ref(i, _) => &**i,
+                    _ => iter,
+                };
+                let array_len: Option<i128> = match &arr_expr.kind {
                     ExprKind::Array(elems) => Some(elems.len() as i128),
                     ExprKind::Path(p) => {
                         let vname = p
@@ -2819,9 +4815,70 @@ impl Lower {
                         }
                     }
                 }
+                // `for x in a.iter().chain(b.iter())`: the first sequence's loop, then the second's.
+                if let ExprKind::MethodCall(cr, cm, cargs) = &iter.kind {
+                    if cm.node == "chain" && cargs.len() == 1 {
+                        let left_e: &Expr = match &cr.kind {
+                            ExprKind::MethodCall(r, m, a) if m.node == "iter" && a.is_empty() => &**r,
+                            _ => &**cr,
+                        };
+                        let right_e: &Expr = match &cargs[0].kind {
+                            ExprKind::MethodCall(r, m, a) if m.node == "iter" && a.is_empty() => &**r,
+                            _ => &cargs[0],
+                        };
+                        if self.is_sequence(left_e) && self.is_sequence(right_e) {
+                            let (ln, le, lp) = self.chain_sequence(left_e)?;
+                            let first = SeqIter { seq: left_e, enumerate: false, rev: false, mutable: false, chars: false, drain: false, indices: false };
+                            self.lower_seq_for(&ln, &le, lp, pat, body, &first)?;
+                            let (rn, re, rp) = self.chain_sequence(right_e)?;
+                            let second = SeqIter { seq: right_e, enumerate: false, rev: false, mutable: false, chars: false, drain: false, indices: false };
+                            return self.lower_seq_for(&rn, &re, rp, pat, body, &second);
+                        }
+                    }
+                }
+                // `for (a, b) in x.iter().zip(y.iter())` over two named sequences.
+                if let ExprKind::MethodCall(zr, zm, zargs) = &iter.kind {
+                    if zm.node == "zip" && zargs.len() == 1 {
+                        let left_e = match &zr.kind {
+                            ExprKind::MethodCall(r, m, a) if m.node == "iter" && a.is_empty() => &**r,
+                            _ => &**zr,
+                        };
+                        let right_e = match &zargs[0].kind {
+                            ExprKind::MethodCall(r, m, a) if m.node == "iter" && a.is_empty() => &**r,
+                            _ => &zargs[0],
+                        };
+                        if self.is_sequence(left_e) && self.is_sequence(right_e) {
+                            let l = self.chain_sequence(left_e)?;
+                            let r = self.chain_sequence(right_e)?;
+                            return self.lower_zip_for(l, r, pat, body);
+                        }
+                    }
+                }
+                // A map: `for (k, v) in &m`, `m.iter()`, `m.keys()`, `m.values()`.
+                let (map_inner, which): (&Expr, MapIter) = match &iter.kind {
+                    ExprKind::Ref(i, _) => (&**i, MapIter::Pairs),
+                    ExprKind::MethodCall(r, m, a) if m.node == "iter" && a.is_empty() => {
+                        (&**r, MapIter::Pairs)
+                    }
+                    ExprKind::MethodCall(r, m, a) if m.node == "keys" && a.is_empty() => {
+                        (&**r, MapIter::Keys)
+                    }
+                    ExprKind::MethodCall(r, m, a) if m.node == "values" && a.is_empty() => {
+                        (&**r, MapIter::Values)
+                    }
+                    _ => (iter, MapIter::Pairs),
+                };
+                let map_here = match self.map_local(map_inner) {
+                    Some(m) => Some(m),
+                    None => self.map_from_hint(map_inner)?,
+                };
+                if let Some((mname, k, v, is_ptr)) = map_here {
+                    let sorted = self.is_sorted_expr(map_inner);
+                    return self.lower_map_for(&mname, &k, &v, is_ptr, pat, body, which, sorted);
+                }
                 let si = seq_iter(iter);
                 if si.chars {
-                    return self.lower_str_for(si.seq, pat, body);
+                    return self.lower_str_for(si.seq, pat, body, si.indices);
                 }
                 if let Some((vname, elem, is_ptr)) = self.vec_local(si.seq) {
                     return self.lower_seq_for(&vname, &elem, is_ptr, pat, body, &si);
@@ -2868,19 +4925,23 @@ impl Lower {
                         // Lower the array to its operand (a `let`-bound array
                         // resolves to the variable; an array literal lowers to an
                         // inline `long long tN[len] = {..};` temp).
-                        let arr_op = self.lower_expr(iter)?;
+                        let arr_op = self.lower_expr(arr_expr)?;
                         // Element C type: for an array literal, infer it from the
                         // first element (so tuple-element arrays bind to the right
                         // component types); otherwise default to `long long`.
-                        let elem_ct = if let ExprKind::Array(elems) = &iter.kind {
-                            if !elems.is_empty() {
+                        let elem_ct = match &arr_expr.kind {
+                            ExprKind::Array(elems) if !elems.is_empty() => {
                                 let e0 = self.lower_expr(&elems[0])?;
                                 self.temp_type_of(&name_of(&e0))
-                            } else {
-                                "long long".into()
                             }
-                        } else {
-                            "long long".into()
+                            // A `let`-bound array remembers its element type (an enum for
+                            // an array of variants).
+                            ExprKind::Path(p) => p
+                                .segments
+                                .last()
+                                .and_then(|s| self.array_elems.get(&s.node).cloned())
+                                .unwrap_or_else(|| "long long".into()),
+                            _ => "long long".into(),
                         };
                         let idx = self.fresh_temp("long long");
                         self.emit(idx.clone(), mir::Rvalue::Use(mir::Operand::Const(0)));
@@ -2980,6 +5041,50 @@ impl Lower {
                 self.lower_iter_chain(e, chain, &method.node, args)
             }
             ExprKind::MethodCall(recv, method, args) => {
+                if let Some(v) = self.lower_value_method(e, recv, &method.node, args)? {
+                    return Ok(v);
+                }
+                if let Some(v) = self.lower_str_method(e, recv, &method.node, args)? {
+                    return Ok(v);
+                }
+                if let Some(v) = self.lower_user_method(e, recv, &method.node, args)? {
+                    return Ok(v);
+                }
+                if let Some(v) = self.lower_map_method(recv, &method.node, args)? {
+                    return Ok(v);
+                }
+                if method.node == "extend" && args.len() == 1 {
+                    if let Some(v) = self.lower_vec_extend(recv, &args[0])? {
+                        return Ok(v);
+                    }
+                }
+                if let Some(v) = self.lower_enum_method(recv, &method.node, args)? {
+                    return Ok(v);
+                }
+                if let Some(v) = self.lower_first_last(recv, &method.node, args)? {
+                    return Ok(v);
+                }
+                // `opt.take()` on an `Option<T>` local: the value, leaving `None` behind.
+                if method.node == "take" && args.is_empty() {
+                    if let ExprKind::Path(p) = &recv.kind {
+                        if p.segments.len() == 1 {
+                            let name = p.segments[0].node.clone();
+                            let ty = self.temp_type_of(&name);
+                            if mir::split_generic(&ty).map(|(b, _)| b) == Some("Option") {
+                                let old = self.fresh_temp(ty.clone());
+                                self.emit(old.clone(), mir::Rvalue::Use(mir::Operand::var(name.clone())));
+                                self.emit(
+                                    name.clone(),
+                                    mir::Rvalue::StructLit(
+                                        "Option".to_string(),
+                                        vec![("tag".to_string(), mir::Operand::Const(1))],
+                                    ),
+                                );
+                                return Ok(mir::Operand::var(old));
+                            }
+                        }
+                    }
+                }
                 // `v[a..b].len()`: the receiver is a slice value; read its length.
                 if let ExprKind::Index(_, idx) = &recv.kind {
                     if range_bounds(idx).is_some() && (method.node == "len" || method.node == "is_empty") {
@@ -3052,7 +5157,11 @@ impl Lower {
                         };
                         let mut operands = vec![recv_ptr];
                         for a in args {
-                            operands.push(self.lower_expr(a)?);
+                            // The pushed value has the element type (a tuple takes it).
+                            self.expect_ty = Some(elem.clone());
+                            let o = self.lower_expr(a);
+                            self.expect_ty = None;
+                            operands.push(o?);
                         }
                         let result_ty = if helper == "is_empty" {
                             "bool"
@@ -3148,6 +5257,7 @@ impl Lower {
                 // struct type for this shape, and emit a `Tuple` rvalue.
                 let mut operands = Vec::with_capacity(elems.len());
                 let mut c_tys = Vec::with_capacity(elems.len());
+                let expected = self.expect_ty.take();
                 for e in elems {
                     let o = self.lower_expr(e)?;
                     let ct = match &o {
@@ -3157,7 +5267,20 @@ impl Lower {
                     c_tys.push(ct);
                     operands.push(o);
                 }
-                let tuple_ty = self.tuple_type(c_tys);
+                // The checker's hint names the components when the context decides them
+                // (`vec![(0, n)]` as a `Vec<(usize, usize)>`).
+                let want = expected.or_else(|| self.hint_of_expr(e));
+                let generic = match want.as_deref().and_then(mir::split_generic) {
+                    Some(("Tuple", args)) if args.len() == c_tys.len() => {
+                        Some(want.clone().unwrap_or_default())
+                    }
+                    _ => None,
+                };
+                // A tuple the context types as `Tuple<..>` is that generic instance.
+                let tuple_ty = match generic {
+                    Some(g) => g,
+                    None => self.tuple_type(c_tys),
+                };
                 let t = self.fresh_temp(tuple_ty.clone());
                 self.emit(t.clone(), mir::Rvalue::Tuple(tuple_ty, operands));
                 Ok(mir::Operand::var(t))
@@ -3172,7 +5295,18 @@ impl Lower {
             }
             ExprKind::Deref(e) => {
                 let o = self.lower_expr(e)?;
-                let t = self.fresh_temp("long long");
+                // A match-ergonomics binding of a scalar payload is already the value
+                // (not a C pointer), so reading it through `*` is the value itself.
+                let oty = match &o {
+                    mir::Operand::Var(n) => self.temp_type_of(n),
+                    _ => String::new(),
+                };
+                // An operand of unknown type keeps the dereference (it may be a pointer).
+                if oty != "long long" && oty.strip_suffix('*').is_none() {
+                    return Ok(o);
+                }
+                let pointee = oty.strip_suffix('*').unwrap_or("long long");
+                let t = self.fresh_temp(pointee.to_string());
                 self.emit(t.clone(), mir::Rvalue::Unary(mir::UnOp::Deref, o));
                 Ok(mir::Operand::var(t))
             }
@@ -3197,7 +5331,7 @@ impl Lower {
         let k = ctx.await_count;
         ctx.await_count += 1;
         let self_local = ctx.self_local.clone();
-        let slots = ctx.slots.clone();
+        let slots: Vec<(String, String)> = ctx.slots.clone();
 
         // Determine the callee's poll function and future struct to drive on
         // resume.
@@ -3346,6 +5480,60 @@ impl Lower {
     /// `If(Block{Local}, ..)`). Identifier patterns are irrefutable (the branch
     /// is always taken); enum-variant patterns (`Some(x)`, `None`, …) lower a
     /// real tag-test guard and take the `else` branch when the tag mismatches.
+    /// Bind a pattern's names as new variables of the current scope. Each name gets a
+    /// unique C name; its type is set for the lowering of the scope's body. Returns what
+    /// `leave_bindings` needs to end the scope.
+    fn enter_bindings(
+        &mut self,
+        binds: &[(String, mir::Operand)],
+    ) -> (HashMap<String, String>, Vec<(String, Option<String>)>) {
+        let mut renames: HashMap<String, String> = HashMap::new();
+        let mut saved: Vec<(String, Option<String>)> = Vec::new();
+        for (name, val) in binds {
+            let unique = format!("{name}__arm{}", self.arm_counter);
+            self.arm_counter += 1;
+            let ty = match val {
+                mir::Operand::Var(v) => self.temp_type_of(v),
+                _ => "long long".to_string(),
+            };
+            saved.push((name.clone(), self.types.get(name).cloned()));
+            if ty != "long long" {
+                self.types.insert(name.clone(), ty);
+            } else {
+                self.types.remove(name);
+            }
+            self.declare_bound_name(&unique, val);
+            self.emit(unique.clone(), mir::Rvalue::Use(val.clone()));
+            renames.insert(name.clone(), unique);
+        }
+        (renames, saved)
+    }
+
+    /// End a scope opened by `enter_bindings`: restore the names' types, and rename the
+    /// blocks from `from` on (the scope's body) to the bindings' unique names.
+    fn leave_bindings(
+        &mut self,
+        from: usize,
+        renames: &HashMap<String, String>,
+        saved: Vec<(String, Option<String>)>,
+    ) {
+        for (name, old) in saved.into_iter().rev() {
+            match old {
+                Some(t) => {
+                    self.types.insert(name, t);
+                }
+                None => {
+                    self.types.remove(&name);
+                }
+            }
+        }
+        if !renames.is_empty() {
+            for block in self.func.blocks[from..].iter_mut() {
+                rename_block(block, renames);
+            }
+        }
+    }
+
     fn lower_if_let(
         &mut self,
         local: &ast::Local,
@@ -3367,15 +5555,10 @@ impl Lower {
             self.set_term(mir::Terminator::If(cond, then_blk, else_blk));
 
             self.current = then_blk;
-            for (name, val) in binds {
-                if !self.func.locals.iter().any(|(n, _)| n == &name) {
-                    self.func
-                        .locals
-                        .push((name.clone(), Some("long long".into())));
-                }
-                self.emit(name, mir::Rvalue::Use(val));
-            }
+            let then_start = then_blk;
+            let (renames, saved) = self.enter_bindings(&binds);
             let v_then = self.lower_block_value(then_b)?;
+            self.leave_bindings(then_start, &renames, saved);
             self.emit(result.clone(), mir::Rvalue::Use(v_then));
             self.set_term(mir::Terminator::Goto(merge));
 
@@ -3398,12 +5581,6 @@ impl Lower {
         // same discriminant test the `match` lowering uses; identifier patterns
         // are irrefutable and always taken.
         let (cond, binds) = self.pattern_guard(&init_op, &local.pat)?;
-        let new_binds: Vec<(String, Option<String>)> = binds
-            .iter()
-            .filter(|(n, _)| !self.func.locals.iter().any(|(en, _)| en == n))
-            .map(|(n, _)| (n.clone(), Some("long long".into())))
-            .collect();
-        self.func.locals.extend(new_binds);
 
         // Lower as a conditional on the pattern guard (always taken when the
         // pattern is irrefutable).
@@ -3415,10 +5592,10 @@ impl Lower {
         self.set_term(mir::Terminator::If(cond, then_blk, else_blk));
 
         self.current = then_blk;
-        for (n, val) in &binds {
-            self.emit(n.clone(), mir::Rvalue::Use(val.clone()));
-        }
+        let then_start = then_blk;
+        let (renames, saved) = self.enter_bindings(&binds);
         let v_then = self.lower_block_value(then_b)?;
+        self.leave_bindings(then_start, &renames, saved);
         self.emit(result.clone(), mir::Rvalue::Use(v_then));
         self.set_term(mir::Terminator::Goto(merge));
 
@@ -3457,15 +5634,12 @@ impl Lower {
         self.set_term(mir::Terminator::If(cond, body_blk, exit));
 
         self.current = body_blk;
-        for (n, val) in binds {
-            if !self.func.locals.iter().any(|(en, _)| en == &n) {
-                self.func.locals.push((n.clone(), Some("long long".into())));
-            }
-            self.emit(n, mir::Rvalue::Use(val));
-        }
+        let (renames, saved) = self.enter_bindings(&binds);
+        let body_start = body_blk;
         self.loops.push((exit, head));
         self.lower_block_value(body)?;
         self.loops.pop();
+        self.leave_bindings(body_start, &renames, saved);
         self.set_term(mir::Terminator::Goto(head));
 
         self.current = exit;
@@ -3488,6 +5662,8 @@ impl Lower {
         self.set_term(mir::Terminator::Goto(next_test));
 
         for (pat, body) in arms {
+            // The blocks of this arm: from its test to the end of its body.
+            let arm_start = self.func.blocks.len();
             let test_blk = next_test;
             self.current = test_blk;
             let (cond, binds): (Option<mir::Operand>, Vec<(String, mir::Operand)>) =
@@ -3510,23 +5686,52 @@ impl Lower {
                     self.current = body_blk;
                 }
             }
-            // Emit bound pattern names (assigned the scrutinee / element value).
-            for (name, val) in binds {
-                if !self.func.locals.iter().any(|(n, _)| n == &name) {
-                    self.func
-                        .locals
-                        .push((name.clone(), Some("long long".into())));
+            // Each bound name is a new variable of this arm (arms may bind one name at
+            // different types). Its uses in the body refer to it: by type while the body is
+            // lowered, and by name once the arm's blocks are renamed.
+            let mut renames: HashMap<String, String> = HashMap::new();
+            let mut saved_types: Vec<(String, Option<String>)> = Vec::new();
+            for (name, val) in &binds {
+                let unique = format!("{name}__arm{}", self.arm_counter);
+                self.arm_counter += 1;
+                let ty = match val {
+                    mir::Operand::Var(v) => self.temp_type_of(v),
+                    _ => "long long".to_string(),
+                };
+                saved_types.push((name.clone(), self.types.get(name).cloned()));
+                if ty != "long long" {
+                    self.types.insert(name.clone(), ty);
+                } else {
+                    self.types.remove(name);
                 }
-                self.emit(name, mir::Rvalue::Use(val));
+                self.declare_bound_name(&unique, val);
+                self.emit(unique.clone(), mir::Rvalue::Use(val.clone()));
+                renames.insert(name.clone(), unique);
             }
             let v = self.lower_expr(body)?;
             self.emit(result.clone(), mir::Rvalue::Use(v));
             self.set_term(mir::Terminator::Goto(merge));
+            for (name, old) in saved_types.into_iter().rev() {
+                match old {
+                    Some(t) => {
+                        self.types.insert(name, t);
+                    }
+                    None => {
+                        self.types.remove(&name);
+                    }
+                }
+            }
+            if !renames.is_empty() {
+                for block in self.func.blocks[arm_start..].iter_mut() {
+                    rename_block(block, &renames);
+                }
+            }
         }
 
-        // The final fall-through block (no arm matched): yield unit.
+        // The final fall-through block: no arm matched, which an exhaustive match never does.
+        // It aborts (the result is never read), so no value of the result's type is needed.
         self.current = next_test;
-        self.emit(result.clone(), mir::Rvalue::Use(mir::Operand::Unit));
+        self.emit_panic_call();
         self.set_term(mir::Terminator::Goto(merge));
 
         self.current = merge;
@@ -3536,6 +5741,22 @@ impl Lower {
     /// The C type of an expression that constructs an enum variant
     /// (`Some(..)` / `None` / user variants), i.e. `struct <Enum>` — `None`
     /// when the expression is not a variant construction.
+    /// The C element type of an array literal: the enum when its first element is a
+    /// variant (`[T::Add, T::Sub]`), else `long long`.
+    fn array_elem_ct(&self, elems: &[ast::Expr]) -> String {
+        let path = match elems.first().map(|e| &e.kind) {
+            Some(ExprKind::Path(p)) => p,
+            Some(ExprKind::Call(callee, _)) => match &callee.kind {
+                ExprKind::Path(p) => p,
+                _ => return "long long".to_string(),
+            },
+            _ => return "long long".to_string(),
+        };
+        self.variant_info(path)
+            .map(|(ename, _, _)| ename)
+            .unwrap_or_else(|| "long long".to_string())
+    }
+
     fn variant_c_type(&self, e: &ast::Expr) -> Option<String> {
         let vname = match &e.kind {
             ExprKind::Call(callee, _) => match &callee.kind {
@@ -3646,7 +5867,11 @@ impl Lower {
                 let items = tpt_moira_clotho::parser::Parser::parse_macro_args(m.tokens.clone());
                 let mut out_ops = Vec::new();
                 for it in &items {
-                    out_ops.push((self.lower_expr(it)?, 0));
+                    // The element type is the expected type of each item (a tuple takes it).
+                    self.expect_ty = Some(elem.clone());
+                    let op = self.lower_expr(it);
+                    self.expect_ty = None;
+                    out_ops.push((op?, 0));
                 }
                 out_ops
             }
@@ -3752,7 +5977,7 @@ impl Lower {
                     }
                     rest.push(a);
                 }
-                let mut placeholders: Vec<&ast::Expr> = rest.drain(..).collect();
+                let mut placeholders: Vec<&ast::Expr> = rest;
                 let segments: Vec<String> = fmt
                     .as_deref()
                     .map(|f| f.split("{}").map(|s| s.to_string()).collect())
@@ -3766,7 +5991,7 @@ impl Lower {
                     l.emit(
                         seg.clone(),
                         mir::Rvalue::Call(
-                            mir::Operand::Func("print_str".to_string()),
+                            mir::Operand::Func("__moira_w_str".to_string()),
                             vec![mir::Operand::CStr(s.to_string())],
                         ),
                     );
@@ -3784,11 +6009,11 @@ impl Lower {
                             })
                             .as_str()
                         {
-                            t if t.contains("char*") => "print_str",
-                            "str" => "print_str",
-                            "bool" => "print_bool",
-                            "double" => "print_f64",
-                            _ => "print_i64",
+                            t if t.contains("char*") => "__moira_w_str",
+                            "str" => "__moira_w_str",
+                            "bool" => "__moira_w_bool",
+                            "double" => "__moira_w_f64",
+                            _ => "__moira_w_i64",
                         };
                         let seg_idx = i + 1;
                         let after = segments.get(seg_idx).cloned().unwrap_or_default();
@@ -3807,7 +6032,7 @@ impl Lower {
                         self.emit(
                             t.clone(),
                             mir::Rvalue::Call(
-                                mir::Operand::Func("print_i64".to_string()),
+                                mir::Operand::Func("__moira_w_i64".to_string()),
                                 vec![op],
                             ),
                         );
@@ -3818,7 +6043,7 @@ impl Lower {
                     self.emit(
                         seg.clone(),
                         mir::Rvalue::Call(
-                            mir::Operand::Func("print_str".to_string()),
+                            mir::Operand::Func("__moira_w_str".to_string()),
                             vec![mir::Operand::CStr("\n".to_string())],
                         ),
                     );
@@ -3848,6 +6073,7 @@ impl Lower {
         tag: i128,
         arity: usize,
         args: &[ast::Expr],
+        want: Option<String>,
     ) -> Result<mir::Operand> {
         if args.len() != arity {
             return Err(LowerError(format!(
@@ -3859,9 +6085,28 @@ impl Lower {
         let mut fields = vec![("tag".to_string(), mir::Operand::Const(tag))];
         for (i, a) in args.iter().enumerate() {
             let v = self.lower_expr(a)?;
-            fields.push((format!("f{}", i), v));
+            fields.push((payload_field(ename, tag, i), v));
         }
-        let t = self.fresh_temp(&format!("struct {}", ename));
+        // `Some(x)` is an `Option<T>` when the payload's type is known; the struct
+        // literal takes its C struct from the destination type (see the codegen).
+        // The checker's type for the whole expression names the enum instance (`Some(3)`
+        // as an `Option<i64>`); failing that, a variable payload's type does.
+        let hinted = want.filter(|w| {
+            mir::split_generic(w).map_or(false, |(base, _)| base == ename)
+        });
+        let payload_ty = match (hinted, fields.get(1)) {
+            (Some(w), _) => Some(w),
+            (None, Some((_, mir::Operand::Var(n)))) if ename == "Option" => {
+                let t = self.temp_type_of(n);
+                if t == "long long" {
+                    None
+                } else {
+                    Some(format!("Option<{t}>"))
+                }
+            }
+            _ => None,
+        };
+        let t = self.fresh_temp(payload_ty.unwrap_or_else(|| ename.to_string()));
         self.emit(t.clone(), mir::Rvalue::StructLit(ename.to_string(), fields));
         Ok(mir::Operand::var(t))
     }
@@ -3876,23 +6121,32 @@ impl Lower {
     /// The enum variant a path names. A path qualified by its enum (`Enum::Variant`)
     /// finds that enum's variant, so equal variant names in two enums do not clash.
     fn variant_info(&self, path: &ast::Path) -> Option<(String, i128, usize)> {
-        let n = path.segments.len();
+        let segs: Vec<&str> = path.segments.iter().map(|s| s.node.as_str()).collect();
+        self.variant_info_names(&segs)
+    }
+
+    /// `variant_info` for a path given as its segment names.
+    fn variant_info_names(&self, segs: &[&str]) -> Option<(String, i128, usize)> {
+        let n = segs.len();
         if n >= 2 {
-            let key = format!(
-                "{}::{}",
-                path.segments[n - 2].node,
-                path.segments[n - 1].node
-            );
+            let key = format!("{}::{}", segs[n - 2], segs[n - 1]);
             if let Some(v) = self.qualified_variants.get(&key) {
                 return Some(v.clone());
             }
         }
-        let last = path
-            .segments
-            .last()
-            .map(|s| s.node.clone())
-            .unwrap_or_default();
-        self.variants.get(&last).cloned()
+        segs.last().and_then(|last| self.variants.get(*last).cloned())
+    }
+
+    /// A struct-like variant named by a literal or pattern path (`E::V { .. }`), with
+    /// its enum, tag and arity. `None` for a struct, or a name that is no variant.
+    fn struct_variant_of(&self, segs: &[&str]) -> Option<(String, i128, usize)> {
+        if segs.len() == 1 && self.struct_names.contains(segs[0]) {
+            return None;
+        }
+        let (ename, tag, arity) = self.variant_info_names(segs)?;
+        self.variant_fields
+            .contains_key(&(ename.clone(), tag))
+            .then_some((ename, tag, arity))
     }
 
     /// Whether a scrutinee is a pointer (a match on `&Enum` reads fields with `->`).
@@ -3916,6 +6170,55 @@ impl Lower {
             if *ln == name && lt.as_deref().map_or(true, |t| t == "long long") {
                 *lt = Some(ename.to_string());
             }
+        }
+    }
+
+    /// The C type of payload field `i` of variant `tag` of `ename`, for a scrutinee
+    /// operand: a prelude `Option<T>`/`Result<T, E>` gives its payload types; a user
+    /// enum uses its declared payload types.
+    fn payload_ty_of(&self, scrut: &mir::Operand, ename: &str, tag: i128, i: usize) -> String {
+        if is_prelude_enum(ename) {
+            let st = match scrut {
+                mir::Operand::Var(n) => self.temp_type_of(n),
+                _ => String::new(),
+            };
+            if let Some((base, args)) = mir::split_generic(&st) {
+                if base == ename {
+                    let k = if ename == "Result" && tag == 1 { 1 } else { 0 };
+                    if let Some(t) = args.get(k) {
+                        if i == 0 {
+                            return t.to_string();
+                        }
+                    }
+                }
+            }
+            return "long long".to_string();
+        }
+        self.payload_ty(ename, tag, i)
+    }
+
+    /// The C type of payload field `i` of variant `tag` of `ename` (`long long` when
+    /// the enum is prelude or the type is not known here).
+    fn payload_ty(&self, ename: &str, tag: i128, i: usize) -> String {
+        self.payload_tys
+            .get(&(ename.to_string(), tag))
+            .and_then(|v| v.get(i))
+            .cloned()
+            .unwrap_or_else(|| "long long".to_string())
+    }
+
+    /// Declare a name bound by a pattern to the type of the value it takes, so a
+    /// payload of a typed enum keeps its type through the binding.
+    fn declare_bound_name(&mut self, name: &str, val: &mir::Operand) {
+        let ty = match val {
+            mir::Operand::Var(v) => self.temp_type_of(v),
+            _ => "long long".to_string(),
+        };
+        if !self.func.locals.iter().any(|(n, _)| n == name) {
+            self.func.locals.push((name.to_string(), Some(ty.clone())));
+        }
+        if ty != "long long" {
+            self.types.insert(name.to_string(), ty);
         }
     }
 
@@ -3956,13 +6259,58 @@ impl Lower {
         // Payload bindings: sub-pattern i matches field `f{i}`.
         let mut binds = Vec::new();
         for (i, sp) in subpats.iter().enumerate() {
-            let field_t = self.fresh_temp("long long");
+            let pty = self.payload_ty_of(scrut, &ename, tag, i);
+            let field_t = self.fresh_temp(pty);
             self.emit(
                 field_t.clone(),
-                mir::Rvalue::Field(scrut.clone(), format!("f{}", i), scrut_ptr),
+                mir::Rvalue::Field(scrut.clone(), payload_field(&ename, tag, i), scrut_ptr),
             );
             let fv = mir::Operand::var(field_t);
             let (_c, mut b) = self.pattern_guard(&fv, sp)?;
+            binds.append(&mut b);
+        }
+        Ok((Some(mir::Operand::var(cond)), binds))
+    }
+
+    /// The tag-test guard and bindings for a struct-like variant pattern
+    /// (`E::V { a, b: pat, .. }`): each named field reads its payload slot.
+    fn struct_variant_guard(
+        &mut self,
+        scrut: &mir::Operand,
+        ename: &str,
+        tag: i128,
+        names: &[String],
+        fields: &[(String, ast::Pat)],
+    ) -> Result<(Option<mir::Operand>, Vec<(String, mir::Operand)>)> {
+        let scrut_ptr = self.scrutinee_is_pointer(scrut);
+        self.type_enum_operand(scrut, ename);
+        let tag_val = self.fresh_temp("long long");
+        self.emit(
+            tag_val.clone(),
+            mir::Rvalue::Field(scrut.clone(), "tag".to_string(), scrut_ptr),
+        );
+        let cond = self.fresh_temp("long long");
+        self.emit(
+            cond.clone(),
+            mir::Rvalue::Binary(
+                mir::BinOp::Eq,
+                mir::Operand::var(tag_val),
+                mir::Operand::Const(tag),
+            ),
+        );
+        let mut binds = Vec::new();
+        for (fname, sp) in fields {
+            let i = names
+                .iter()
+                .position(|n| n == fname)
+                .ok_or_else(|| LowerError(format!("variant has no field `{fname}`")))?;
+            let pty = self.payload_ty_of(scrut, ename, tag, i);
+            let field_t = self.fresh_temp(pty);
+            self.emit(
+                field_t.clone(),
+                mir::Rvalue::Field(scrut.clone(), payload_field(ename, tag, i), scrut_ptr),
+            );
+            let (_c, mut b) = self.pattern_guard(&mir::Operand::var(field_t), sp)?;
             binds.append(&mut b);
         }
         Ok((Some(mir::Operand::var(cond)), binds))
@@ -4133,7 +6481,18 @@ impl Lower {
             }
             // `Name { field: pat, .. }`: a struct has no tag, so the pattern tests only
             // its field subpatterns (each on the field's value), and binds their names.
-            ast::Pat::Struct(_, fields) => {
+            ast::Pat::Struct(name, fields) => {
+                // `E::V { a, .. }`: a struct-like variant is tested by its tag, then its
+                // named fields are read from their payload slots.
+                let segs: Vec<&str> = name.split("::").collect();
+                if let Some((ename, tag, _)) = self.struct_variant_of(&segs) {
+                    let names = self
+                        .variant_fields
+                        .get(&(ename.clone(), tag))
+                        .cloned()
+                        .unwrap_or_default();
+                    return self.struct_variant_guard(scrut, &ename, tag, &names, fields);
+                }
                 let ptr = self.scrutinee_is_pointer(scrut);
                 let mut cond: Option<mir::Operand> = None;
                 let mut binds = Vec::new();
@@ -4174,8 +6533,8 @@ impl Lower {
             ast::Lit::Int(v, _) => mir::Operand::Const(*v as i128),
             ast::Lit::Bool(b) => mir::Operand::Const(if *b { 1 } else { 0 }),
             ast::Lit::Char(c) => mir::Operand::Const(*c as i128),
-            // Strings/other literals are not yet backed by data in the codegen
-            // subset; lower to zero (type-checked programs still lower).
+            ast::Lit::Str(text) => mir::Operand::CStr(text.clone()),
+            // Float literals are not yet supported in the codegen subset.
             _ => mir::Operand::Const(0),
         }
     }

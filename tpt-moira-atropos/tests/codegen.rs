@@ -283,9 +283,9 @@ fn enum_c_emission_contains_tagged_struct() {
 
 #[test]
 fn println_macro_expands_to_print_calls() {
-    // `println!`/`eprintln!` expand to interleaved `print_str`/`print_i64`
-    // runtime calls; literal segments, `{}` placeholders and the trailing
-    // newline all appear in the emitted C.
+    // `println!`/`eprintln!` expand to interleaved raw writer calls
+    // (`__moira_w_str`/`__moira_w_i64`, which do not end the line); literal segments,
+    // `{}` placeholders and the trailing newline all appear in the emitted C.
     let mir = lower_src(
         "fn main() {\n\
              let n = 42;\n\
@@ -294,9 +294,9 @@ fn println_macro_expands_to_print_calls() {
          }",
     );
     let c = tpt_moira_atropos::codegen_c::emit_c(&mir);
-    assert!(c.contains("print_str(\"hello\")"), "literal segment:\n{c}");
-    assert!(c.contains("print_i64(n)"), "placeholder arg printed:\n{c}");
-    assert!(c.contains("print_str(\"\\n\")"), "trailing newline:\n{c}");
+    assert!(c.contains("__moira_w_str(\"hello\")"), "literal segment:\n{c}");
+    assert!(c.contains("__moira_w_i64(n)"), "placeholder arg printed:\n{c}");
+    assert!(c.contains("__moira_w_str(\"\\n\")"), "trailing newline:\n{c}");
 }
 
 #[test]
