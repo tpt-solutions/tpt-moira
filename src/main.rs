@@ -169,6 +169,15 @@ fn main() -> ExitCode {
         }
         (root, externs)
     };
+    // Generic functions are specialized per instantiation before anything else sees
+    // the program: the checker and the backends then only handle concrete code.
+    let program = {
+        let refs: Vec<(&str, &tpt_moira_clotho::ast::Program)> = extern_programs
+            .iter()
+            .map(|(k, p)| (k.as_str(), p))
+            .collect();
+        tpt_moira_lachesis::mono::monomorphize(&program, &refs)
+    };
     let have_externs = !extern_programs.is_empty();
     let check_call = |program: &tpt_moira_clotho::ast::Program| {
         if have_externs {

@@ -164,7 +164,18 @@ fn derive_struct(trait_name: &str, s: &StructDef) -> Option<String> {
         ),
         _ => return None,
     };
-    Some(src)
+    if s.generics.params.is_empty() {
+        return Some(src);
+    }
+    // A generic struct gets a generic impl: `impl Clone for Pair` becomes
+    // `impl<T> Clone for Pair<T>`, so monomorphization instantiates it per use.
+    let params: Vec<&str> = s.generics.params.iter().map(|p| p.name.node.as_str()).collect();
+    let list = params.join(", ");
+    let header_for = format!(" for {name} ");
+    let generic = src
+        .replacen("impl ", &format!("impl<{list}> "), 1)
+        .replacen(&header_for, &format!(" for {name}<{list}> "), 1);
+    Some(generic)
 }
 
 /// Generate the `impl` source for a derive trait on an enum.

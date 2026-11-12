@@ -45,6 +45,19 @@ pub struct FnSig {
 }
 
 /// The Phase-2 type checker.
+/// A call of a generic function, as the checker solved it: `span` is the callee
+/// expression's span, `callee` the function's name, and `params` each generic
+/// parameter (in declaration order) with its solved type (`Ty::Unknown` if unsolved).
+#[derive(Debug, Clone)]
+pub struct GenericCall {
+    pub span: Span,
+    pub callee: String,
+    /// The type an associated function belongs to (`Pair` in `Pair::new(..)`), or
+    /// `None` for a free function or a struct literal.
+    pub owner: Option<String>,
+    pub params: Vec<(String, Ty)>,
+}
+
 pub struct TypeChecker {
     /// Top-level `type` aliases (of this crate and its externs), expanded before
     /// any annotation is converted to a `Ty`.
@@ -110,6 +123,12 @@ pub struct TypeChecker {
     /// The type of every checked expression, keyed by its source span
     /// `(start, end)`. Exported to Atropos as type hints (see [`hint_of_ty`]).
     expr_types: HashMap<(usize, usize), Ty>,
+    /// Calls of generic functions, with the type each generic parameter was solved to
+    /// (see [`GenericCall`]).
+    generic_calls: Vec<GenericCall>,
+    /// The type a `let` annotation expects of a call initializer, consumed by the next
+    /// `check_call`: it seeds the solution of the callee's generic parameters.
+    expected_call_ty: Option<Ty>,
 }
 
 /// The C-style name of a scalar, string or struct type, used inside a
@@ -395,6 +414,8 @@ impl Default for TypeChecker {
             ret_span: Span::default(),
             errors: Vec::new(),
             expr_types: HashMap::new(),
+            generic_calls: Vec::new(),
+            expected_call_ty: None,
         }
     }
 }
@@ -453,6 +474,15 @@ impl TypeChecker {
         } else {
             Err(cx.errors)
         }
+    }
+
+    /// The generic calls of a program's bodies (see [`GenericCall`]), with the errors
+    /// the check found ignored: monomorphization runs on programs being checked.
+    pub fn generic_calls_of(
+        prog: &tpt_moira_clotho::ast::Program,
+        externs: &[(&str, &tpt_moira_clotho::ast::Program)],
+    ) -> Vec<GenericCall> {
+        Self::check_program_cx(prog, externs).generic_calls
     }
 
     /// Type-check a program like [`TypeChecker::check_program_with`], also
@@ -945,7 +975,11 @@ impl TypeChecker {
                     let ty = if let Some(ann) = &l.ty {
                         let ann_ty = self.type_to_ty(ann);
                         if let Some(init) = &l.init {
+                            if matches!(init.kind, ExprKind::Call(..) | ExprKind::Struct(..)) {
+                                self.expected_call_ty = Some(ann_ty.clone());
+                            }
                             let it = self.infer_expr(init);
+                            self.expected_call_ty = None;
                             let span = init.span;
                             self.expect(&it, &ann_ty, span);
                         }
@@ -2012,6 +2046,8 @@ impl TypeChecker {
     }
 
     fn check_call(&mut self, span: Span, callee: &Expr, args: &[Expr]) -> Ty {
+        // The expected type is for this call only; nested calls must not see it.
+        let expected = self.expected_call_ty.take();
         let path = match &callee.kind {
             ExprKind::Path(p) => p,
             _ => {
@@ -2071,6 +2107,11 @@ impl TypeChecker {
         // substitute them through the return type.
         let ret_ty = if !sig.generics.params.is_empty() {
             let mut sub: HashMap<String, Ty> = HashMap::new();
+            // A `let` annotation fixes the return type first: `let a: i64 = id(40)`
+            // solves `T` to `i64`, not to the literal's default.
+            if let Some(exp) = &expected {
+                self.unify_ty(&sig.ret, exp, &mut sub);
+            }
             for (a, pt) in args.iter().zip(sig.params.iter()) {
                 let at = self.infer_expr(a);
                 if !self.unify_ty(pt, &at, &mut sub) {
@@ -2171,6 +2212,28 @@ impl TypeChecker {
                     }
                 }
             }
+            let solved: Vec<(String, Ty)> = sig
+                .generics
+                .params
+                .iter()
+                .map(|p| {
+                    (
+                        p.name.node.clone(),
+                        sub.get(&p.name.node).cloned().unwrap_or(Ty::Unknown),
+                    )
+                })
+                .collect();
+            let owner = if segments.len() >= 2 {
+                Some(segments[segments.len() - 2].clone())
+            } else {
+                None
+            };
+            self.generic_calls.push(GenericCall {
+                span: callee.span,
+                callee: segments.last().cloned().unwrap_or_default(),
+                owner,
+                params: solved,
+            });
             self.apply_sub(&sig.ret, &sub)
         } else {
             for (a, pt) in args.iter().zip(sig.params.iter()) {
@@ -2264,10 +2327,20 @@ impl TypeChecker {
         }
         match self.structs.get(&name).cloned() {
             Some(info) => {
+                // A `let` annotation names the struct's arguments before the fields do:
+                // `let p: Pair<i64> = Pair { .. }` solves `T` to `i64`.
+                let expected = self.expected_call_ty.take();
+                let mut sub: HashMap<String, Ty> = HashMap::new();
+                if let Some(Ty::Apply(en, eargs)) = &expected {
+                    if *en == name && eargs.len() == info.generics.params.len() {
+                        for (p, a) in info.generics.params.iter().zip(eargs.iter()) {
+                            sub.insert(p.name.node.clone(), a.clone());
+                        }
+                    }
+                }
                 // Infer the struct's generic arguments from the field
                 // initializers (mirroring generic call-site inference), then
                 // check each initializer against its (substituted) field type.
-                let mut sub: HashMap<String, Ty> = HashMap::new();
                 for (fname, fexpr) in fields {
                     if let Some((_, ft)) = info.fields.iter().find(|(n, _)| n == &fname.node) {
                         let at = self.infer_expr(fexpr);
@@ -2275,6 +2348,25 @@ impl TypeChecker {
                             self.unify_ty(ft, &at, &mut sub);
                         }
                     }
+                }
+                if !info.generics.params.is_empty() {
+                    let solved: Vec<(String, Ty)> = info
+                        .generics
+                        .params
+                        .iter()
+                        .map(|p| {
+                            (
+                                p.name.node.clone(),
+                                sub.get(&p.name.node).cloned().unwrap_or(Ty::Unknown),
+                            )
+                        })
+                        .collect();
+                    self.generic_calls.push(GenericCall {
+                        span,
+                        callee: name.clone(),
+                        owner: None,
+                        params: solved,
+                    });
                 }
                 for (fname, fexpr) in fields {
                     match info.fields.iter().find(|(n, _)| n == &fname.node) {
@@ -3377,7 +3469,8 @@ impl TypeChecker {
         self.assoc_fns.insert(
             ("fs".into(), "write".into()),
             sig(
-                vec![Ref(Box::new(std("Path"))), Ref(Box::new(Str))],
+                // `P: AsRef<Path>`: a path, a string or a `PathBuf` reference.
+                vec![Unknown, Ref(Box::new(Str))],
                 Apply("Result".to_string(), vec![Unit]),
             ),
         );
@@ -3926,7 +4019,12 @@ impl TypeChecker {
                 }
             }
             (Ty::Struct(a), Ty::Struct(b)) => a == b,
-            (Ty::Apply(a, _), Ty::Apply(b, _)) => a == b,
+            // Two applications unify argument by argument (`Pair<T>` with `Pair<i64>`).
+            (Ty::Apply(a, xs), Ty::Apply(b, ys)) => {
+                a == b
+                    && xs.len() == ys.len()
+                    && xs.iter().zip(ys.iter()).all(|(x, y)| self.unify_ty(x, y, sub))
+            }
             (Ty::Apply(a, _), Ty::Struct(b)) | (Ty::Struct(a), Ty::Apply(b, _)) => a == b,
             (Ty::Ref(a), Ty::Ref(b)) | (Ty::RefMut(a), Ty::RefMut(b)) => self.unify_ty(a, b, sub),
             (Ty::Array(a, _), Ty::Array(b, _)) => self.unify_ty(a, b, sub),
