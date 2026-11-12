@@ -99,3 +99,30 @@ fn question_mark_error_payload_keeps_its_type() {
          fn main() {}\n",
     );
 }
+
+#[test]
+fn struct_declared_after_its_use_keeps_its_field_types() {
+    compile_ok(
+        "struct_order",
+        "struct Alias { n: i64 }\n\
+         impl Alias {\n\
+             fn f(&self, ty: &Type) -> Span { let s = ty.span; s }\n\
+         }\n\
+         #[derive(Clone, Copy)]\n\
+         pub struct Span { pub start: usize }\n\
+         pub struct Type { pub span: Span }\n\
+         fn main() {}\n",
+    );
+}
+
+#[test]
+fn derived_clone_of_an_enum_with_a_shared_variant_name_compiles() {
+    compile_ok(
+        "self_variant",
+        "#[derive(Clone)]\n\
+         pub enum First { Item(i64), Other }\n\
+         #[derive(Clone)]\n\
+         pub enum Second { Item(i64, i64), Other }\n\
+         fn main() {}\n",
+    );
+}

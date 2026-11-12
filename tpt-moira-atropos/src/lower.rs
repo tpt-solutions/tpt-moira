@@ -326,6 +326,21 @@ pub fn lower_program_with_enums(
             out.structs.push(st.clone());
         }
     }
+    // Every struct of the program is known to each function, whatever its position:
+    // a function may use a struct declared after it.
+    let mut known_structs: Vec<mir::StructDef> = out.structs.clone();
+    for item in &prog.items {
+        if let (false, ItemKind::Struct(s)) = (item.is_cfg_test(), &item.kind) {
+            known_structs.push(mir::StructDef {
+                name: s.name.node.clone(),
+                fields: s
+                    .fields
+                    .iter()
+                    .map(|f| (f.name.node.clone(), type_to_c(&f.ty, &aliases)))
+                    .collect(),
+            });
+        }
+    }
     for item in &prog.items {
         // `#[cfg(test)]` items (e.g. `mod tests`) are not part of the
         // compiled artifact; test-only code uses macros and library surface
@@ -369,7 +384,7 @@ pub fn lower_program_with_enums(
                     }
                     let mut g = f.clone();
                     g.name.node = format!("{ty}__{}", f.name.node);
-                    let mut l = Lower::new(&out.structs, shared.clone());
+                    let mut l = Lower::new(&known_structs, shared.clone());
                     l.async_fns = async_names.clone();
                     l.all_fn_names = all_fn_names.clone();
                     l.const_values = const_values.clone();
@@ -405,7 +420,7 @@ pub fn lower_program_with_enums(
             ItemKind::Const(_) | ItemKind::Static(_) => {}
             ItemKind::Function(f) => {
                 if f.is_async {
-                    let mut l = Lower::new(&out.structs, shared.clone());
+                    let mut l = Lower::new(&known_structs, shared.clone());
                     l.async_fns = async_names.clone();
                     l.all_fn_names = all_fn_names.clone();
                     l.const_values = const_values.clone();
@@ -423,7 +438,7 @@ pub fn lower_program_with_enums(
                     out.functions.extend(ad.closures.iter().cloned());
                     out.async_fns.push(ad.def);
                 } else {
-                    let mut l = Lower::new(&out.structs, shared.clone());
+                    let mut l = Lower::new(&known_structs, shared.clone());
                     l.async_fns = async_names.clone();
                     l.all_fn_names = all_fn_names.clone();
                     l.const_values = const_values.clone();
@@ -8484,7 +8499,12 @@ impl Lower {
     fn variant_info_names(&self, segs: &[&str]) -> Option<(String, i128, usize)> {
         let n = segs.len();
         if n >= 2 {
-            let key = format!("{}::{}", segs[n - 2], segs[n - 1]);
+            // `Self::V` names a variant of the impl's type.
+            let owner = match (segs[n - 2], &self.self_ty) {
+                ("Self", Some(t)) => t.as_str(),
+                (o, _) => o,
+            };
+            let key = format!("{}::{}", owner, segs[n - 1]);
             if let Some(v) = self.qualified_variants.get(&key) {
                 return Some(v.clone());
             }
