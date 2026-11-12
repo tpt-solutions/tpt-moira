@@ -55,6 +55,9 @@ pub struct GenericCall {
     /// The type an associated function belongs to (`Pair` in `Pair::new(..)`), or
     /// `None` for a free function or a struct literal.
     pub owner: Option<String>,
+    /// Whether the call is a method call (`recv.method(..)`), whose `owner` is the
+    /// receiver's type.
+    pub method: bool,
     pub params: Vec<(String, Ty)>,
 }
 
@@ -129,6 +132,8 @@ pub struct TypeChecker {
     /// The type a `let` annotation expects of a call initializer, consumed by the next
     /// `check_call`: it seeds the solution of the callee's generic parameters.
     expected_call_ty: Option<Ty>,
+    /// The type parameters a method declares itself (not its impl's), by (type, method).
+    method_own_generics: HashMap<(String, String), Vec<String>>,
 }
 
 /// The C-style name of a scalar, string or struct type, used inside a
@@ -172,6 +177,22 @@ fn merge_struct_fields(
                 },
             );
         }
+    }
+}
+
+/// A signature type with the named parameters turned into generic parameters: the
+/// method signatures name their own type parameters as unresolved single-word paths.
+fn generalize_params(t: &Ty, names: &[String]) -> Ty {
+    match t {
+        Ty::Struct(n) if names.contains(n) => Ty::Generic(n.clone()),
+        Ty::Ref(inner) => Ty::Ref(Box::new(generalize_params(inner, names))),
+        Ty::RefMut(inner) => Ty::RefMut(Box::new(generalize_params(inner, names))),
+        Ty::Apply(n, args) => Ty::Apply(
+            n.clone(),
+            args.iter().map(|a| generalize_params(a, names)).collect(),
+        ),
+        Ty::Tuple(elems) => Ty::Tuple(elems.iter().map(|a| generalize_params(a, names)).collect()),
+        other => other.clone(),
     }
 }
 
@@ -416,6 +437,7 @@ impl Default for TypeChecker {
             expr_types: HashMap::new(),
             generic_calls: Vec::new(),
             expected_call_ty: None,
+            method_own_generics: HashMap::new(),
         }
     }
 }
@@ -572,6 +594,10 @@ impl TypeChecker {
                         if let tpt_moira_clotho::ast::ItemKind::Function(f) = &m.kind {
                             let params = f.params.iter().map(|p| cx.type_to_ty(&p.ty)).collect();
                             let ret = f.ret.as_ref().map(|t| cx.type_to_ty(t)).unwrap_or(Ty::Unit);
+                            cx.method_own_generics.insert(
+                                (self_name.clone(), f.name.node.clone()),
+                                f.generics.params.iter().map(|p| p.name.node.clone()).collect(),
+                            );
                             cx.user_methods.insert(
                                 (self_name.clone(), f.name.node.clone()),
                                 FnSig {
@@ -2232,6 +2258,7 @@ impl TypeChecker {
                 span: callee.span,
                 callee: segments.last().cloned().unwrap_or_default(),
                 owner,
+                method: false,
                 params: solved,
             });
             self.apply_sub(&sig.ret, &sub)
@@ -2365,6 +2392,7 @@ impl TypeChecker {
                         span,
                         callee: name.clone(),
                         owner: None,
+                        method: false,
                         params: solved,
                     });
                 }
@@ -2655,7 +2683,13 @@ impl TypeChecker {
                 .get(&(name.clone(), method.node.clone()))
                 .cloned()
             {
-                return self.check_user_method(span, &recv_ty, &sig, args);
+                return self.check_user_method(
+                    span,
+                    &recv_ty,
+                    &sig,
+                    args,
+                    Some((name.clone(), method.node.clone(), method.span)),
+                );
             }
         }
         // 2) Prelude method (`std` types). These carry no receiver in their
@@ -2774,7 +2808,7 @@ impl TypeChecker {
                     .get(&(tr.clone(), method.to_string()))
                     .cloned()
                 {
-                    return Some(self.check_user_method(span, recv_ty, &sig, args));
+                    return Some(self.check_user_method(span, recv_ty, &sig, args, None));
                 }
             }
             return None;
@@ -2815,7 +2849,7 @@ impl TypeChecker {
         // query type is used for the receiver check so an integer-literal
         // receiver (`Ty::Int`) matches an `&self` of `i32`.
         let (_, sig) = matches.into_iter().next()?;
-        Some(self.check_user_method(span, &query_ty, &sig, args))
+        Some(self.check_user_method(span, &query_ty, &sig, args, None))
     }
 
     /// The user-trait bounds declared on generic parameter `name`, either
@@ -2857,7 +2891,23 @@ impl TypeChecker {
     /// The receiver must satisfy the method's first parameter (the receiver
     /// type, with auto-ref/auto-mut-ref, matching Rust's method resolution),
     /// and the remaining arguments must satisfy the rest of the signature.
-    fn check_user_method(&mut self, span: Span, recv_ty: &Ty, sig: &FnSig, args: &[Expr]) -> Ty {
+    fn check_user_method(
+        &mut self,
+        span: Span,
+        recv_ty: &Ty,
+        sig: &FnSig,
+        args: &[Expr],
+        call: Option<(String, String, Span)>,
+    ) -> Ty {
+        // The method's own type parameters (not its impl's), by name.
+        let own: Vec<String> = match &call {
+            Some((owner, method, _)) => self
+                .method_own_generics
+                .get(&(owner.clone(), method.clone()))
+                .cloned()
+                .unwrap_or_default(),
+            None => Vec::new(),
+        };
         // Receiver check (auto-ref: `x.foo()` where `foo(&self)`).
         if !sig.params.is_empty() {
             let recv_param = &sig.params[0];
@@ -2891,23 +2941,47 @@ impl TypeChecker {
         // way the call site cannot verify them without full site inference,
         // so accept them (bounds were discharged where the generic was
         // instantiated).
-        let generic_names: Vec<String> = sig
+        let mut generic_names: Vec<String> = sig
             .generics
             .params
             .iter()
             .map(|p| p.name.node.clone())
             .collect();
+        generic_names.extend(own.iter().cloned());
         let is_generic_ty = |pt: &Ty| match pt {
             Ty::Generic(_) => true,
             Ty::Struct(n) | Ty::Apply(n, _) => generic_names.contains(n),
             _ => false,
         };
+        let mut arg_tys: Vec<(Ty, Ty)> = Vec::new();
         for (a, pt) in args.iter().zip(rest.iter()) {
             let at = self.infer_expr(a);
+            arg_tys.push((pt.clone(), at.clone()));
             if is_generic_ty(pt) {
                 continue;
             }
             self.expect(&at, pt, a.span);
+        }
+        // Solve the method's own type parameters from the arguments, and record the call
+        // so monomorphization can specialize the method.
+        if let (Some((owner, method, name_span)), false) = (&call, own.is_empty()) {
+            let mut sub: HashMap<String, Ty> = HashMap::new();
+            for (pt, at) in &arg_tys {
+                let g = generalize_params(pt, &own);
+                self.unify_ty(&g, at, &mut sub);
+            }
+            let solved: Vec<(String, Ty)> = own
+                .iter()
+                .map(|n| (n.clone(), sub.get(n).cloned().unwrap_or(Ty::Unknown)))
+                .collect();
+            // Keyed by the method's name, so a call inside a macro's tokens can be found.
+            self.generic_calls.push(GenericCall {
+                span: *name_span,
+                callee: method.clone(),
+                owner: Some(owner.clone()),
+                method: true,
+                params: solved,
+            });
         }
         // A signature whose return type *is* one of its generic parameters
         // (`-> F`) yields whatever the corresponding argument produced; model

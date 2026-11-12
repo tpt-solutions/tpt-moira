@@ -48,8 +48,27 @@ pub fn monomorphize(prog: &Program, externs: &[(&str, &Program)]) -> Program {
         }
     }
     let generic_struct_names: HashSet<String> = generic_structs.keys().cloned().collect();
-    if generic_fns.is_empty() && generic_structs.is_empty() {
+    if generic_fns.is_empty() && generic_structs.is_empty() && !generic_methods_exist(prog) {
         return prog.clone();
+    }
+
+    // Methods with their own type parameters, by (owner, name), from the non-generic impls.
+    let mut generic_methods: HashMap<(String, String), Function> = HashMap::new();
+    for item in &prog.items {
+        if let ItemKind::Impl(imp) = &item.kind {
+            if imp.generics.params.is_empty() {
+                if let Some(owner) = imp_self_name(imp) {
+                    for m in &imp.items {
+                        if let ItemKind::Function(f) = &m.kind {
+                            if !f.generics.params.is_empty() {
+                                generic_methods
+                                    .insert((owner.to_string(), f.name.node.clone()), f.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     let mut mono = Mono {
@@ -59,6 +78,7 @@ pub fn monomorphize(prog: &Program, externs: &[(&str, &Program)]) -> Program {
         generic_structs,
         generic_struct_names,
         generic_impls,
+        generic_methods,
         seen: HashSet::new(),
         queue: Vec::new(),
         out: Vec::new(),
@@ -113,6 +133,36 @@ pub fn monomorphize(prog: &Program, externs: &[(&str, &Program)]) -> Program {
                     kind: ItemKind::Function(f),
                     attributes: Vec::new(),
                 });
+            }
+            Work::Method {
+                owner,
+                method,
+                instance,
+                sub,
+            } => {
+                let Some(mut f) = mono
+                    .generic_methods
+                    .get(&(owner.clone(), method.clone()))
+                    .cloned()
+                else {
+                    continue;
+                };
+                f.name.node = instance.clone();
+                f.generics = Generics::default();
+                mono.rewrite_fn(&mut f, &sub);
+                for item in mono.out.iter_mut() {
+                    if let ItemKind::Impl(imp) = &mut item.kind {
+                        if imp_self_name(imp) == Some(owner.as_str()) && imp.generics.params.is_empty()
+                        {
+                            imp.items.push(Item {
+                                visibility: Visibility::Private,
+                                kind: ItemKind::Function(f.clone()),
+                                attributes: Vec::new(),
+                            });
+                            break;
+                        }
+                    }
+                }
             }
             Work::Struct {
                 instance,
@@ -193,6 +243,14 @@ enum Work {
         name: String,
         args: Vec<Ty>,
     },
+    /// A method instance: `method` of `owner`, with `sub` substituted, added to the
+    /// owner's impl block under `instance`.
+    Method {
+        owner: String,
+        method: String,
+        instance: String,
+        sub: HashMap<String, Ty>,
+    },
 }
 
 struct Mono {
@@ -204,6 +262,8 @@ struct Mono {
     generic_structs: HashMap<String, StructDef>,
     generic_struct_names: HashSet<String>,
     generic_impls: Vec<ImplDef>,
+    /// Methods with their own type parameters, by (owner, name).
+    generic_methods: HashMap<(String, String), Function>,
     /// Instances requested so far (by name), so each is generated once.
     seen: HashSet<String>,
     queue: Vec<Work>,
@@ -242,7 +302,30 @@ impl Mono {
         Some(instance)
     }
 
+    /// The name of the instance of method `method` of `owner` at `params`, requesting it
+    /// if new. The instance is added to the owner's impl block when the worklist drains.
+    fn request_method(&mut self, owner: &str, method: &str, params: &[(String, Ty)]) -> Option<String> {
+        let mut parts = Vec::new();
+        for (_, t) in params {
+            parts.push(mangle(t)?);
+        }
+        let instance = format!("{}__{}", method, parts.join("_"));
+        if self.seen.insert(format!("{owner}::{instance}")) {
+            let sub: HashMap<String, Ty> = params.iter().cloned().collect();
+            self.queue.push(Work::Method {
+                owner: owner.to_string(),
+                method: method.to_string(),
+                instance: instance.clone(),
+                sub,
+            });
+        }
+        Some(instance)
+    }
+
     fn rewrite_impl(&mut self, imp: &mut ImplDef, sub: &HashMap<String, Ty>) {
+        // Methods with their own type parameters are instantiated at their call sites.
+        imp.items
+            .retain(|m| !matches!(&m.kind, ItemKind::Function(f) if !f.generics.params.is_empty()));
         self.ty(&mut imp.for_ty, sub);
         for m in &mut imp.items {
             if let ItemKind::Function(f) = &mut m.kind {
@@ -373,7 +456,19 @@ impl Mono {
                 for tok in &mut mc.tokens {
                     if let TokenKind::Ident(name) = &mut tok.kind {
                         if let Some(call) = self.calls.get(&(tok.span.start, tok.span.end)).cloned() {
-                            if call.owner.is_none() {
+                            if call.method {
+                                // A method's name: the call is on the receiver's type.
+                                let params: Vec<(String, Ty)> = call
+                                    .params
+                                    .iter()
+                                    .map(|(n, t)| (n.clone(), subst_ty(t, sub)))
+                                    .collect();
+                                if let Some(owner) = call.owner.clone() {
+                                    if let Some(instance) = self.request_method(&owner, &call.callee, &params) {
+                                        *name = instance;
+                                    }
+                                }
+                            } else if call.owner.is_none() {
                                 let params: Vec<(String, Ty)> = call
                                     .params
                                     .iter()
@@ -414,7 +509,24 @@ impl Mono {
             | ExprKind::Deref(a)
             | ExprKind::Await(a)
             | ExprKind::Try(a) => self.expr(a, sub),
-            ExprKind::MethodCall(recv, _, args) => {
+            ExprKind::MethodCall(recv, method, args) => {
+                // A method with its own type parameters: call its instance on the receiver's
+                // type (the copy is added to that type's impl block). Recorded by the name.
+                let name_key = (method.span.start, method.span.end);
+                if let Some(call) = self.calls.get(&name_key).cloned() {
+                    if call.method {
+                        let params: Vec<(String, Ty)> = call
+                            .params
+                            .iter()
+                            .map(|(n, t)| (n.clone(), subst_ty(t, sub)))
+                            .collect();
+                        if let Some(owner) = &call.owner {
+                            if let Some(instance) = self.request_method(owner, &call.callee, &params) {
+                                method.node = instance;
+                            }
+                        }
+                    }
+                }
                 self.expr(recv, sub);
                 for a in args {
                     self.expr(a, sub);
@@ -490,6 +602,7 @@ impl Mono {
                     span: call.span,
                     callee: call.callee.clone(),
                     owner: Some(owner.clone()),
+                    method: false,
                     params: params.clone(),
                 };
                 if let Some(instance) = self.owner_instance(&owner_call, &owner_params) {
@@ -539,6 +652,21 @@ fn instance_name(callee: &str, params: &[(String, Ty)]) -> Option<String> {
         parts.push(mangle(t)?);
     }
     Some(format!("{}__{}", callee, parts.join("_")))
+}
+
+/// Whether a non-generic impl block of the program has a method with its own type
+/// parameters.
+fn generic_methods_exist(prog: &Program) -> bool {
+    prog.items.iter().any(|item| match &item.kind {
+        ItemKind::Impl(imp) => {
+            imp.generics.params.is_empty()
+                && imp.items.iter().any(|m| match &m.kind {
+                    ItemKind::Function(f) => !f.generics.params.is_empty(),
+                    _ => false,
+                })
+        }
+        _ => false,
+    })
 }
 
 /// The name of the type an `impl` block is for (`Pair` in `impl<T> Pair<T>`).
