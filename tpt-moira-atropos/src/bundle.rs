@@ -7,9 +7,7 @@
 //! * The **root** crate keeps its names (its `main` stays `main`).
 //! * Every other crate's functions and structs are prefixed `<crate>__`.
 //! * A reference to a name the unit does not define resolves to its owner: the
-//!   root if the root defines it, otherwise the single extern crate that does.
-//!   An ambiguous reference (defined by several extern crates, not by the root)
-//!   is left unchanged.
+//!   root if the root defines it, otherwise the first extern crate that does.
 //!
 //! Prelude enums (`Option`, `Result`) and generated tuple/vector types are
 //! identical in every crate, so they are shared and never renamed.
@@ -50,11 +48,12 @@ impl Namer {
         if owners.contains(&0) {
             return name.to_string();
         }
-        if owners.len() == 1 {
-            let owner = *owners.iter().next().unwrap();
-            return self.own_name(owner, name);
+        // Several extern crates define it (each instantiated the same generic struct, say):
+        // it is named after the first of them, which emits the definition.
+        match owners.iter().next() {
+            Some(&owner) => self.own_name(owner, name),
+            None => name.to_string(),
         }
-        name.to_string()
     }
 
     fn own_name(&self, unit: usize, name: &str) -> String {
