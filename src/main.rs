@@ -142,6 +142,33 @@ fn main() -> ExitCode {
             }
         }
     }
+    // Types that share a bare name across the root and its extern crates get
+    // crate-qualified names before anything is checked or lowered.
+    let (program, extern_programs) = {
+        let mut crates = vec![tpt_moira_clotho::resolve::NamedCrate {
+            key: String::new(),
+            is_root: true,
+            program: program.clone(),
+        }];
+        let mut i = 0;
+        while i < extern_programs.len() {
+            crates.push(tpt_moira_clotho::resolve::NamedCrate {
+                key: extern_programs[i].0.clone(),
+                is_root: false,
+                program: extern_programs[i].1.clone(),
+            });
+            i += 1;
+        }
+        tpt_moira_clotho::resolve::disambiguate(&mut crates);
+        let root = crates[0].program.clone();
+        let mut externs: Vec<(String, tpt_moira_clotho::ast::Program)> = Vec::new();
+        let mut j = 1;
+        while j < crates.len() {
+            externs.push((crates[j].key.clone(), crates[j].program.clone()));
+            j += 1;
+        }
+        (root, externs)
+    };
     let have_externs = !extern_programs.is_empty();
     let check_call = |program: &tpt_moira_clotho::ast::Program| {
         if have_externs {
