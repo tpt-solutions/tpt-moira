@@ -28,9 +28,9 @@ cargo build
 cargo test --workspace
 
 # run a single crate's tests
-cargo test -p clotho
-cargo test -p atropos
-cargo test -p lachesis
+cargo test -p tpt-moira-clotho
+cargo test -p tpt-moira-atropos
+cargo test -p tpt-moira-lachesis
 ```
 
 The native backend (`atropos` -> x86-64 assembly) shells out to a system C

@@ -82,7 +82,7 @@ jobs:
       - name: Build workspace
         run: cargo build --workspace
       - name: Run Phase-1 slice acceptance tests
-        run: cargo test -p lachesis --test phase1_slice --verbose
+        run: cargo test -p tpt-moira-lachesis --test phase1_slice --verbose
       - name: Divergence scan against rustc
         id: scan
         continue-on-error: true
