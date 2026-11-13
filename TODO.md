@@ -552,11 +552,29 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
                and call results of `Fn<..>` type take that type, and the call result is
                bound as a function pointer. Locked in by
                `atropos/tests/codegen.rs::returned_non_capturing_closure_runs`.
-               **Still open:** a function that returns a *capturing* closure
-               (`fn make(k) -> impl Fn(i64) -> i64 { move |x| x + k }`) still emits C that
-               does not compile — the lifted function takes the captures as extra
-               parameters, which a plain function pointer cannot carry. Needs an
-               environment struct (closure conversion) before this item can close.
+               **Returned capturing closures, `let`-bound call sites (2026-11-14):**
+               `fn make(k) -> impl Fn(i64) -> i64 { move |x| x + k }` with `let f =
+               make(4);` is inlined at the call site by `tpt_moira_clotho::closure_return`
+               (arguments become fresh `let` bindings the closure captures), and the
+               function is removed once unreferenced. Conservative scope: the candidate
+               body must be only a closure over identifier parameters, the closure body
+               must bind no names and contain no macros, and the call must be a `let`
+               initializer. Locked in by `atropos/tests/codegen.rs::
+               returned_capturing_closure_runs_when_bound_by_let`.
+               Argument position: `apply(make(4), 1)` is hoisted to `let __hoist_make_N =
+               make(4);` before the statement when the arguments are pure (literals,
+               names, arithmetic on them), then inlined the same way. Locked in by
+               `returned_capturing_closure_passed_as_argument_runs`.
+               Inside `println!`/`print!`/`eprintln!`/`eprint!`/`format!` arguments the
+               call is hoisted at the token level (`hoist_macro_tokens`), so
+               `println!("{}", apply(make(4), 1))` works too. Locked in by
+               `returned_capturing_closure_inside_println_runs`.
+               **Still open:** (a) impure arguments (`make(f())`) are not hoisted, to keep
+               evaluation order; (b) calls inside other macros (`assert!`, `vec!`, user
+               `macro_rules!`) are not hoisted; (c) closures returned from impl methods,
+               from functions with statements or generics, or through a struct field or
+               `Vec` are not inlined, and a remaining capturing `make` call in those
+               positions still emits uncompilable C.
     - [x] Full generics + `where`-clause solving wired into `infer` for real (non-toy) generic code
       - **Status: Resolved for the type-checking layer (2026-08-22).** `infer`
         now handles, end to end: multi-parameter generics on structs and
@@ -835,6 +853,83 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
           - Benchmarks re-recorded after these changes (run #11): geomean
             **6.69x**, within this host's documented single-run noise band
             (runs #6–#10 spanned 5.56x–6.91x); no sustained regression.
+          - **Probe (2026-11-14): `1/5`, `moira-alloc` self-hostable; clotho now lowers
+            to C.** The new closure-inlining pass (`tpt-moira-clotho/src/closure_return.rs`)
+            is written in the subset the Moira frontend parses (no slice patterns, no
+            `dyn FnMut`, no `let`-bound `for` over call results, closure parameters
+            annotated), and adds no checker errors beyond the shared pattern below.
+            Clotho's remaining blockers, from `build/self_host_report.md`: `101–113`
+            type/borrow errors (most are `match arm type mismatch: expected i32, found ()`
+            on unit-typed statement matches, and `Vec::retain`/`remove` are not in the
+            prelude) and generated C that references the unmonomorphized generic
+            `Spanned`. Checker gaps observed while writing that file: unannotated closure
+            parameters are typed `i32` (so `|b| b.stmts` has no hint), `dyn FnMut`
+            parameters are rejected, and `for` over a call result or an iterator chain
+            over a slice parameter does not lower.
+          - **Probe follow-up (2026-11-14, later): still `1/5`; clotho's checker errors
+            `112 → 84`.** Fixed in this round: (1) a compound assignment (`depth += 1`)
+            is typed `()` like `=` (it was typed as its left operand, so unit-typed
+            match arms disagreed); (2) generic struct literals inside macro arguments
+            (`vec![Spanned { .. }]`) are renamed to their instance (mono's
+            `struct_by_start` table, applied to macro tokens); (3) `.collect::<Vec<_>>()`
+            turbofish sites in `derive.rs` and `closure_return.rs` are now typed `let`
+            bindings. Open blockers, in order: the AST drops method-call turbofish
+            arguments (`MethodCall` carries no type args, so `collect::<T>` is untyped
+            unless a `let` supplies the type; 42 match sites would change); the clotho
+            `macros.rs` expansion uses `std::thread::scope`, which is outside the codegen
+            subset: keeping the parallel pipeline and making it subset-compatible are a
+            design choice for the maintainers; a generic struct literal inside `vec!`
+            takes its type arguments from its literal fields, not from the expected
+            field type (`Vec<Spanned<i64>>` with an untyped `4` yields `Spanned__i32`);
+            the probe compiles per crate without `--bundle`, and a bundled emit of
+            atropos currently produces about 5,800 C errors (unmonomorphized `Spanned`,
+            `Arc<HashMap<..>>`, and `_` types), so the probe's per-crate view is kept.
+          - **Probe follow-up (2026-11-14, round 3).** Followed the recommendation
+            to remove the thread-based macro expansion: `expand_program_concurrent`
+            now runs the sequential `expand_program` path (same output, same order;
+            the codegen notes already record threads as outside the subset).
+            Also fixed: `Box<T>` is now `Box` in the checker (was erased to `T`), so
+            `Box::new` types as a box, `*b` and field/method access see through it,
+            `compatible` accepts a box where its value is expected, and a box hints as
+            `T*` (matching the C lowering's `Box::new` heap pointer). Locked in by
+            `boxed_recursive_option_runs`. Clotho's checker errors are now `81`, and its
+            C fails next on `Option<HashMap<..>>`: `HashMap::new()` inside `Some(..)`
+            gets no type from the surrounding annotation (the expected type does not
+            reach a call nested in a variant constructor), so the lowering emits an
+            undefined `new`. Changing the map constructors' prelude signatures alone did
+            not fix it, so that change was reverted.
+          - **Probe follow-up (2026-11-14, round 4).** The expected type now reaches
+            calls in three more contexts: the payload of `Some(..)`/`Ok(..)` against an
+            annotated `Option`/`Result`, the right side of an assignment (against the
+            target's type), and `HashMap::new()`/`HashSet::new()`/`BTreeMap::new()`/
+            `BTreeSet::new()` (which return the expected collection). The lowering builds
+            a map or set instance for these constructors in expression position too.
+            Locked in by `option_of_hashmap_assigned_from_constructor_runs`. Clotho's C
+            now fails on `std::path::PathBuf` (used by `compile_file` in `lib.rs`:
+            `path.parent().map(..).unwrap_or_else(..)`). Modeling it needs `Path`/`PathBuf`
+            as `str` in the checker and lowering, plus `parent()` returning an `Option`
+            and runtime helpers. The probe's check column still blocks clotho on 81
+            checker errors (format! named arguments, `u8` char methods, `Option::is_some_and`,
+            `Path` methods), so this is not the next step that flips a crate.
+          - **Probe follow-up (2026-11-14, round 5).** Clotho's checker errors are now
+            `51` (from `81`). Fixed: named format arguments (`fmt = expr`) type only their
+            value; `matches!` types only its scrutinee (the pattern may use `ref`, `|`, or an
+            `if` guard, so it is not an expression); `u8` takes the ASCII methods
+            (`is_ascii_digit`/`alphabetic`/`alphanumeric`/`hexdigit`,
+            `to_ascii_lowercase`/`uppercase`); `char::from_u32` and `char::to_digit` return
+            `Option`s (runtime check + branch, as `str::find`); `compile_reader` reads on the
+            calling thread (threads are outside the codegen subset, as in
+            `compile_concurrent`). Locked in by `byte_ascii_methods_and_char_from_u32_run` and
+            `char_to_digit_runs`. The 51 that remain, grouped: `if let`/`while let` on enum
+            patterns (2 + the `value` binding); bare variant names that exist in several
+            enums (`match arm type mismatch: expected TokenKind, found ExprKind`, 5);
+            `Vec` mutators `truncate`/`insert`/`sort`/`dedup` (4, need per-type runtime
+            helpers); `Option::is_some_and` (2, closure-taking); `bool::then_some` (1);
+            `PathBuf`/`Path` methods and conversions (7); `Formatter::write_str`,
+            `char/String::escape_default`, `str::from_utf8` (4); `AtomicUsize::fetch_add`
+            (1); `String::as_str` as a function value (1); `read_to_string` on a generic
+            `R: Read` (1, newly visible because the thread version failed earlier); and a
+            handful of type mismatches (`&T` vs `T`, `&bool` vs `bool`, empty array literals).
     - [x] Once a crate parses + type-checks, attempt full codegen and record pass/fail per crate in `docs/SELF_HOSTING.md`
       - **Status: Resolved as a process (2026-08-22)** — the probe records
         `codegen_ok` (and the failure reason) per crate and refreshes
