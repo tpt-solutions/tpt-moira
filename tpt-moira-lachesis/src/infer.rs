@@ -132,6 +132,9 @@ pub struct TypeChecker {
     /// The type a `let` annotation expects of a call initializer, consumed by the next
     /// `check_call`: it seeds the solution of the callee's generic parameters.
     expected_call_ty: Option<Ty>,
+    /// Enums whose variants are glob-imported (`use Enum::*;`) in the enclosing blocks,
+    /// innermost last: a bare unit-variant name resolves in these first.
+    glob_enums: Vec<String>,
     /// The type parameters a method declares itself (not its impl's), by (type, method).
     method_own_generics: HashMap<(String, String), Generics>,
     /// The parameter types a closure argument is expected to take, from the `Fn` type
@@ -540,6 +543,7 @@ impl Default for TypeChecker {
             expr_types: HashMap::new(),
             generic_calls: Vec::new(),
             expected_call_ty: None,
+            glob_enums: Vec::new(),
             method_own_generics: HashMap::new(),
             closure_expected: None,
             closure_caps: HashMap::new(),
@@ -1104,6 +1108,7 @@ impl TypeChecker {
 
     fn infer_block(&mut self, block: &Block) -> Ty {
         self.env.push(HashMap::new());
+        let glob_mark = self.glob_enums.len();
         // The type of the final statement, used to detect a diverging block
         // (one whose last statement is `return` / `?` / `break` / `continue` /
         // `loop` and which has no tail expression).
@@ -1158,7 +1163,15 @@ impl TypeChecker {
                     if matches!(item.kind, tpt_moira_clotho::ast::ItemKind::Use(_)) =>
                 {
                     // A function-local `use …` declaration is a no-op in the
-                    // Phase-1 subset (imports are not resolved).
+                    // Phase-1 subset, except a glob import of an enum's variants
+                    // (`use TokenKind::*;`), which names the enum for bare variants.
+                    if let tpt_moira_clotho::ast::ItemKind::Use(u) = &item.kind {
+                        if matches!(u.kind, tpt_moira_clotho::ast::UseKind::Glob) {
+                            if let Some(last) = u.prefix.last() {
+                                self.glob_enums.push(last.node.clone());
+                            }
+                        }
+                    }
                 }
                 StmtKind::Item(_) => {
                     self.err(Span::default(), "nested items are not supported");
@@ -1179,6 +1192,7 @@ impl TypeChecker {
                 }
             }
         };
+        self.glob_enums.truncate(glob_mark);
         self.env.pop();
         ty
     }
@@ -1672,8 +1686,21 @@ impl TypeChecker {
                                 return Ty::Fn(s.params.clone(), Box::new(s.ret.clone()));
                             }
                         }
+                        // A unit variant of a glob-imported enum (`use TokenKind::*;`) is
+                        // named by that import, ahead of any other enum's variant of the name.
+                        let imported = self
+                            .glob_enums
+                            .iter()
+                            .rev()
+                            .find(|o| self.assoc_consts.contains_key(&((*o).clone(), name.clone())))
+                            .cloned();
                         // Nullary prelude values usable without a call site.
-                        if let Some(t) = self.values.get(&name) {
+                        if let Some(owner) = imported {
+                            self.assoc_consts
+                                .get(&(owner, name.clone()))
+                                .cloned()
+                                .unwrap_or(Ty::Unknown)
+                        } else if let Some(t) = self.values.get(&name) {
                             t.clone()
                         } else if let Some(owner) = self
                             .unit_variant_owners
@@ -1828,9 +1855,9 @@ impl TypeChecker {
             }
             ExprKind::Array(elems) => {
                 // Every element must share a common element type; the array's
-                // type is `[elem; len]`. An empty array defaults to
-                // `[i32; 0]` (the Phase-1 integer fallback).
-                let mut elem_ty = Ty::Int;
+                // type is `[elem; len]`. An empty array's element type is the
+                // context's (`&[]` in a match arm takes the other arms' type).
+                let mut elem_ty = if elems.is_empty() { Ty::Unknown } else { Ty::Int };
                 for (i, e) in elems.iter().enumerate() {
                     let t = self.infer_expr(e);
                     if i == 0 {
