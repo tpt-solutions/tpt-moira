@@ -1150,3 +1150,50 @@ fn glob_imported_variant_resolves_to_its_enum() {
     };
     assert_eq!(out, "7");
 }
+
+#[test]
+fn if_let_enum_pattern_and_while_let_run() {
+    // `if let Variant(r) = s { .. } else { .. }` and `while let Some(x) = f(i) { .. }` are
+    // rewritten to `match` (and a `loop` with a `break` arm), so any pattern works.
+    let out = match run_src(
+        "enum Shape {
+            Circle(i64),
+            Square(i64),
+            Dot,
+        }
+        fn area(s: Shape) -> i64 {
+            let mut out: i64 = 0;
+            if let Shape::Circle(r) = s {
+                out = 3 * r * r;
+            } else {
+                out = 1;
+            }
+            out
+        }
+        fn step(i: i64) -> Option<i64> {
+            if i < 3 {
+                Some(i)
+            } else {
+                None
+            }
+        }
+        fn main() {
+            print_i64(area(Shape::Circle(2)));
+            print_i64(area(Shape::Dot));
+            let mut n: i64 = 0;
+            let mut i: i64 = 0;
+            while let Some(x) = step(i) {
+                n = n + x;
+                i = i + 1;
+            }
+            print_i64(n);
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping let-condition run");
+            return;
+        }
+    };
+    assert_eq!(out, "12\n1\n3");
+}
