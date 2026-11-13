@@ -2171,6 +2171,12 @@ impl Lower {
                         // A local bound to a variable that holds a pointer (`let q = p;` with
                         // `p: &i64`) is a pointer too.
                         _ if self.pointer_local_type(init).is_some() => self.pointer_local_type(init),
+                        // A string's `chars()` iterator (an `Iter<char>` the checker types).
+                        _ if matches!(&init.kind, ExprKind::MethodCall(_, m, a) if m.node == "chars" && a.is_empty())
+                            || self.hint_of_expr(init).as_deref() == Some("Iter<char>") =>
+                        {
+                            Some("moira_chars".to_string())
+                        }
                         _ => self.hint_of_expr(init).filter(|h| {
                             h == "str"
                                 || is_scalar_pointer_hint(h)
@@ -5339,6 +5345,96 @@ impl Lower {
         method: &str,
         args: &[Expr],
     ) -> Result<Option<mir::Operand>> {
+        // `s.chars()` as a value: an iterator holding the string and its next index.
+        if method == "chars" && args.is_empty() && self.recv_is_str(recv) {
+            let s = self.lower_expr(recv)?;
+            let t = self.fresh_temp("moira_chars");
+            self.emit(
+                t.clone(),
+                mir::Rvalue::StructLit(
+                    "moira_chars".to_string(),
+                    vec![
+                        ("s".to_string(), s),
+                        ("pos".to_string(), mir::Operand::Const(0)),
+                    ],
+                ),
+            );
+            return Ok(Some(mir::Operand::var(t)));
+        }
+        // `it.next()` on a chars iterator local: the character at its index (advancing past it),
+        // as an `Option<char>` (`None` at the end).
+        if method == "next" && args.is_empty() {
+            if let ExprKind::Path(p) = &recv.kind {
+                if p.segments.len() == 1 {
+                    let it = self.lower_expr(recv)?;
+                    let it_name = match &it {
+                        mir::Operand::Var(n) => n.clone(),
+                        _ => return Ok(None),
+                    };
+                    if self.temp_type_of(&it_name) == "moira_chars" {
+                        let base = self.fresh_temp("char*");
+                        self.emit(base.clone(), mir::Rvalue::Field(it.clone(), "s".into(), false));
+                        let pos = self.fresh_temp("long long");
+                        self.emit(pos.clone(), mir::Rvalue::Field(it.clone(), "pos".into(), false));
+                        let ch = self.fresh_temp("char");
+                        self.emit(ch.clone(), mir::Rvalue::Index(mir::Operand::var(base), mir::Operand::var(pos.clone())));
+                        let empty = self.fresh_temp("long long");
+                        self.emit(empty.clone(), mir::Rvalue::Binary(mir::BinOp::Eq, mir::Operand::var(ch.clone()), mir::Operand::Const(0)));
+                        // The index moves past the character unless the string has ended.
+                        let step = self.fresh_temp("long long");
+                        self.emit(step.clone(), mir::Rvalue::Binary(mir::BinOp::Sub, mir::Operand::Const(1), mir::Operand::var(empty.clone())));
+                        let next_pos = self.fresh_temp("long long");
+                        self.emit(next_pos.clone(), mir::Rvalue::Binary(mir::BinOp::Add, mir::Operand::var(pos), mir::Operand::var(step)));
+                        self.emit(
+                            "__scratch".to_string(),
+                            mir::Rvalue::StoreField(it, "pos".into(), mir::Operand::var(next_pos), false),
+                        );
+                        let hint = self.hint_of_expr(e).unwrap_or_else(|| "Option<char>".to_string());
+                        let t = self.fresh_temp(hint.clone());
+                        self.emit(
+                            t.clone(),
+                            mir::Rvalue::StructLit(
+                                mir::inst_c_name(&hint),
+                                vec![
+                                    ("tag".to_string(), mir::Operand::var(empty)),
+                                    ("f0".to_string(), mir::Operand::var(ch)),
+                                ],
+                            ),
+                        );
+                        return Ok(Some(mir::Operand::var(t)));
+                    }
+                }
+            }
+        }
+        // `s.chars().next()`: the first character of `s`, if any (`None` for an empty `s`).
+        if method == "next" && args.is_empty() {
+            if let ExprKind::MethodCall(inner, m, cargs) = &recv.kind {
+                if m.node == "chars" && cargs.is_empty() && self.recv_is_str(inner) {
+                    let s = self.lower_expr(inner)?;
+                    let first = self.fresh_temp("char");
+                    self.emit(first.clone(), mir::Rvalue::Index(s, mir::Operand::Const(0)));
+                    // `None` (tag 1) exactly when the first character is the terminator.
+                    let empty = self.fresh_temp("long long");
+                    self.emit(
+                        empty.clone(),
+                        mir::Rvalue::Binary(mir::BinOp::Eq, mir::Operand::var(first.clone()), mir::Operand::Const(0)),
+                    );
+                    let hint = self.hint_of_expr(e).unwrap_or_else(|| "Option<char>".to_string());
+                    let t = self.fresh_temp(hint.clone());
+                    self.emit(
+                        t.clone(),
+                        mir::Rvalue::StructLit(
+                            mir::inst_c_name(&hint),
+                            vec![
+                                ("tag".to_string(), mir::Operand::var(empty)),
+                                ("f0".to_string(), mir::Operand::var(first)),
+                            ],
+                        ),
+                    );
+                    return Ok(Some(mir::Operand::var(t)));
+                }
+            }
+        }
         // An integer's `to_string()` formats it (the runtime's `moira_int_to_string`).
         if method == "to_string" && args.is_empty() {
             // The receiver's type: the checker's hint, else the lowering's own (a closure
@@ -8228,23 +8324,21 @@ impl Lower {
     }
 
     /// Lower `while let pat = init { body }` (parsed as `While(Block{Local}, ..)`).
-    /// The binding is emitted once before the loop (its initializer does not
-    /// change across iterations for an identifier pattern) and the loop runs
-    /// until a `break` inside the body.
+    /// The initializer runs at the loop head each iteration, and the loop runs until
+    /// the pattern fails or a `break` in the body.
     fn lower_while_let(&mut self, local: &ast::Local, body: &ast::Block) -> Result<mir::Operand> {
-        let init_op = match &local.init {
-            Some(e) => self.lower_expr(e)?,
-            None => mir::Operand::Unit,
-        };
-        // The pattern guard (possibly a variant discriminant test) is
-        // re-evaluated at the loop head each iteration; the initializer itself
-        // runs once.
+        // The initializer and the pattern test are evaluated at the loop head, so every
+        // iteration takes a new value (`while let Some(c) = chars.next()`).
         let head = self.new_block();
         let body_blk = self.new_block();
         let exit = self.new_block();
         self.set_term(mir::Terminator::Goto(head));
 
         self.current = head;
+        let init_op = match &local.init {
+            Some(e) => self.lower_expr(e)?,
+            None => mir::Operand::Unit,
+        };
         let (cond, binds) = self.pattern_guard(&init_op, &local.pat)?;
         let cond = cond.unwrap_or(mir::Operand::Const(1));
         self.set_term(mir::Terminator::If(cond, body_blk, exit));

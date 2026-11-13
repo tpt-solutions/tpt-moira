@@ -3810,7 +3810,7 @@ impl TypeChecker {
             sig(vec![], Apply("Vec".into(), vec![U8])),
         );
         self.methods
-            .insert(("str".into(), "chars".into()), sig(vec![], Unknown));
+            .insert(("str".into(), "chars".into()), sig(vec![], Apply("Iter".into(), vec![Ty::Char])));
         self.methods
             .insert(("Cow".into(), "trim".into()), sig(vec![], Str));
         self.methods

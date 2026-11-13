@@ -29,6 +29,8 @@ long long moira_str_push_char(char** s, long long c) { size_t a = strlen(*s); *s
 char* moira_str_after(char* s, long long n) { return moira_str_dup(s + n); }
 char* moira_bool_str(long long b) { return moira_str_dup(b ? "true" : "false"); }
 long long moira_str_eq(char* a, char* b) { return strcmp(a, b) == 0; }
+// A `str.chars()` iterator: the string and the index of the next character.
+typedef struct moira_chars { char* s; long long pos; } moira_chars;
 long long moira_str_cmp(char* a, char* b) { int r = strcmp(a, b); return r < 0 ? -1 : (r > 0 ? 1 : 0); }
 char* moira_char_str(long long c) { char* r = (char*)malloc(2); r[0] = (char)c; r[1] = 0; return r; }
 long long moira_str_find(char* s, char* p) { char* m = strstr(s, p); return m ? (long long)(m - s) : -1; }
