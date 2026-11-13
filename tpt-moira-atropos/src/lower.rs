@@ -977,6 +977,32 @@ fn type_to_c(ty: &ast::Type, aliases: &AliasTable) -> String {
     type_to_c_expanded(&aliases.expand(ty))
 }
 
+/// The name a generic argument list contributes to an instance's name (`String`,
+/// `Vec_Item`), as the monomorphization spells it.
+fn instance_arg_names(args: &[ast::Type]) -> String {
+    args.iter()
+        .map(|a| match &a.kind {
+            ast::TypeKind::Path(p, inner) => {
+                let name = p
+                    .segments
+                    .last()
+                    .map(|s| s.node.clone())
+                    .unwrap_or_default();
+                if inner.is_empty() {
+                    name
+                } else {
+                    format!("{}_{}", name, instance_arg_names(inner))
+                }
+            }
+            ast::TypeKind::Ref(inner) | ast::TypeKind::RefMut(inner) => {
+                format!("ref_{}", instance_arg_names(std::slice::from_ref(&**inner)))
+            }
+            _ => "unit".to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join("_")
+}
+
 /// [`type_to_c`] for a type whose aliases are already expanded.
 fn type_to_c_expanded(ty: &ast::Type) -> String {
     match &ty.kind {
@@ -1013,6 +1039,27 @@ fn type_to_c_expanded(ty: &ast::Type) -> String {
                     format!("Fn<{}>", parts.join(","))
                 }
                 (Some("fn"), n) => func_ptr_c_type(n.saturating_sub(1)),
+                // A user generic struct instance (`Spanned<String>`) is the struct the
+                // monomorphization named `Spanned__String`.
+                (Some(name), n)
+                    if n > 0
+                        && !matches!(
+                            name,
+                            "Vec"
+                                | "Option"
+                                | "Result"
+                                | "Box"
+                                | "HashMap"
+                                | "HashSet"
+                                | "BTreeMap"
+                                | "BTreeSet"
+                                | "Into"
+                                | "AsRef"
+                                | "fn"
+                        ) =>
+                {
+                    format!("{}__{}", name, instance_arg_names(args))
+                }
                 _ => last.unwrap_or_else(|| "long long".to_string()),
             }
         }
