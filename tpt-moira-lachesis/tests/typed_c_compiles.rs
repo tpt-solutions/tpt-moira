@@ -7,7 +7,7 @@
 use std::process::Command;
 
 fn compile_ok(name: &str, src: &str) {
-    let prog = tpt_moira_clotho::parse_source(src).expect("program should parse");
+    let prog = tpt_moira_clotho::compile_source(src).expect("program should parse");
     let (res, hints) = tpt_moira_lachesis::type_check_typed(&prog, &[]);
     assert!(res.is_ok(), "{name}: program should type-check: {:?}", res.err());
     let mir = tpt_moira_atropos::lower_program_typed(&prog, &hints)
@@ -125,4 +125,31 @@ fn derived_clone_of_an_enum_with_a_shared_variant_name_compiles() {
          pub enum Second { Item(i64, i64), Other }\n\
          fn main() {}\n",
     );
+}
+
+#[test]
+fn derived_equality_over_vectors_and_options_compiles() {
+    compile_ok(
+        "derived_eq",
+        "#[derive(PartialEq)]\n\
+         pub enum K { A, B }\n\
+         #[derive(PartialEq)]\n\
+         pub struct Item { pub n: i64, pub k: K }\n\
+         #[derive(PartialEq)]\n\
+         pub struct Prog { pub items: Vec<Item>, pub first: Option<K> }\n\
+         fn same(a: &Prog, b: &Prog) -> bool { a.items == b.items && a.first == b.first }\n\
+         fn is_a(k: Option<&K>) -> bool { k == Some(&K::A) }\n\
+         fn main() {}\n",
+    );
+}
+
+#[test]
+fn string_equality_compares_contents() {
+    let src = "fn same(a: &str, b: &str) -> bool { a == b }\nfn main() {}\n";
+    let prog = tpt_moira_clotho::compile_source(src).expect("program should parse");
+    let (res, hints) = tpt_moira_lachesis::type_check_typed(&prog, &[]);
+    assert!(res.is_ok(), "program should type-check: {:?}", res.err());
+    let mir = tpt_moira_atropos::lower_program_typed(&prog, &hints).expect("should lower");
+    let c = tpt_moira_atropos::codegen_c::emit_c(&mir);
+    assert!(c.contains("moira_str_eq(a, b)"), "string == should call moira_str_eq:\n{c}");
 }

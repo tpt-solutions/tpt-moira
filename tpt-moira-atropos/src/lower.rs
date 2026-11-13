@@ -3855,6 +3855,232 @@ impl Lower {
         v
     }
 
+    /// `a == b` through the user type's `eq(&self, &other)` method, when the operands have
+    /// a user type that has one. `None` otherwise.
+    fn lower_user_eq(
+        &mut self,
+        l: &mir::Operand,
+        r: &mir::Operand,
+        negate: bool,
+    ) -> Result<Option<mir::Operand>> {
+        let (ln, _) = match (l, r) {
+            (mir::Operand::Var(a), mir::Operand::Var(b)) => (a.clone(), b.clone()),
+            _ => return Ok(None),
+        };
+        let lty = self.temp_type_of(&ln);
+        let ty = lty.trim_end_matches('*').to_string();
+        if let Some(elem) = mir::vec_elem(&ty).map(str::to_string) {
+            return self.lower_vec_eq(l, r, &elem, negate);
+        }
+        if let Some((base, args)) = mir::split_generic(&ty) {
+            if base == "Option" && args.len() == 1 {
+                let payload = args[0].to_string();
+                return self.lower_option_eq(l, r, &payload, negate);
+            }
+        }
+        let Some((cname, kind, ret)) = self.methods.get(&(ty.clone(), "eq".to_string())).cloned()
+        else {
+            return Ok(None);
+        };
+        if kind != 1 || ret == "void" {
+            return Ok(None);
+        }
+        let mut ptrs = Vec::new();
+        for op in [l, r] {
+            let is_ptr = match op {
+                mir::Operand::Var(n) => self.temp_type_of(n).ends_with('*'),
+                _ => false,
+            };
+            if is_ptr {
+                ptrs.push(op.clone());
+            } else {
+                let p = self.fresh_temp(format!("{ty}*"));
+                self.emit(p.clone(), mir::Rvalue::Ref(op.clone(), true));
+                ptrs.push(mir::Operand::var(p));
+            }
+        }
+        let t = self.fresh_temp(ret);
+        self.emit(t.clone(), mir::Rvalue::Call(mir::Operand::Func(cname), ptrs));
+        if negate {
+            let n = self.fresh_temp("long long");
+            self.emit(n.clone(), mir::Rvalue::Unary(mir::UnOp::Not, mir::Operand::var(t)));
+            return Ok(Some(mir::Operand::var(n)));
+        }
+        Ok(Some(mir::Operand::var(t)))
+    }
+
+    /// Whether `a == b` on values of type `ty` can be lowered through `eq` methods, vector
+    /// and option comparisons, or is a scalar. Checked before any code is emitted.
+    fn eq_supported(&self, ty: &str) -> bool {
+        let ty = ty.trim_end_matches('*');
+        if is_scalar_eq_type(ty) {
+            return true;
+        }
+        if let Some(elem) = mir::vec_elem(ty) {
+            return self.eq_supported(elem) && !is_scalar_eq_type(elem);
+        }
+        if let Some((base, args)) = mir::split_generic(ty) {
+            if base == "Option" && args.len() == 1 {
+                return self.eq_supported(args[0]);
+            }
+            return false;
+        }
+        matches!(self.methods.get(&(ty.to_string(), "eq".to_string())), Some((_, 1, _)))
+    }
+
+    /// `a == b` for two options: the same variant, and for `Some` equal payloads, compared
+    /// by [`Lower::lower_user_eq`] (or directly when the payload is a scalar).
+    fn lower_option_eq(
+        &mut self,
+        l: &mir::Operand,
+        r: &mir::Operand,
+        payload: &str,
+        negate: bool,
+    ) -> Result<Option<mir::Operand>> {
+        if !self.eq_supported(payload) {
+            return Ok(None);
+        }
+        let (ln, rn) = match (l, r) {
+            (mir::Operand::Var(a), mir::Operand::Var(b)) => (a.clone(), b.clone()),
+            _ => return Ok(None),
+        };
+        let deref = self.temp_type_of(&ln).ends_with('*');
+        let res = self.fresh_temp("long long");
+        self.emit(res.clone(), mir::Rvalue::Use(mir::Operand::Const(0)));
+        let tag_l = self.fresh_temp("long long");
+        self.emit(tag_l.clone(), mir::Rvalue::Field(mir::Operand::Var(ln.clone()), "tag".into(), deref));
+        let tag_r = self.fresh_temp("long long");
+        self.emit(tag_r.clone(), mir::Rvalue::Field(mir::Operand::Var(rn.clone()), "tag".into(), deref));
+        let same = self.fresh_temp("long long");
+        self.emit(same.clone(), mir::Rvalue::Binary(mir::BinOp::Eq, mir::Operand::var(tag_l.clone()), mir::Operand::var(tag_r)));
+        let check = self.new_block();
+        let both = self.new_block();
+        let none_blk = self.new_block();
+        let unequal = self.new_block();
+        let exit = self.new_block();
+        self.set_term(mir::Terminator::If(mir::Operand::var(same), check, unequal));
+
+        // Same variant: `None` (tag 1) is equal; `Some` (tag 0) compares its payload.
+        self.current = check;
+        let is_some = self.fresh_temp("long long");
+        self.emit(is_some.clone(), mir::Rvalue::Binary(mir::BinOp::Eq, mir::Operand::var(tag_l), mir::Operand::Const(0)));
+        self.set_term(mir::Terminator::If(mir::Operand::var(is_some), both, none_blk));
+        self.current = none_blk;
+        self.emit(res.clone(), mir::Rvalue::Use(mir::Operand::Const(1)));
+        self.set_term(mir::Terminator::Goto(exit));
+
+        self.current = both;
+        let pt = self.fresh_temp(payload.to_string());
+        self.emit(pt.clone(), mir::Rvalue::Field(mir::Operand::Var(ln), "f0".into(), deref));
+        let pu = self.fresh_temp(payload.to_string());
+        self.emit(pu.clone(), mir::Rvalue::Field(mir::Operand::Var(rn), "f0".into(), deref));
+        let inner = match self.lower_user_eq(&mir::Operand::var(pt.clone()), &mir::Operand::var(pu.clone()), false)? {
+            Some(v) => v,
+            None => {
+                let direct = self.fresh_temp("long long");
+                self.emit(direct.clone(), mir::Rvalue::Binary(mir::BinOp::Eq, mir::Operand::var(pt), mir::Operand::var(pu)));
+                mir::Operand::var(direct)
+            }
+        };
+        self.emit(res.clone(), mir::Rvalue::Use(inner));
+        self.set_term(mir::Terminator::Goto(exit));
+
+        self.current = unequal;
+        self.emit(res.clone(), mir::Rvalue::Use(mir::Operand::Const(0)));
+        self.set_term(mir::Terminator::Goto(exit));
+
+        self.current = exit;
+        if negate {
+            let n = self.fresh_temp("long long");
+            self.emit(n.clone(), mir::Rvalue::Unary(mir::UnOp::Not, mir::Operand::var(res)));
+            return Ok(Some(mir::Operand::var(n)));
+        }
+        Ok(Some(mir::Operand::var(res)))
+    }
+
+    /// `a == b` for two vectors whose element type has an `eq` method: equal lengths and
+    /// pairwise equal elements, compared in a loop. `None` when the element has no `eq`.
+    fn lower_vec_eq(
+        &mut self,
+        l: &mir::Operand,
+        r: &mir::Operand,
+        elem: &str,
+        negate: bool,
+    ) -> Result<Option<mir::Operand>> {
+        if !self.eq_supported(elem) {
+            return Ok(None);
+        }
+        let Some((cname, _, _)) = self.methods.get(&(elem.to_string(), "eq".to_string())).cloned()
+        else {
+            return Ok(None);
+        };
+        let (ln, rn) = match (l, r) {
+            (mir::Operand::Var(a), mir::Operand::Var(b)) => (a.clone(), b.clone()),
+            _ => return Ok(None),
+        };
+        let deref = self.temp_type_of(&ln).ends_with('*');
+        let res = self.fresh_temp("long long");
+        self.emit(res.clone(), mir::Rvalue::Use(mir::Operand::Const(1)));
+        let len_l = self.fresh_temp("long long");
+        self.emit(len_l.clone(), mir::Rvalue::Field(mir::Operand::Var(ln.clone()), "len".into(), deref));
+        let len_r = self.fresh_temp("long long");
+        self.emit(len_r.clone(), mir::Rvalue::Field(mir::Operand::Var(rn.clone()), "len".into(), deref));
+        let same_len = self.fresh_temp("long long");
+        self.emit(
+            same_len.clone(),
+            mir::Rvalue::Binary(mir::BinOp::Eq, mir::Operand::var(len_l.clone()), mir::Operand::var(len_r)),
+        );
+        let data_l = self.fresh_temp(format!("{elem}*"));
+        self.emit(data_l.clone(), mir::Rvalue::Field(mir::Operand::Var(ln), "data".into(), deref));
+        let data_r = self.fresh_temp(format!("{elem}*"));
+        self.emit(data_r.clone(), mir::Rvalue::Field(mir::Operand::Var(rn), "data".into(), deref));
+        let idx = self.fresh_temp("long long");
+        self.emit(idx.clone(), mir::Rvalue::Use(mir::Operand::Const(0)));
+
+        let head = self.new_block();
+        let body = self.new_block();
+        let step = self.new_block();
+        let differs = self.new_block();
+        let exit = self.new_block();
+        let check = self.new_block();
+        self.set_term(mir::Terminator::If(mir::Operand::var(same_len), check, differs));
+
+        self.current = check;
+        let in_range = self.fresh_temp("long long");
+        self.set_term(mir::Terminator::Goto(head));
+        self.current = head;
+        self.emit(
+            in_range.clone(),
+            mir::Rvalue::Binary(mir::BinOp::Lt, mir::Operand::var(idx.clone()), mir::Operand::var(len_l)),
+        );
+        self.set_term(mir::Terminator::If(mir::Operand::var(in_range), body, exit));
+
+        self.current = body;
+        let pa = self.fresh_temp(format!("{elem}*"));
+        self.emit(pa.clone(), mir::Rvalue::IndexRef(mir::Operand::var(data_l), mir::Operand::var(idx.clone())));
+        let pb = self.fresh_temp(format!("{elem}*"));
+        self.emit(pb.clone(), mir::Rvalue::IndexRef(mir::Operand::var(data_r), mir::Operand::var(idx.clone())));
+        let eq = self.fresh_temp("long long");
+        self.emit(eq.clone(), mir::Rvalue::Call(mir::Operand::Func(cname), vec![mir::Operand::var(pa), mir::Operand::var(pb)]));
+        self.set_term(mir::Terminator::If(mir::Operand::var(eq), step, differs));
+
+        self.current = step;
+        self.emit(idx.clone(), mir::Rvalue::Binary(mir::BinOp::Add, mir::Operand::var(idx.clone()), mir::Operand::Const(1)));
+        self.set_term(mir::Terminator::Goto(head));
+
+        self.current = differs;
+        self.emit(res.clone(), mir::Rvalue::Use(mir::Operand::Const(0)));
+        self.set_term(mir::Terminator::Goto(exit));
+
+        self.current = exit;
+        if negate {
+            let n = self.fresh_temp("long long");
+            self.emit(n.clone(), mir::Rvalue::Unary(mir::UnOp::Not, mir::Operand::var(res)));
+            return Ok(Some(mir::Operand::var(n)));
+        }
+        Ok(Some(mir::Operand::var(res)))
+    }
+
     /// The declared return type of a call to an `impl` method or associated function
     /// (`Type::f(..)`, `recv.m(..)`), if `e` is one.
     fn user_call_ret(&self, e: &Expr) -> Option<String> {
@@ -6344,7 +6570,7 @@ impl Lower {
                 }
                 // A nullary variant (`None`) is the enum's tagged struct with
                 // just the tag set.
-                if let Some((ename, tag, 0)) = self.variants.get(&name).cloned() {
+                if let Some((ename, tag, 0)) = self.variant_info(p) {
                     // `None` as an `Option<T>` (the checker's type names the instance).
                     let ty = match self.hint_of_expr(e) {
                         Some(h) if mir::split_generic(&h).map_or(false, |(b, _)| b == ename) => h,
@@ -6452,6 +6678,29 @@ impl Lower {
                 let mop = map_binop(*abop)?;
                 let l = self.lower_expr(l)?;
                 let r = self.lower_expr(r)?;
+                // `==` / `!=` on a user type with its own `eq` (a derived `PartialEq`) calls it:
+                // C cannot compare two struct values.
+                if matches!(abop, ABinOp::Eq | ABinOp::Ne) {
+                    // Strings compare by contents, not by their pointers.
+                    let is_str = |this: &Self, o: &mir::Operand| match o {
+                        mir::Operand::Var(n) => matches!(this.temp_type_of(n).as_str(), "str" | "char*"),
+                        mir::Operand::CStr(_) => true,
+                        _ => false,
+                    };
+                    if is_str(self, &l) && is_str(self, &r) {
+                        let eq = self.fresh_temp("long long");
+                        self.emit(eq.clone(), mir::Rvalue::Call(mir::Operand::Func("moira_str_eq".into()), vec![l, r]));
+                        if matches!(abop, ABinOp::Ne) {
+                            let n = self.fresh_temp("long long");
+                            self.emit(n.clone(), mir::Rvalue::Unary(mir::UnOp::Not, mir::Operand::var(eq)));
+                            return Ok(mir::Operand::var(n));
+                        }
+                        return Ok(mir::Operand::var(eq));
+                    }
+                    if let Some(res) = self.lower_user_eq(&l, &r, matches!(abop, ABinOp::Ne))? {
+                        return Ok(res);
+                    }
+                }
                 let t = self.fresh_temp("long long");
                 self.emit(t.clone(), mir::Rvalue::Binary(mop, l, r));
                 Ok(mir::Operand::var(t))
@@ -8083,8 +8332,16 @@ impl Lower {
             ExprKind::Path(p) => p.segments.last().map(|s| s.node.clone())?,
             _ => return None,
         };
-        self.variants
-            .get(&vname)
+        let segs: Vec<&str> = match &e.kind {
+            ExprKind::Call(callee, _) => match &callee.kind {
+                ExprKind::Path(p) => p.segments.iter().map(|s| s.node.as_str()).collect(),
+                _ => return None,
+            },
+            ExprKind::Path(p) => p.segments.iter().map(|s| s.node.as_str()).collect(),
+            _ => return None,
+        };
+        let _ = vname;
+        self.variant_info_names(&segs)
             .map(|(ename, _, _)| format!("struct {}", ename))
     }
 
@@ -9254,6 +9511,11 @@ fn compound_op(op: ABinOp) -> Option<mir::BinOp> {
         ABinOp::ShrAssign => mir::BinOp::Shr,
         _ => return None,
     })
+}
+
+/// A scalar C type that compares with `==` directly.
+fn is_scalar_eq_type(ty: &str) -> bool {
+    matches!(ty, "long long" | "int" | "bool" | "u8" | "usize" | "unsigned long long" | "int64_t")
 }
 
 fn map_binop(op: ABinOp) -> Result<mir::BinOp> {
