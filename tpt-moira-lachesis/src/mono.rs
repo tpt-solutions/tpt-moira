@@ -1458,19 +1458,6 @@ fn ast_to_ty(t: &Type) -> Option<Ty> {
         TypeKind::Ref(inner) => Ty::Ref(Box::new(ast_to_ty(inner)?)),
         TypeKind::RefMut(inner) => Ty::RefMut(Box::new(ast_to_ty(inner)?)),
         TypeKind::Tuple(elems) if elems.is_empty() => Ty::Unit,
-        // A function type is the path `fn` whose arguments are its parameters and result.
-        TypeKind::Path(p, args)
-            if p.segments.len() == 1 && p.segments[0].node == "fn" && !args.is_empty() =>
-        {
-            let (ret, params) = args.split_last()?;
-            let mut ps: Vec<Ty> = Vec::new();
-            let mut k: usize = 0;
-            while k < params.len() {
-                ps.push(ast_to_ty(&params[k])?);
-                k += 1;
-            }
-            Ty::Fn(ps, Box::new(ast_to_ty(ret)?))
-        }
         _ => return None,
     })
 }
