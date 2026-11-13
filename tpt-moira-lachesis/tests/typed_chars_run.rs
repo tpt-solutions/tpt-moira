@@ -6,7 +6,11 @@ use std::process::Command;
 fn run(name: &str, src: &str) -> Option<String> {
     let prog = tpt_moira_clotho::compile_source(src).expect("program should parse");
     let (res, hints) = tpt_moira_lachesis::type_check_typed(&prog, &[]);
-    assert!(res.is_ok(), "{name}: program should type-check: {:?}", res.err());
+    assert!(
+        res.is_ok(),
+        "{name}: program should type-check: {:?}",
+        res.err()
+    );
     let mir = tpt_moira_atropos::lower_program_typed(&prog, &hints).expect("should lower");
     let c = tpt_moira_atropos::codegen_c::emit_c(&mir);
     let cc = ["gcc", "clang", "cc"]
@@ -23,7 +27,11 @@ fn run(name: &str, src: &str) -> Option<String> {
         .arg(&exe_path)
         .output()
         .expect("run cc");
-    assert!(build.status.success(), "{name}: C should build:\n{}", String::from_utf8_lossy(&build.stderr));
+    assert!(
+        build.status.success(),
+        "{name}: C should build:\n{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
     let out = Command::new(&exe_path).output().expect("run program");
     Some(String::from_utf8_lossy(&out.stdout).replace("\r\n", "\n"))
 }

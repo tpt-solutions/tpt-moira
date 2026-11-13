@@ -205,7 +205,8 @@ pub fn monomorphize(prog: &Program, externs: &[(&str, &Program)]) -> Program {
                 }
                 for item in mono.out.iter_mut() {
                     if let ItemKind::Impl(imp) = &mut item.kind {
-                        if imp_self_name(imp) == Some(owner.as_str()) && imp.generics.params.is_empty()
+                        if imp_self_name(imp) == Some(owner.as_str())
+                            && imp.generics.params.is_empty()
                         {
                             let mut copy = Item {
                                 visibility: Visibility::Private,
@@ -233,7 +234,10 @@ pub fn monomorphize(prog: &Program, externs: &[(&str, &Program)]) -> Program {
                 let mut sub: HashMap<String, Ty> = HashMap::new();
                 let mut k: usize = 0;
                 while k < generic.generics.params.len() && k < args.len() {
-                    sub.insert(generic.generics.params[k].name.node.clone(), args[k].clone());
+                    sub.insert(
+                        generic.generics.params[k].name.node.clone(),
+                        args[k].clone(),
+                    );
                     k += 1;
                 }
                 let mut s = generic;
@@ -513,10 +517,14 @@ impl Mono {
             _ => return None,
         };
         let (caps, inlines) = self.captures_of(&closure, sub)?;
-        let (base_inst, solved): (String, HashMap<String, Ty>) = if base.generics.params.is_empty() {
+        let (base_inst, solved): (String, HashMap<String, Ty>) = if base.generics.params.is_empty()
+        {
             (name.clone(), HashMap::new())
         } else {
-            let call = self.calls.get(&(callee.span.start, callee.span.end))?.clone();
+            let call = self
+                .calls
+                .get(&(callee.span.start, callee.span.end))?
+                .clone();
             let params: Vec<(String, Ty)> = call
                 .params
                 .iter()
@@ -710,7 +718,12 @@ impl Mono {
 
     /// The name of the instance of method `method` of `owner` at `params`, requesting it
     /// if new. The instance is added to the owner's impl block when the worklist drains.
-    fn request_method(&mut self, owner: &str, method: &str, params: &[(String, Ty)]) -> Option<String> {
+    fn request_method(
+        &mut self,
+        owner: &str,
+        method: &str,
+        params: &[(String, Ty)],
+    ) -> Option<String> {
         let mut parts = Vec::new();
         for (_, t) in params {
             parts.push(mangle(t)?);
@@ -789,7 +802,11 @@ impl Mono {
                 for a in args.iter_mut() {
                     self.ty(a, sub);
                 }
-                let last = p.segments.last().map(|s| s.node.clone()).unwrap_or_default();
+                let last = p
+                    .segments
+                    .last()
+                    .map(|s| s.node.clone())
+                    .unwrap_or_default();
                 if p.segments.len() == 1 && args.is_empty() {
                     if let Some(concrete) = sub.get(&last) {
                         if let Some(written) = ty_to_ast(concrete, t.span) {
@@ -852,7 +869,11 @@ impl Mono {
         match &mut e.kind {
             ExprKind::Call(callee, args) => {
                 if let ExprKind::Path(p) = &mut callee.kind {
-                    if let Some(call) = self.calls.get(&(callee.span.start, callee.span.end)).cloned() {
+                    if let Some(call) = self
+                        .calls
+                        .get(&(callee.span.start, callee.span.end))
+                        .cloned()
+                    {
                         self.rename_call(p, &call, sub);
                     }
                 }
@@ -863,7 +884,8 @@ impl Mono {
             }
             ExprKind::Struct(path, fields, base) => {
                 if let Some(call) = self.calls.get(&key).cloned() {
-                    let params: Vec<Ty> = call.params.iter().map(|(_, t)| subst_ty(t, sub)).collect();
+                    let params: Vec<Ty> =
+                        call.params.iter().map(|(_, t)| subst_ty(t, sub)).collect();
                     if self.generic_struct_names.contains(&call.callee) {
                         if let Some(instance) = self.request_struct(&call.callee, &params) {
                             if let Some(last) = path.segments.last_mut() {
@@ -886,7 +908,8 @@ impl Mono {
                 // identifier of an associated call (`Pair::new`).
                 for tok in &mut mc.tokens {
                     if let TokenKind::Ident(name) = &mut tok.kind {
-                        if let Some(call) = self.calls.get(&(tok.span.start, tok.span.end)).cloned() {
+                        if let Some(call) = self.calls.get(&(tok.span.start, tok.span.end)).cloned()
+                        {
                             if call.method {
                                 // A method's name: the call is on the receiver's type.
                                 let params: Vec<(String, Ty)> = call
@@ -895,7 +918,9 @@ impl Mono {
                                     .map(|(n, t)| (n.clone(), subst_ty(t, sub)))
                                     .collect();
                                 if let Some(owner) = call.owner.clone() {
-                                    if let Some(instance) = self.request_method(&owner, &call.callee, &params) {
+                                    if let Some(instance) =
+                                        self.request_method(&owner, &call.callee, &params)
+                                    {
                                         *name = instance;
                                     }
                                 }
@@ -909,7 +934,8 @@ impl Mono {
                                     *name = instance;
                                 }
                             }
-                        } else if let Some(call) = self.calls_by_start.get(&tok.span.start).cloned() {
+                        } else if let Some(call) = self.calls_by_start.get(&tok.span.start).cloned()
+                        {
                             if call.owner.as_deref() == Some(name.as_str()) {
                                 let params: Vec<Ty> =
                                     call.params.iter().map(|(_, t)| subst_ty(t, sub)).collect();
@@ -952,7 +978,9 @@ impl Mono {
                             .map(|(n, t)| (n.clone(), subst_ty(t, sub)))
                             .collect();
                         if let Some(owner) = &call.owner {
-                            if let Some(instance) = self.request_method(owner, &call.callee, &params) {
+                            if let Some(instance) =
+                                self.request_method(owner, &call.callee, &params)
+                            {
                                 method.node = instance;
                             }
                         }
@@ -1096,7 +1124,9 @@ fn is_closure_param(f: &Function, index: usize) -> bool {
         return false;
     };
     match &p.ty.kind {
-        TypeKind::Path(path, _) if path.segments.len() == 1 && path.segments[0].node == "fn" => true,
+        TypeKind::Path(path, _) if path.segments.len() == 1 && path.segments[0].node == "fn" => {
+            true
+        }
         TypeKind::Path(path, args) if args.is_empty() && path.segments.len() == 1 => {
             let name = &path.segments[0].node;
             let inline = f.generics.params.iter().any(|g| {
@@ -1288,7 +1318,9 @@ fn is_generic_impl(imp: &ImplDef, items: &[Item]) -> bool {
     if imp.generics.params.is_empty() {
         return false;
     }
-    let Some(name) = imp_self_name(imp) else { return false };
+    let Some(name) = imp_self_name(imp) else {
+        return false;
+    };
     items.iter().any(|i| match &i.kind {
         ItemKind::Struct(s) => s.name.node == name && !s.generics.params.is_empty(),
         _ => false,
@@ -1397,7 +1429,9 @@ fn ast_to_ty(t: &Type) -> Option<Ty> {
         TypeKind::RefMut(inner) => Ty::RefMut(Box::new(ast_to_ty(inner)?)),
         TypeKind::Tuple(elems) if elems.is_empty() => Ty::Unit,
         // A function type is the path `fn` whose arguments are its parameters and result.
-        TypeKind::Path(p, args) if p.segments.len() == 1 && p.segments[0].node == "fn" && !args.is_empty() => {
+        TypeKind::Path(p, args)
+            if p.segments.len() == 1 && p.segments[0].node == "fn" && !args.is_empty() =>
+        {
             let (ret, params) = args.split_last()?;
             let mut ps: Vec<Ty> = Vec::new();
             let mut k: usize = 0;

@@ -145,9 +145,11 @@ fn flatten_items(
                                 None,
                             )
                         })?;
-                        let sub_prog =
-                            pipeline::compile_at(&sub_src, reserve_span_range(next_base, sub_src.len()))
-                                .map_err(|d| in_file(d, &sub_path))?;
+                        let sub_prog = pipeline::compile_at(
+                            &sub_src,
+                            reserve_span_range(next_base, sub_src.len()),
+                        )
+                        .map_err(|d| in_file(d, &sub_path))?;
                         flatten_items(sub_prog.items, &sub_base, next_base)?
                     }
                 };

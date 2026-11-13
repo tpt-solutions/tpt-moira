@@ -9,7 +9,11 @@ use std::process::Command;
 fn compile_ok(name: &str, src: &str) {
     let prog = tpt_moira_clotho::compile_source(src).expect("program should parse");
     let (res, hints) = tpt_moira_lachesis::type_check_typed(&prog, &[]);
-    assert!(res.is_ok(), "{name}: program should type-check: {:?}", res.err());
+    assert!(
+        res.is_ok(),
+        "{name}: program should type-check: {:?}",
+        res.err()
+    );
     let mir = tpt_moira_atropos::lower_program_typed(&prog, &hints)
         .unwrap_or_else(|e| panic!("{name}: should lower: {}", e.0));
     let c = tpt_moira_atropos::codegen_c::emit_c(&mir);
@@ -151,7 +155,10 @@ fn string_equality_compares_contents() {
     assert!(res.is_ok(), "program should type-check: {:?}", res.err());
     let mir = tpt_moira_atropos::lower_program_typed(&prog, &hints).expect("should lower");
     let c = tpt_moira_atropos::codegen_c::emit_c(&mir);
-    assert!(c.contains("moira_str_eq(a, b)"), "string == should call moira_str_eq:\n{c}");
+    assert!(
+        c.contains("moira_str_eq(a, b)"),
+        "string == should call moira_str_eq:\n{c}"
+    );
 }
 
 #[test]

@@ -169,7 +169,12 @@ fn derive_struct(trait_name: &str, s: &StructDef) -> Option<String> {
     }
     // A generic struct gets a generic impl: `impl Clone for Pair` becomes
     // `impl<T> Clone for Pair<T>`, so monomorphization instantiates it per use.
-    let params: Vec<&str> = s.generics.params.iter().map(|p| p.name.node.as_str()).collect();
+    let params: Vec<&str> = s
+        .generics
+        .params
+        .iter()
+        .map(|p| p.name.node.as_str())
+        .collect();
     let list = params.join(", ");
     let header_for = format!(" for {name} ");
     let generic = src

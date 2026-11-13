@@ -164,7 +164,10 @@ fn aliased_import_of_a_colliding_type_is_renamed() {
     let mut crates = vec![krate("", true, root_src), krate("lib", false, lib_src)];
     disambiguate(&mut crates);
     let root = &crates[0].program;
-    assert_eq!(field_type_path(root, "Holder"), vec!["lib_Function".to_string()]);
+    assert_eq!(
+        field_type_path(root, "Holder"),
+        vec!["lib_Function".to_string()]
+    );
 }
 
 #[test]
@@ -180,5 +183,8 @@ fn extern_key_may_carry_the_tpt_moira_prefix() {
     ];
     disambiguate(&mut crates);
     let root = &crates[0].program;
-    assert_eq!(field_type_path(root, "Holder"), vec!["tpt_moira_lib_Function".to_string()]);
+    assert_eq!(
+        field_type_path(root, "Holder"),
+        vec!["tpt_moira_lib_Function".to_string()]
+    );
 }

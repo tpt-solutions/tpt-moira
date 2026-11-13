@@ -278,9 +278,23 @@ fn hint_compound(ty: &Ty) -> Option<String> {
                     Ty::Ref(inner) | Ty::RefMut(inner)
                         if matches!(
                             **inner,
-                            Ty::Int | Ty::I8 | Ty::I16 | Ty::I32 | Ty::I64 | Ty::I128 | Ty::Isize
-                                | Ty::U8 | Ty::U16 | Ty::U32 | Ty::U64 | Ty::U128 | Ty::Usize
-                                | Ty::F32 | Ty::F64 | Ty::Bool | Ty::Char
+                            Ty::Int
+                                | Ty::I8
+                                | Ty::I16
+                                | Ty::I32
+                                | Ty::I64
+                                | Ty::I128
+                                | Ty::Isize
+                                | Ty::U8
+                                | Ty::U16
+                                | Ty::U32
+                                | Ty::U64
+                                | Ty::U128
+                                | Ty::Usize
+                                | Ty::F32
+                                | Ty::F64
+                                | Ty::Bool
+                                | Ty::Char
                         ) =>
                     {
                         hint_elem_name(inner).map(|h| format!("{h}*"))
@@ -396,9 +410,23 @@ pub fn hint_of_ty(ty: &Ty) -> Option<String> {
         Ty::Array(elem, 0) => hint_elem_name(elem).map(|e| format!("Slice<{e}>")),
         Ty::Ref(inner) | Ty::RefMut(inner) => match &**inner {
             // A reference to a scalar is a pointer to it.
-            Ty::Int | Ty::I8 | Ty::I16 | Ty::I32 | Ty::I64 | Ty::I128 | Ty::Isize | Ty::U8
-            | Ty::U16 | Ty::U32 | Ty::U64 | Ty::U128 | Ty::Usize | Ty::F32 | Ty::F64
-            | Ty::Bool | Ty::Char => hint_elem_name(inner).map(|h| format!("{h}*")),
+            Ty::Int
+            | Ty::I8
+            | Ty::I16
+            | Ty::I32
+            | Ty::I64
+            | Ty::I128
+            | Ty::Isize
+            | Ty::U8
+            | Ty::U16
+            | Ty::U32
+            | Ty::U64
+            | Ty::U128
+            | Ty::Usize
+            | Ty::F32
+            | Ty::F64
+            | Ty::Bool
+            | Ty::Char => hint_elem_name(inner).map(|h| format!("{h}*")),
             // A reference to a string is the string (its C value is the same `char*`).
             Ty::Str => Some("str".to_string()),
             Ty::Struct(name) if name == "String" => Some("str".to_string()),
@@ -1479,7 +1507,9 @@ impl TypeChecker {
         self.env.push(HashMap::new());
         for (i, p) in params.iter().enumerate() {
             let pt = match (&p.ty.kind, expected.as_ref().and_then(|e| e.get(i))) {
-                (TypeKind::Infer, Some(t)) if !matches!(t, Ty::Generic(_) | Ty::Unknown) => t.clone(),
+                (TypeKind::Infer, Some(t)) if !matches!(t, Ty::Generic(_) | Ty::Unknown) => {
+                    t.clone()
+                }
                 _ => self.type_to_ty(&p.ty),
             };
             param_tys.push(pt.clone());
@@ -2281,7 +2311,12 @@ impl TypeChecker {
             }
             // A closure bound (`F: FnOnce() -> R`) describes the parameter's solved
             // closure type: unifying it solves the result's parameters (`T` in `R`).
-            let gnames: Vec<String> = sig.generics.params.iter().map(|p| p.name.node.clone()).collect();
+            let gnames: Vec<String> = sig
+                .generics
+                .params
+                .iter()
+                .map(|p| p.name.node.clone())
+                .collect();
             for p in &sig.generics.params {
                 for b in &p.bounds {
                     if let TypeBound::Fn(fty) = b {
@@ -3121,8 +3156,13 @@ impl TypeChecker {
                 self.unify_ty(&g, at, &mut sub);
             }
             // Closure bounds on the method's own parameters solve as in `check_call`.
-            if let Some(own_gen) = self.method_own_generics.get(&(owner.clone(), method.clone())).cloned() {
-                let gnames: Vec<String> = own_gen.params.iter().map(|p| p.name.node.clone()).collect();
+            if let Some(own_gen) = self
+                .method_own_generics
+                .get(&(owner.clone(), method.clone()))
+                .cloned()
+            {
+                let gnames: Vec<String> =
+                    own_gen.params.iter().map(|p| p.name.node.clone()).collect();
                 for p in &own_gen.params {
                     for b in &p.bounds {
                         if let TypeBound::Fn(fty) = b {
@@ -3809,8 +3849,10 @@ impl TypeChecker {
             ("str".into(), "as_bytes".into()),
             sig(vec![], Apply("Vec".into(), vec![U8])),
         );
-        self.methods
-            .insert(("str".into(), "chars".into()), sig(vec![], Apply("Iter".into(), vec![Ty::Char])));
+        self.methods.insert(
+            ("str".into(), "chars".into()),
+            sig(vec![], Apply("Iter".into(), vec![Ty::Char])),
+        );
         self.methods
             .insert(("Cow".into(), "trim".into()), sig(vec![], Str));
         self.methods
@@ -4053,12 +4095,7 @@ impl TypeChecker {
                 Apply("Option".into(), vec![Str]),
             ),
             // `lines()` yields the string's lines as string slices.
-            (
-                "str",
-                "lines",
-                vec![],
-                Apply("Iter".into(), vec![Str]),
-            ),
+            ("str", "lines", vec![], Apply("Iter".into(), vec![Str])),
             // `str` methods of the C string runtime (`moira_str_*`).
             ("str", "trim", vec![], Str),
             ("str", "trim_start", vec![], Str),
@@ -4287,7 +4324,10 @@ impl TypeChecker {
             (Ty::Apply(a, xs), Ty::Apply(b, ys)) => {
                 a == b
                     && xs.len() == ys.len()
-                    && xs.iter().zip(ys.iter()).all(|(x, y)| self.unify_ty(x, y, sub))
+                    && xs
+                        .iter()
+                        .zip(ys.iter())
+                        .all(|(x, y)| self.unify_ty(x, y, sub))
             }
             (Ty::Apply(a, _), Ty::Struct(b)) | (Ty::Struct(a), Ty::Apply(b, _)) => a == b,
             (Ty::Ref(a), Ty::Ref(b)) | (Ty::RefMut(a), Ty::RefMut(b)) => self.unify_ty(a, b, sub),

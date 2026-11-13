@@ -187,8 +187,10 @@ pub fn emit_c(prog: &mir::MirProgram) -> String {
     // before any of them; its definition follows.
     for (k, v) in &map_types {
         let name = mir::map_c_name(k, v);
-        out.push_str(&format!("typedef struct {name} {name};
-"));
+        out.push_str(&format!(
+            "typedef struct {name} {name};
+"
+        ));
     }
     // Inner element types first: a nested vector's typedef needs its element's.
     let mut ordered: Vec<&String> = vec_elems.iter().collect();

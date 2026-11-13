@@ -16,7 +16,11 @@ fn mono_and_run(name: &str, src: &str) -> Option<String> {
     let prog = tpt_moira_clotho::parse_source(src).expect("program should parse");
     let prog = tpt_moira_lachesis::mono::monomorphize(&prog, &[]);
     let (res, hints) = tpt_moira_lachesis::type_check_typed(&prog, &[]);
-    assert!(res.is_ok(), "specialized program should type-check: {:?}", res.err());
+    assert!(
+        res.is_ok(),
+        "specialized program should type-check: {:?}",
+        res.err()
+    );
     let mir = tpt_moira_atropos::lower_program_typed(&prog, &hints)
         .expect("specialized program should lower");
     let c = tpt_moira_atropos::codegen_c::emit_c(&mir);
@@ -86,7 +90,16 @@ fn generic_function_with_one_instance_keeps_no_generic_original() {
         &tpt_moira_atropos::lower_program_typed(&mono, &Default::default())
             .expect("instance program should lower"),
     );
-    assert!(!stripped.contains("id(int64_t x) {") && !stripped.contains("int32_t id(int32_t") || stripped.contains("id__i32"), "generic original emitted");
-    assert!(!stripped.contains("
-int32_t id("), "generic original was emitted");
+    assert!(
+        !stripped.contains("id(int64_t x) {") && !stripped.contains("int32_t id(int32_t")
+            || stripped.contains("id__i32"),
+        "generic original emitted"
+    );
+    assert!(
+        !stripped.contains(
+            "
+int32_t id("
+        ),
+        "generic original was emitted"
+    );
 }

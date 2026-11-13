@@ -549,6 +549,9 @@ fn main() {
     let Some(out) = check_and_run("capturing_closure_fn_arg", src) else {
         return;
     };
-    assert_eq!(out.trim(), "3
-20");
+    assert_eq!(
+        out.trim(),
+        "3
+20"
+    );
 }

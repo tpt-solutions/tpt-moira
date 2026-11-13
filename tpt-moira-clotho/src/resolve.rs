@@ -94,7 +94,9 @@ impl Resolver {
             collect_uses(&c.program.items, &mut uses);
             for (path, alias, glob) in uses {
                 let Some(first) = path.first() else { continue };
-                let Some(d) = unit_of_segment(&keys, u, first) else { continue };
+                let Some(d) = unit_of_segment(&keys, u, first) else {
+                    continue;
+                };
                 if glob {
                     scopes[u].globs.push(d);
                     continue;
@@ -236,7 +238,11 @@ impl Resolver {
             return;
         }
         if let Some(d) = self.resolve_type(u, None, name) {
-            if self.owners.get(name.as_str()).map_or(false, |us| us.contains(&d)) {
+            if self
+                .owners
+                .get(name.as_str())
+                .map_or(false, |us| us.contains(&d))
+            {
                 *name = self.mangle(d, name);
             }
         }
@@ -298,7 +304,10 @@ impl Resolver {
     /// A type definition: renamed when this crate owns a colliding name.
     fn define(&self, u: usize, name: &mut String) {
         if self.colliding.contains(name.as_str())
-            && self.owners.get(name.as_str()).map_or(false, |us| us.contains(&u))
+            && self
+                .owners
+                .get(name.as_str())
+                .map_or(false, |us| us.contains(&u))
         {
             *name = self.mangle(u, name);
         }
@@ -553,7 +562,11 @@ fn collect_uses(items: &[Item], out: &mut Vec<(Vec<String>, Option<String>, bool
     }
 }
 
-fn flatten_use(tree: &UseTree, prefix: &[String], out: &mut Vec<(Vec<String>, Option<String>, bool)>) {
+fn flatten_use(
+    tree: &UseTree,
+    prefix: &[String],
+    out: &mut Vec<(Vec<String>, Option<String>, bool)>,
+) {
     let mut path: Vec<String> = prefix.to_vec();
     for s in &tree.prefix {
         path.push(s.node.clone());

@@ -16,8 +16,7 @@ fn check_and_run(name: &str, src: &str) -> Option<String> {
     let prog = tpt_moira_clotho::parse_source(src).expect("program should parse");
     let (res, hints) = tpt_moira_lachesis::type_check_typed(&prog, &[]);
     assert!(res.is_ok(), "program should type-check: {:?}", res.err());
-    let mir = tpt_moira_atropos::lower_program_typed(&prog, &hints)
-        .expect("program should lower");
+    let mir = tpt_moira_atropos::lower_program_typed(&prog, &hints).expect("program should lower");
     let c = tpt_moira_atropos::codegen_c::emit_c(&mir);
 
     let cc = find_cc()?;

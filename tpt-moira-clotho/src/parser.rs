@@ -2790,10 +2790,9 @@ impl Parser {
                 // keeps the compiler's own source parseable.
                 self.bump();
                 let path = self.parse_path(true)?;
-                let is_fn_trait = path
-                    .segments
-                    .last()
-                    .map_or(false, |s| matches!(s.node.as_str(), "Fn" | "FnMut" | "FnOnce"));
+                let is_fn_trait = path.segments.last().map_or(false, |s| {
+                    matches!(s.node.as_str(), "Fn" | "FnMut" | "FnOnce")
+                });
                 let mut fn_args: Vec<Type> = Vec::new();
                 if self.eat(&TokenKind::LParen) {
                     // `impl FnMut(&str) -> Ret (+ Bound)*`: a closure type. Its parameter
@@ -3013,7 +3012,8 @@ impl Parser {
                 let span = self.tokens[self.pos].span;
                 self.bump();
                 self.expect(TokenKind::LParen)?;
-                let mut args: Vec<Type> = self.parse_delimited(TokenKind::RParen, |s| s.parse_type())?;
+                let mut args: Vec<Type> =
+                    self.parse_delimited(TokenKind::RParen, |s| s.parse_type())?;
                 if self.eat(&TokenKind::Arrow) {
                     args.push(self.parse_type()?);
                 } else {

@@ -84,13 +84,14 @@ fn main() -> ExitCode {
                 return ExitCode::FAILURE;
             }
         };
-        let prog = match tpt_moira_clotho::compile_file_in(std::path::Path::new(path), &mut span_base) {
-            Ok(p) => p,
-            Err(diag) => {
-                eprintln!("moira: parse error: {}", diag);
-                return ExitCode::FAILURE;
-            }
-        };
+        let prog =
+            match tpt_moira_clotho::compile_file_in(std::path::Path::new(path), &mut span_base) {
+                Ok(p) => p,
+                Err(diag) => {
+                    eprintln!("moira: parse error: {}", diag);
+                    return ExitCode::FAILURE;
+                }
+            };
         (src, prog)
     } else {
         let mut buf = String::new();
@@ -128,7 +129,8 @@ fn main() -> ExitCode {
     for pair in &extern_pairs {
         let name = &pair.0;
         let path = &pair.1;
-        let compiled = tpt_moira_clotho::compile_file_in(std::path::Path::new(path), &mut span_base);
+        let compiled =
+            tpt_moira_clotho::compile_file_in(std::path::Path::new(path), &mut span_base);
         match compiled {
             Ok(p) => {
                 extern_programs.push((name.clone(), p));
@@ -177,8 +179,7 @@ fn main() -> ExitCode {
         let mut specialized_externs: Vec<(String, tpt_moira_clotho::ast::Program)> = Vec::new();
         let mut i = 0;
         while i < extern_programs.len() {
-            let mut visible: Vec<(&str, &tpt_moira_clotho::ast::Program)> =
-                vec![("", &program)];
+            let mut visible: Vec<(&str, &tpt_moira_clotho::ast::Program)> = vec![("", &program)];
             let mut j = 0;
             while j < extern_programs.len() {
                 if j != i {

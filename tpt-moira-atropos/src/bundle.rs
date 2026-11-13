@@ -147,9 +147,7 @@ fn rename_rvalue(rv: &mut Rvalue, f: &dyn Fn(&str, bool) -> String) {
         | Rvalue::Unary(_, a)
         | Rvalue::Field(a, _, _)
         | Rvalue::FieldAddr(a, _, _)
-        | Rvalue::Ref(a, _) => {
-            rename_operand(a, f)
-        }
+        | Rvalue::Ref(a, _) => rename_operand(a, f),
         Rvalue::Binary(_, a, b) | Rvalue::Index(a, b) | Rvalue::IndexRef(a, b) => {
             rename_operand(a, f);
             rename_operand(b, f);

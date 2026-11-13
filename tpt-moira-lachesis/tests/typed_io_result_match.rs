@@ -23,7 +23,10 @@ fn io_result_and_bare_none_arm_emit_compilable_c() {
     let mir = tpt_moira_atropos::lower_program_typed(&prog, &hints)
         .expect("program should lower with hints");
     let c = tpt_moira_atropos::codegen_c::emit_c(&mir);
-    assert!(!c.contains("struct Option t"), "match temp should be typed:\n{c}");
+    assert!(
+        !c.contains("struct Option t"),
+        "match temp should be typed:\n{c}"
+    );
     let cc = ["gcc", "clang", "cc"]
         .into_iter()
         .find(|cc| Command::new(cc).arg("--version").output().is_ok());

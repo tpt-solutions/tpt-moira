@@ -175,7 +175,7 @@ impl<'src> Lexer<'src> {
                 Some(b'\'') => {
                     self.bump(); // b
                     self.bump(); // opening quote
-                    // A byte char is a `u8` integer literal, not a `char`.
+                                 // A byte char is a `u8` integer literal, not a `char`.
                     let c = self.lex_byte_char();
                     return TokenKind::Int {
                         value: c as u128,
