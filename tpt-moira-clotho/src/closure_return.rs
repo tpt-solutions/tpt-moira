@@ -525,7 +525,7 @@ fn count_refs(prog: &Program, name: &str) -> usize {
     count
 }
 
-fn visit_item_exprs(item: &mut Item, f: &mut impl FnMut(&mut Expr)) {
+pub(crate) fn visit_item_exprs(item: &mut Item, f: &mut impl FnMut(&mut Expr)) {
     match &mut item.kind {
         ItemKind::Function(func) => { visit_block(&mut func.body, f, &mut |_| {}); }
         ItemKind::Impl(imp) => {
@@ -541,7 +541,7 @@ fn visit_item_exprs(item: &mut Item, f: &mut impl FnMut(&mut Expr)) {
 
 /// Visit a block: `fb` first (it may rewrite the statements), then each statement's
 /// expressions.
-fn visit_block(b: &mut Block, fe: &mut impl FnMut(&mut Expr), fb: &mut impl FnMut(&mut Block)) {
+pub(crate) fn visit_block(b: &mut Block, fe: &mut impl FnMut(&mut Expr), fb: &mut impl FnMut(&mut Block)) {
     fb(b);
     for s in &mut b.stmts {
         match &mut s.kind {
@@ -561,7 +561,7 @@ fn visit_block(b: &mut Block, fe: &mut impl FnMut(&mut Expr), fb: &mut impl FnMu
 
 /// Visit an expression tree: `fe` on every expression node (before its children) and
 /// `fb` on every block.
-fn visit_expr(e: &mut Expr, fe: &mut impl FnMut(&mut Expr), fb: &mut impl FnMut(&mut Block)) {
+pub(crate) fn visit_expr(e: &mut Expr, fe: &mut impl FnMut(&mut Expr), fb: &mut impl FnMut(&mut Block)) {
     fe(e);
     match &mut e.kind {
         ExprKind::Lit(_) | ExprKind::Path(_) | ExprKind::Break | ExprKind::Continue => {}

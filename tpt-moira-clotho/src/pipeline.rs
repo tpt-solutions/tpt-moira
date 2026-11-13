@@ -48,7 +48,9 @@ pub fn compile_at(source: &str, base: usize) -> ParseResult<Program> {
     let parsed = Parser::new(expanded_tokens).parse_program()?;
     let with_derives = expand_derives(&parsed);
     let expanded = expand_program_concurrent(&with_derives, &table);
-    Ok(crate::closure_return::inline_returned_closures(expanded))
+    Ok(crate::closure_return::inline_returned_closures(
+        crate::let_conditions::desugar_let_conditions(expanded),
+    ))
 }
 
 /// Like [`compile`], but reads bytes from any [`Read`] (e.g. a file) on a
