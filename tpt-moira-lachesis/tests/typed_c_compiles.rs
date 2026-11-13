@@ -153,3 +153,21 @@ fn string_equality_compares_contents() {
     let c = tpt_moira_atropos::codegen_c::emit_c(&mir);
     assert!(c.contains("moira_str_eq(a, b)"), "string == should call moira_str_eq:\n{c}");
 }
+
+#[test]
+fn map_in_a_field_takes_an_insert_with_a_tuple_value() {
+    compile_ok(
+        "field_map_insert",
+        "use std::collections::HashMap;\n\
+         #[derive(Clone)]\n\
+         pub struct Table { pub defs: HashMap<String, (Vec<String>, i64)> }\n\
+         impl Table {\n\
+             pub fn with_alias(&self, name: &str, n: i64) -> Table {\n\
+                 let mut table = self.clone();\n\
+                 table.defs.insert(name.to_string(), (Vec::new(), n));\n\
+                 table\n\
+             }\n\
+         }\n\
+         fn main() {}\n",
+    );
+}

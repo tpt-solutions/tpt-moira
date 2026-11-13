@@ -3463,25 +3463,67 @@ impl Lower {
 
     /// `m.insert(k, v)`, `m.get(&k)`, `m.contains_key(&k)`, `m.len()`, `m.is_empty()`
     /// on a map local: calls to the generated helpers. `None` for other methods.
+    /// A map stored in a field of a struct (`t.defs`), as a pointer to that field, for the
+    /// map methods that the field's storage must see.
+    fn field_map_pointer(
+        &mut self,
+        recv: &Expr,
+        method: &str,
+    ) -> Result<Option<(String, String, String, bool)>> {
+        let ExprKind::Field(base, _) = &recv.kind else {
+            return Ok(None);
+        };
+        if !matches!(method, "insert" | "get" | "contains_key" | "contains" | "len" | "is_empty") {
+            return Ok(None);
+        }
+        let hint = match self.hint_of_expr(recv) {
+            Some(h) if h.starts_with("Map<") => h,
+            _ => return Ok(None),
+        };
+        let Some((k, v)) = map_args(&hint) else {
+            return Ok(None);
+        };
+        let ExprKind::Field(_, field) = &recv.kind else {
+            return Ok(None);
+        };
+        let b = match self.lower_expr(base)? {
+            mir::Operand::Var(n) => n,
+            _ => return Err(LowerError("a map's struct must be a named value".into())),
+        };
+        let deref = self.temp_type_of(&b).ends_with('*');
+        let p = self.fresh_temp(format!("{hint}*"));
+        self.emit(
+            p.clone(),
+            mir::Rvalue::FieldAddr(mir::Operand::var(b), field.node.clone(), deref),
+        );
+        Ok(Some((p, k, v, true)))
+    }
+
     fn lower_map_method(
         &mut self,
         recv: &Expr,
         method: &str,
         args: &[Expr],
     ) -> Result<Option<mir::Operand>> {
-        let (mname, k, v, is_ptr) = match self.map_local(recv) {
+        // A map held in a field is used through a pointer to the field, so an insert changes
+        // the field itself (a copy would lose the new length).
+        let in_field = self.field_map_pointer(recv, method)?;
+        let (mname, k, v, is_ptr) = match in_field {
             Some(m) => m,
-            // A map read from a field (): the read-only methods work on a
-            // copy of the map, which shares its storage.
-            None if matches!(recv.kind, ExprKind::Field(..))
-                && matches!(method, "get" | "contains_key" | "len" | "is_empty") =>
-            {
-                match self.map_from_hint(recv)? {
-                    Some(m) => m,
-                    None => return Ok(None),
+            None => match self.map_local(recv) {
+                Some(m) => m,
+                // A map read from a field (): the read-only methods work on a
+                // copy of the map, which shares its storage.
+                None if matches!(recv.kind, ExprKind::Field(..))
+                    && matches!(method, "get" | "contains_key" | "len" | "is_empty") =>
+                {
+                    match self.map_from_hint(recv)? {
+                        Some(m) => m,
+                        None => return Ok(None),
+                    }
                 }
-            }
-            None => return Ok(None),
+                None => return Ok(None),
+            },
         };
         let (helper, ret_ty) = match (method, args.len()) {
             // A set's `insert(x)` and `contains(&x)` are the map's with the value `true`.
@@ -6884,7 +6926,9 @@ impl Lower {
                 // `Vec::new()` / `Vec::with_capacity(n)` in an expression position (a
                 // struct field, an argument): the checker's hint gives the element type.
                 if let Some(vec_ty) = vec_constructor(e) {
-                    if let Some(elem) = self.hint_of_expr(e).as_deref().and_then(mir::vec_elem) {
+                    // The checker's hint, or the type the context expects (a tuple component).
+                    let want = self.hint_of_expr(e).or_else(|| self.expect_ty.clone());
+                    if let Some(elem) = want.as_deref().and_then(mir::vec_elem) {
                         let elem = elem.to_string();
                         let t = self.fresh_temp(mir::vec_type(&elem));
                         self.emit(
@@ -7709,8 +7753,17 @@ impl Lower {
                 let mut operands = Vec::with_capacity(elems.len());
                 let mut c_tys = Vec::with_capacity(elems.len());
                 let expected = self.expect_ty.take();
-                for e in elems {
-                    let o = self.lower_expr(e)?;
+                // Each component is lowered against the component type the context gives.
+                let component_tys: Option<Vec<String>> = expected
+                    .as_deref()
+                    .and_then(mir::split_generic)
+                    .filter(|(b, a)| *b == "Tuple" && a.len() == elems.len())
+                    .map(|(_, a)| a.iter().map(|t| t.to_string()).collect());
+                for (i, e) in elems.iter().enumerate() {
+                    self.expect_ty = component_tys.as_ref().map(|a| a[i].clone());
+                    let lowered = self.lower_expr(e);
+                    self.expect_ty = None;
+                    let o = lowered?;
                     let ct = match &o {
                         mir::Operand::Var(n) => self.temp_type_of(n),
                         _ => "long long".to_string(),
