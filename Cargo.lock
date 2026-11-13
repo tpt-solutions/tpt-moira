@@ -19,7 +19,6 @@ version = "0.1.0"
 name = "tpt-moira-atropos"
 version = "0.1.0"
 dependencies = [
- "tpt-moira-alloc",
  "tpt-moira-clotho",
 ]
 

@@ -13,4 +13,3 @@ categories = ["compilers"]
 
 [dependencies]
 tpt-moira-clotho = { path = "../tpt-moira-clotho" }
-tpt-moira-alloc = { path = "../tpt-moira-alloc" }

@@ -7,7 +7,6 @@ description = "TPT Moira: a from-scratch, high-performance Rust compiler"
 license = "MIT OR Apache-2.0"
 authors = ["TPT Solutions"]
 repository = "https://github.com/tpt-solutions/tpt-moira"
-homepage = "https://github.com/tpt-solutions/tpt-moira"
 documentation = "https://docs.rs/tpt-moira"
 readme = "README.md"
 keywords = ["compiler", "rust", "rustc", "toolchain", "fast"]
