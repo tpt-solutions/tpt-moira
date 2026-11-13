@@ -44,6 +44,9 @@ long long moira_char_is_alphanumeric(long long c) { return isalnum((int)c) != 0;
 long long moira_char_is_numeric(long long c) { return isdigit((int)c) != 0; }
 long long moira_char_to_ascii_lowercase(long long c) { return tolower((int)c); }
 long long moira_char_to_ascii_uppercase(long long c) { return toupper((int)c); }
+long long moira_char_is_ascii_hexdigit(long long c) { return isxdigit((int)c) != 0; }
+long long moira_char_to_digit(long long c, long long radix) { long long v = (c >= '0' && c <= '9') ? c - '0' : (c >= 'a' && c <= 'z') ? c - 'a' + 10 : (c >= 'A' && c <= 'Z') ? c - 'A' + 10 : -1; return (v >= 0 && v < radix) ? v : -1; }
+long long moira_char_from_u32_valid(long long c) { return (c >= 0 && c <= 0x10FFFF && !(c >= 0xD800 && c <= 0xDFFF)); }
 char* moira_str_before(char* s, long long n) { return moira_str_dup_n(s, (size_t)n); }
 long long moira_line_next(char* s, long long i) { char* q = strchr(s + i, '\n'); return q ? (long long)(q - s) + 1 : (long long)strlen(s); }
 char* moira_line_text(char* s, long long i, long long next) { long long n = next - i; if (n > 0 && s[i + n - 1] == '\n') n--; if (n > 0 && s[i + n - 1] == '\r') n--; return moira_str_dup_n(s + i, (size_t)n); }
@@ -287,13 +290,10 @@ fn c_signature(f: &mir::Function, struct_names: &std::collections::HashSet<&str>
 /// (`R (*)(P)`) cannot be written as a prefix: the declarator must wrap the name and
 /// parameter list, `R (*name(params))(P)`.
 fn fn_header(ret: &str, name: &str, param_str: &str) -> String {
-    match ret.find("(*)") {
-        Some(star) => {
-            let (head, tail) = ret.split_at(star);
-            let tail = &tail["(*)".len()..];
-            format!("{} (*{}({})){}", head.trim_end(), name, param_str, tail)
-        }
-        None => format!("{} {}({})", ret, name, param_str),
+    if ret.contains("(*)") {
+        ret.replacen("(*)", &format!("(*{}({}))", name, param_str), 1)
+    } else {
+        format!("{} {}({})", ret, name, param_str)
     }
 }
 

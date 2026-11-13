@@ -4455,6 +4455,78 @@ impl Lower {
         Ok(mir::Operand::var(r))
     }
 
+    /// Whether a method receiver is a character (or a byte): by the checker's hint, or by the
+    /// lowering's own type for a local (a closure parameter over characters).
+    fn is_char_recv(&self, recv: &Expr) -> bool {
+        match self.hint_of_expr(recv).as_deref() {
+            // A byte (`u8`) takes the character methods too: both are C integers here.
+            Some("char") | Some("u8") => true,
+            _ => match &recv.kind {
+                ExprKind::Path(p) if p.segments.len() == 1 => {
+                    let n = &self.var_name(&p.segments[0].node);
+                    self.types.get(n).map_or(false, |t| t == "char")
+                        || self
+                            .func
+                            .locals
+                            .iter()
+                            .any(|(l, t)| l == n && t.as_deref() == Some("char"))
+                }
+                _ => false,
+            },
+        }
+    }
+
+    /// `c.to_digit(radix)`: `Some(digit)` when the character is a digit in `radix`, else `None`.
+    fn lower_char_to_digit(&mut self, recv: &Expr, radix: &Expr) -> Result<mir::Operand> {
+        let c = self.lower_expr(recv)?;
+        let rd = self.lower_expr(radix)?;
+        let d = self.fresh_temp("long long");
+        self.emit(
+            d.clone(),
+            mir::Rvalue::Call(
+                mir::Operand::Func("moira_char_to_digit".to_string()),
+                vec![c, rd],
+            ),
+        );
+        let found = self.fresh_temp("long long");
+        self.emit(
+            found.clone(),
+            mir::Rvalue::Binary(
+                mir::BinOp::Ge,
+                mir::Operand::var(d.clone()),
+                mir::Operand::Const(0),
+            ),
+        );
+        let r = self.fresh_temp("Option<u32>");
+        let some = self.new_block();
+        let none = self.new_block();
+        let join = self.new_block();
+        self.set_term(mir::Terminator::If(mir::Operand::var(found), some, none));
+        self.current = some;
+        self.emit(
+            r.clone(),
+            mir::Rvalue::StructLit(
+                "Option".to_string(),
+                vec![
+                    ("tag".to_string(), mir::Operand::Const(0)),
+                    ("f0".to_string(), mir::Operand::var(d)),
+                ],
+            ),
+        );
+        self.set_term(mir::Terminator::Goto(join));
+        self.current = none;
+        self.emit(
+            r.clone(),
+            mir::Rvalue::StructLit(
+                "Option".to_string(),
+                vec![("tag".to_string(), mir::Operand::Const(1))],
+            ),
+        );
+        self.set_term(mir::Terminator::Goto(join));
+        self.current = join;
+        Ok(mir::Operand::var(r))
+    }
+
     /// A string pattern as a C string: a `char` literal becomes a one-character string.
     fn pattern_string(&mut self, pat: &Expr) -> Result<mir::Operand> {
         if let ExprKind::Lit(ast::Lit::Char(_)) = &pat.kind {
@@ -5730,22 +5802,7 @@ impl Lower {
             }
         }
         // A method of a `char` (the C runtime's `moira_char_<method>`).
-        let recv_is_char = match self.hint_of_expr(recv).as_deref() {
-            Some("char") => true,
-            // The lowering's own type for a local (a closure parameter over characters) counts too.
-            _ => match &recv.kind {
-                ExprKind::Path(p) if p.segments.len() == 1 => {
-                    let n = &self.var_name(&p.segments[0].node);
-                    self.types.get(n).map_or(false, |t| t == "char")
-                        || self
-                            .func
-                            .locals
-                            .iter()
-                            .any(|(l, t)| l == n && t.as_deref() == Some("char"))
-                }
-                _ => false,
-            },
-        };
+        let recv_is_char = self.is_char_recv(recv);
         if recv_is_char && args.is_empty() {
             const CHAR_METHODS: &[&str] = &[
                 "is_ascii_alphanumeric",
@@ -5758,10 +5815,13 @@ impl Lower {
                 "is_numeric",
                 "to_ascii_lowercase",
                 "to_ascii_uppercase",
+                "is_ascii_hexdigit",
             ];
             if CHAR_METHODS.contains(&method) {
                 let c = self.lower_expr(recv)?;
-                let t = self.fresh_temp(if method.starts_with("to_") {
+                // `to_ascii_*` on a byte stays a byte; on a character it is a character.
+                let byte = self.hint_of_expr(recv).as_deref() == Some("u8");
+                let t = self.fresh_temp(if method.starts_with("to_") && !byte {
                     "char"
                 } else {
                     "long long"
@@ -5793,6 +5853,11 @@ impl Lower {
             if is_string {
                 return Ok(Some(self.lower_expr(recv)?));
             }
+        }
+        // `c.to_digit(radix)` on a character: `Some(digit)` or `None`. (Ahead of the string
+        // methods: the receiver is a character, not a string.)
+        if method == "to_digit" && args.len() == 1 && self.is_char_recv(recv) {
+            return self.lower_char_to_digit(recv, &args[0]).map(Some);
         }
         const STR_METHODS: &[&str] = &[
             "trim",
@@ -7242,6 +7307,46 @@ impl Lower {
                         let v = self.lower_expr(&args[0])?;
                         return self.heap_string(v);
                     }
+                    // `char::from_u32(n)`: `Some(n)` for a Unicode scalar value, else `None`.
+                    if segs == ["char", "from_u32"] && args.len() == 1 {
+                        let n = self.lower_expr(&args[0])?;
+                        let ok = self.fresh_temp("long long");
+                        self.emit(
+                            ok.clone(),
+                            mir::Rvalue::Call(
+                                mir::Operand::Func("moira_char_from_u32_valid".to_string()),
+                                vec![n.clone()],
+                            ),
+                        );
+                        let r = self.fresh_temp("Option<char>");
+                        let some = self.new_block();
+                        let none = self.new_block();
+                        let join = self.new_block();
+                        self.set_term(mir::Terminator::If(mir::Operand::var(ok), some, none));
+                        self.current = some;
+                        self.emit(
+                            r.clone(),
+                            mir::Rvalue::StructLit(
+                                "Option".to_string(),
+                                vec![
+                                    ("tag".to_string(), mir::Operand::Const(0)),
+                                    ("f0".to_string(), n),
+                                ],
+                            ),
+                        );
+                        self.set_term(mir::Terminator::Goto(join));
+                        self.current = none;
+                        self.emit(
+                            r.clone(),
+                            mir::Rvalue::StructLit(
+                                "Option".to_string(),
+                                vec![("tag".to_string(), mir::Operand::Const(1))],
+                            ),
+                        );
+                        self.set_term(mir::Terminator::Goto(join));
+                        self.current = join;
+                        return Ok(mir::Operand::var(r));
+                    }
                     if segs == ["String", "new"] && args.is_empty() {
                         return self.heap_string(mir::Operand::CStr(String::new()));
                     }
@@ -7259,6 +7364,25 @@ impl Lower {
                         self.emit(
                             t.clone(),
                             mir::Rvalue::Call(mir::Operand::Func("moira_box_new".to_string()), vec![v]),
+                        );
+                        return Ok(mir::Operand::var(t));
+                    }
+                }
+                // `HashMap::new()` in an expression position (`Some(HashMap::new())`): the
+                // checker's hint names the map's key and value types.
+                if is_hashmap_ctor(e) {
+                    if let Some((k, v)) = self
+                        .hint_of_expr(e)
+                        .as_deref()
+                        .and_then(map_args)
+                    {
+                        let t = self.fresh_temp(format!("Map<{k},{v}>"));
+                        self.emit(
+                            t.clone(),
+                            mir::Rvalue::Call(
+                                mir::Operand::Func(mir::map_fn_name(&k, &v, "new")),
+                                vec![],
+                            ),
                         );
                         return Ok(mir::Operand::var(t));
                     }
