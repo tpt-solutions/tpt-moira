@@ -179,9 +179,9 @@ mod tests {
         };
         // A failed check is NOT cached: the closure runs on every miss, and the
         // second call re-runs it (rather than replaying a stale rejection).
-        let _ = cache.checked(src, &run);
+        let _ = cache.checked(src, run);
         assert_eq!(calls.get(), 1);
-        let res: Result<(), Vec<Diag>> = cache.checked(src, &run);
+        let res: Result<(), Vec<Diag>> = cache.checked(src, run);
         assert_eq!(calls.get(), 2);
         assert!(res.is_err());
         // A successful check IS cached: the closure runs once.

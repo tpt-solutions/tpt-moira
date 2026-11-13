@@ -710,7 +710,8 @@ fn find_moira() -> Option<PathBuf> {
 }
 
 fn find_rustc() -> Option<PathBuf> {
-    for name in ["rustc"] {
+    {
+        let name = "rustc";
         if Command::new(name).arg("--version").output().is_ok() {
             return Some(PathBuf::from(name));
         }

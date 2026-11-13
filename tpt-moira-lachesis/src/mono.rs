@@ -18,6 +18,9 @@ use std::collections::{HashMap, HashSet};
 use tpt_moira_clotho::ast::*;
 use tpt_moira_clotho::token::{Span, TokenKind};
 
+/// A closure's captured `(name, type)` pairs plus the inline contexts it needs.
+type InlineSpec = (Vec<(String, Type)>, Vec<InlineCtx>);
+
 /// Specialize the generic definitions of `prog` (see the module docs). `externs` are the
 /// extern crates, which the checker needs to resolve calls into them.
 pub fn monomorphize(prog: &Program, externs: &[(&str, &Program)]) -> Program {
@@ -661,11 +664,7 @@ impl Mono {
 
     /// The captured variables of a closure literal, as source types. `None` when a
     /// capture has no source spelling or is itself a closure (not yet supported).
-    fn captures_of(
-        &self,
-        closure: &Expr,
-        sub: &HashMap<String, Ty>,
-    ) -> Option<(Vec<(String, Type)>, Vec<InlineCtx>)> {
+    fn captures_of(&self, closure: &Expr, sub: &HashMap<String, Ty>) -> Option<InlineSpec> {
         let mut caps = Vec::new();
         let mut inlines = Vec::new();
         self.collect_captures(closure.span, sub, &mut caps, &mut inlines, 0)?;

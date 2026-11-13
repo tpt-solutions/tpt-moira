@@ -629,7 +629,7 @@ impl TypeChecker {
     pub fn check_program_typed(
         prog: &tpt_moira_clotho::ast::Program,
         externs: &[(&str, &tpt_moira_clotho::ast::Program)],
-    ) -> (Result<(), Vec<Diag>>, HashMap<(usize, usize), String>) {
+    ) -> crate::TypedCheckOutcome {
         let cx = Self::check_program_cx(prog, externs);
         let hints: HashMap<(usize, usize), String> = cx
             .expr_types
@@ -648,9 +648,11 @@ impl TypeChecker {
         prog: &tpt_moira_clotho::ast::Program,
         externs: &[(&str, &tpt_moira_clotho::ast::Program)],
     ) -> TypeChecker {
-        let mut cx = TypeChecker::default();
         // The crate's own aliases take precedence over an extern's of the same name.
-        cx.aliases = tpt_moira_clotho::alias::AliasTable::from_program(prog);
+        let mut cx = TypeChecker {
+            aliases: tpt_moira_clotho::alias::AliasTable::from_program(prog),
+            ..Default::default()
+        };
         for (crate_name, ext) in externs {
             cx.aliases
                 .extend_from(&tpt_moira_clotho::alias::AliasTable::from_exports(ext));
@@ -1252,7 +1254,7 @@ impl TypeChecker {
         if !has_unknown(&result_ty) {
             for (_, body) in arms {
                 let key = (body.span.start, body.span.end);
-                if self.expr_types.get(&key).map_or(false, has_unknown) {
+                if self.expr_types.get(&key).is_some_and(has_unknown) {
                     self.expr_types.insert(key, result_ty.clone());
                 }
             }
@@ -1851,7 +1853,7 @@ impl TypeChecker {
                 let elem = self.infer_expr(value);
                 let _ = self.infer_expr(count);
                 let len = match &count.kind {
-                    ExprKind::Lit(Lit::Int(v, _)) => *v as u128,
+                    ExprKind::Lit(Lit::Int(v, _)) => *v,
                     _ => 0,
                 };
                 Ty::Array(Box::new(elem), len)
@@ -1895,10 +1897,12 @@ impl TypeChecker {
                 // A range index (`v[1..]`, `s[..n]`) slices; any other index must be
                 // an integer (or a map key, below).
                 let ranged = matches!(idx_ty, Ty::Range);
-                if !ranged && !idx_ty.is_integer() && !matches!(idx_ty, Ty::Unknown) {
-                    if !matches!(&base_ty, Ty::Apply(n, _) if n == "HashMap" || n == "BTreeMap") {
-                        self.err(span, "array index must be an integer".to_string());
-                    }
+                if !ranged
+                    && !idx_ty.is_integer()
+                    && !matches!(idx_ty, Ty::Unknown)
+                    && !matches!(&base_ty, Ty::Apply(n, _) if n == "HashMap" || n == "BTreeMap")
+                {
+                    self.err(span, "array index must be an integer".to_string());
                 }
                 self.index_result(span, &base_ty, ranged)
             }
@@ -2445,7 +2449,7 @@ impl TypeChecker {
                     } else {
                         concrete.clone()
                     };
-                    if cx.solver.as_ref().map_or(false, |s| {
+                    if cx.solver.as_ref().is_some_and(|s| {
                         s.implements_trait(crate::solver::TraitId::User(bn.to_string()), &query_ty)
                     }) {
                         return;
@@ -2483,7 +2487,7 @@ impl TypeChecker {
                     } else {
                         concrete.clone()
                     };
-                    let holds = cx.solver.as_ref().map_or(false, |s| {
+                    let holds = cx.solver.as_ref().is_some_and(|s| {
                         s.implements_trait(crate::solver::TraitId::User(bn.to_string()), &query_ty)
                     });
                     if !holds {
@@ -4370,7 +4374,7 @@ impl TypeChecker {
                 } else {
                     t.clone()
                 };
-                self.solver.as_ref().map_or(false, |s| {
+                self.solver.as_ref().is_some_and(|s| {
                     s.implements_trait(
                         crate::solver::TraitId::User(tr.name().to_string()),
                         &query_ty,

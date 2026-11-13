@@ -118,11 +118,8 @@ fn main() -> ExitCode {
     // iterator adapters, no `?` on `Option`, no capturing closures).
     let mut extern_pairs: Vec<(String, String)> = Vec::new();
     for spec in &externs {
-        match spec.split_once('=') {
-            Some(pair) => {
-                extern_pairs.push((pair.0.to_string(), pair.1.to_string()));
-            }
-            None => {}
+        if let Some(pair) = spec.split_once('=') {
+            extern_pairs.push((pair.0.to_string(), pair.1.to_string()));
         }
     }
     let mut extern_programs: Vec<(String, tpt_moira_clotho::ast::Program)> = Vec::new();
@@ -336,9 +333,9 @@ fn lower_for_emit(
             // The root crate is visible to every extern: its items may be used there too.
             let mut others: Vec<(String, tpt_moira_clotho::ast::Program)> =
                 vec![("<root>".to_string(), program.clone())];
-            for j in 0..externs.len() {
+            for (j, ext) in externs.iter().enumerate() {
                 if j != i {
-                    others.push(externs[j].clone());
+                    others.push(ext.clone());
                 }
             }
             let name = externs[i].0.clone();

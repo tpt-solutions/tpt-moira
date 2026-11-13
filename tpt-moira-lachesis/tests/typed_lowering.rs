@@ -392,11 +392,7 @@ fn mk(n: i32) -> Kind {
     let run = std::process::Command::new(&exe_path)
         .output()
         .expect("run program");
-    let out = String::from_utf8_lossy(&run.stdout).replace(
-        "
-", "
-",
-    );
+    let out = String::from_utf8_lossy(&run.stdout);
     let values: Vec<&str> = out.lines().filter(|l| !l.is_empty()).collect();
     assert_eq!(values, vec!["4"], "output: {out:?}\n{c}");
 }

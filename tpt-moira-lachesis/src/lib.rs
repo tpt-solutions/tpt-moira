@@ -55,15 +55,16 @@ pub fn type_check_with_externs(
     TypeChecker::check_program_with(prog, &refs)
 }
 
-/// Type-check with extern crates, also returning the C-style type hints of
-/// every expression (see [`expr_type_hints`]).
-pub fn type_check_typed(
-    prog: &Program,
-    externs: &[(String, Program)],
-) -> (
+/// The outcome of a typed check: the diagnostics (or success) plus the C-style
+/// type hint of each expression, keyed by its `(start, end)` span.
+pub type TypedCheckOutcome = (
     Result<(), Vec<Diag>>,
     std::collections::HashMap<(usize, usize), String>,
-) {
+);
+
+/// Type-check with extern crates, also returning the C-style type hints of
+/// every expression (see [`expr_type_hints`]).
+pub fn type_check_typed(prog: &Program, externs: &[(String, Program)]) -> TypedCheckOutcome {
     let refs: Vec<(&str, &Program)> = externs.iter().map(|(n, p)| (n.as_str(), p)).collect();
     TypeChecker::check_program_typed(prog, &refs)
 }
