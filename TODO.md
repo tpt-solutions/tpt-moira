@@ -930,6 +930,14 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
             (1); `String::as_str` as a function value (1); `read_to_string` on a generic
             `R: Read` (1, newly visible because the thread version failed earlier); and a
             handful of type mismatches (`&T` vs `T`, `&bool` vs `bool`, empty array literals).
+          - **Probe follow-up (2026-11-14, round 6).** Clotho's checker errors are now
+            `43` (from `51`). Fixed: a function-local `use Enum::*;` names its enum for
+            bare unit variants (the guess picked another enum that shares the name); an
+            empty array literal takes its element type from context (`&[]` in a match
+            arm); and `if let` / `while let` are desugared to `match` (and `loop` +
+            `match` with a `break` arm) in the parser's output, so any pattern works
+            (`if let Shape::Circle(r) = s`). Locked in by
+            `if_let_enum_pattern_and_while_let_run` and `glob_imported_variant_resolves_to_its_enum`.
     - [x] Once a crate parses + type-checks, attempt full codegen and record pass/fail per crate in `docs/SELF_HOSTING.md`
       - **Status: Resolved as a process (2026-08-22)** — the probe records
         `codegen_ok` (and the failure reason) per crate and refreshes
