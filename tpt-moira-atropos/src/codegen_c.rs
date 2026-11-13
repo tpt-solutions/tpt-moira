@@ -280,7 +280,21 @@ fn c_signature(f: &mir::Function, struct_names: &std::collections::HashSet<&str>
     } else {
         params.join(", ")
     };
-    format!("{} {}({})", ret, f.name, param_str)
+    fn_header(&ret, &f.name, &param_str)
+}
+
+/// The header `ret name(params)` of a C function. A function-pointer return type
+/// (`R (*)(P)`) cannot be written as a prefix: the declarator must wrap the name and
+/// parameter list, `R (*name(params))(P)`.
+fn fn_header(ret: &str, name: &str, param_str: &str) -> String {
+    match ret.find("(*)") {
+        Some(star) => {
+            let (head, tail) = ret.split_at(star);
+            let tail = &tail["(*)".len()..];
+            format!("{} (*{}({})){}", head.trim_end(), name, param_str, tail)
+        }
+        None => format!("{} {}({})", ret, name, param_str),
+    }
 }
 
 /// The declared type of a temporary or local of `f`, if known.
@@ -343,7 +357,7 @@ fn emit_function(
         params.join(", ")
     };
 
-    let mut out = format!("{} {}({}) {{\n", ret, f.name, param_str);
+    let mut out = format!("{} {{\n", fn_header(&ret, &f.name, &param_str));
 
     // Local variable declarations. Skip locals that are also parameters or that
     // have already been declared (the async poll path may register a slot as
@@ -375,7 +389,7 @@ fn emit_function(
         if declared.contains(name.as_str()) {
             continue;
         }
-        out.push_str(&format!("    {} {};\n", c_type(ty, struct_names), name));
+        out.push_str(&format!("    {};\n", c_decl(ty, name, struct_names)));
     }
     out.push('\n');
 

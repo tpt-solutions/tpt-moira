@@ -542,6 +542,21 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
               `closure_capturing_multiple_variables_lists_all`,
               `nested_closure_capture_is_detected`. MIR/codegen lowering of closures
              remains open.
+             - **Status (2026-11-13, verified by probe programs through `moira --emit c`
+               + gcc):** capturing closures now lower and run for let-bound closures
+               called directly, closures passed as `fn(..)` arguments, closures nested
+               inside closures, and closures created and called inside a `while` loop.
+               A function that **returns a non-capturing closure** (`fn make() -> fn(i64)
+               -> i64 { |x| x + 1 }`) now emits valid C: the function-pointer return
+               declarator is wrapped around the name (`R (*make(..))(P)`), temporaries
+               and call results of `Fn<..>` type take that type, and the call result is
+               bound as a function pointer. Locked in by
+               `atropos/tests/codegen.rs::returned_non_capturing_closure_runs`.
+               **Still open:** a function that returns a *capturing* closure
+               (`fn make(k) -> impl Fn(i64) -> i64 { move |x| x + k }`) still emits C that
+               does not compile — the lifted function takes the captures as extra
+               parameters, which a plain function pointer cannot carry. Needs an
+               environment struct (closure conversion) before this item can close.
     - [x] Full generics + `where`-clause solving wired into `infer` for real (non-toy) generic code
       - **Status: Resolved for the type-checking layer (2026-08-22).** `infer`
         now handles, end to end: multi-parameter generics on structs and

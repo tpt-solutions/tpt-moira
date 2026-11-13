@@ -854,3 +854,26 @@ fn unsafe_block_lowers_as_plain_block() {
     let c = tpt_moira_atropos::codegen_c::emit_c(&mir);
     assert!(c.contains("main"), "main should be emitted");
 }
+
+#[test]
+fn returned_non_capturing_closure_runs() {
+    // A function returning a closure has a function-pointer return type, whose C
+    // declarator must wrap the name and parameters (`R (*f(params))(P)`); the call
+    // result bound by `let` must keep that function-pointer type.
+    let out = match run_src(
+        "fn make() -> fn(i64) -> i64 {
+            |x: i64| x + 1
+        }
+        fn main() {
+            let f = make();
+            print_i64(f(41));
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping returned-closure run");
+            return;
+        }
+    };
+    assert_eq!(out, "42", "the returned closure should be callable");
+}

@@ -2258,6 +2258,9 @@ impl Lower {
                             h == "str"
                                 || is_scalar_pointer_hint(h)
                                 || self.struct_names.contains(h)
+                                // A call returning a function value (`let f = make();`
+                                // where `make() -> fn(i64) -> i64`) is a function pointer.
+                                || h.starts_with("Fn<")
                                 // A block, `if` or `match` yielding an enum value.
                                 || self.variants.values().any(|(e, _, _)| e == h)
                                 || ["Option<", "Result<", "Vec<", "Map<", "Sorted<", "Set<", "SortedSet<"]
@@ -7343,7 +7346,12 @@ impl Lower {
                         let result_ty = if is_async_call && self.expecting_future {
                             format!("{}__fut", name.trim_end_matches("__ctor"))
                         } else {
-                            "long long".to_string()
+                            // A call whose checker type is a function value (`make()` returning
+                            // `fn(i64) -> i64`) yields a function pointer, not a `long long`.
+                            match self.hint_of_expr(e) {
+                                Some(h) if h.starts_with("Fn<") => h,
+                                _ => "long long".to_string(),
+                            }
                         };
                         // A name that is not a known top-level function is an indirect call
                         // through a function-pointer local (a closure value); everything
