@@ -23,9 +23,12 @@ use tpt_moira_clotho::token::{Span, TokenKind};
 pub fn monomorphize(prog: &Program, externs: &[(&str, &Program)]) -> Program {
     let mut calls: HashMap<(usize, usize), GenericCall> = HashMap::new();
     let mut calls_by_start: HashMap<usize, GenericCall> = HashMap::new();
+    let mut struct_by_start: HashMap<usize, GenericCall> = HashMap::new();
     for c in TypeChecker::generic_calls_of(prog, externs) {
         if c.owner.is_some() {
             calls_by_start.insert(c.span.start, c.clone());
+        } else if !c.method {
+            struct_by_start.insert(c.span.start, c.clone());
         }
         calls.insert((c.span.start, c.span.end), c);
     }
@@ -107,6 +110,7 @@ pub fn monomorphize(prog: &Program, externs: &[(&str, &Program)]) -> Program {
     let mut mono = Mono {
         calls,
         calls_by_start,
+        struct_by_start,
         closure_caps,
         plain_fns,
         inline: Vec::new(),
@@ -406,6 +410,8 @@ struct Mono {
     calls: HashMap<(usize, usize), GenericCall>,
     /// Associated calls (`Pair::new`), by the start of their path.
     calls_by_start: HashMap<usize, GenericCall>,
+    /// Struct-literal candidates, by the start of their path (for macro-token rewriting).
+    struct_by_start: HashMap<usize, GenericCall>,
     generic_fns: HashMap<String, Function>,
     generic_structs: HashMap<String, StructDef>,
     generic_struct_names: HashSet<String>,
@@ -908,6 +914,17 @@ impl Mono {
                 // identifier of an associated call (`Pair::new`).
                 for tok in &mut mc.tokens {
                     if let TokenKind::Ident(name) = &mut tok.kind {
+                        // A generic struct literal among the arguments (`vec![Spanned { .. }]`)
+                        // is renamed to its instance, like the struct literal in the AST.
+                        if let Some(call) = self.struct_by_start.get(&tok.span.start).cloned() {
+                            if call.callee == *name && self.generic_struct_names.contains(name) {
+                                let params: Vec<Ty> =
+                                    call.params.iter().map(|(_, t)| subst_ty(t, sub)).collect();
+                                if let Some(instance) = self.request_struct(&call.callee, &params) {
+                                    *name = instance;
+                                }
+                            }
+                        }
                         if let Some(call) = self.calls.get(&(tok.span.start, tok.span.end)).cloned()
                         {
                             if call.method {
@@ -1392,6 +1409,19 @@ fn mangle(t: &Ty) -> Option<String> {
 /// in the source (`Pair<i64>`). `None` for types the checker does not model here.
 fn ast_to_ty(t: &Type) -> Option<Ty> {
     Some(match &t.kind {
+        // A function type is the path `fn` whose arguments are its parameters and result.
+        TypeKind::Path(p, args)
+            if p.segments.len() == 1 && p.segments[0].node == "fn" && !args.is_empty() =>
+        {
+            let (ret, params) = args.split_last()?;
+            let mut ps: Vec<Ty> = Vec::new();
+            let mut k: usize = 0;
+            while k < params.len() {
+                ps.push(ast_to_ty(&params[k])?);
+                k += 1;
+            }
+            Ty::Fn(ps, Box::new(ast_to_ty(ret)?))
+        }
         TypeKind::Path(p, args) => {
             let name = p.segments.last()?.node.as_str();
             if args.is_empty() {

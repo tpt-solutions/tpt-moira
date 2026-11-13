@@ -335,6 +335,10 @@ fn hint_elem_name(ty: &Ty) -> Option<String> {
         if n == "Vec" && a.len() == 1 {
             return hint_elem_name(&a[0]).map(|e| format!("Vec<{e}>"));
         }
+        // A box is a pointer to its value (`Box<Expr>` lowers to `Expr*`, as `&Expr` does).
+        if n == "Box" && a.len() == 1 {
+            return hint_elem_name(&a[0]).map(|e| format!("{e}*"));
+        }
     }
     let name = match ty {
         Ty::Int | Ty::I32 => "i32",
@@ -1715,7 +1719,8 @@ impl TypeChecker {
                 let t = self.infer_expr(e2);
                 match &t {
                     Ty::Ref(inner) | Ty::RefMut(inner) => (**inner).clone(),
-                    // `Box<T>` is modelled as `T`, so dereferencing a struct value is the value.
+                    Ty::Apply(n, a) if n == "Box" && a.len() == 1 => a[0].clone(),
+                    // Dereferencing a struct value is the value itself.
                     Ty::Struct(_) | Ty::Apply(..) => t.clone(),
                     _ => {
                         self.err(span, "cannot dereference a non-reference".to_string());
@@ -1896,7 +1901,7 @@ impl TypeChecker {
                         for a in
                             tpt_moira_clotho::parser::Parser::parse_macro_args(m.tokens.clone())
                         {
-                            self.infer_expr(&a);
+                            self.infer_macro_arg(&a);
                         }
                         Ty::Unit
                     }
@@ -1910,7 +1915,7 @@ impl TypeChecker {
                             );
                         }
                         for a in args {
-                            self.infer_expr(&a);
+                            self.infer_macro_arg(&a);
                         }
                         Ty::Str
                     }
@@ -1919,13 +1924,16 @@ impl TypeChecker {
                         // type-checked; the pattern is not analyzed structurally
                         // (the subset's `match` handles real destructuring).
                         // The result is the boolean test.
-                        let args =
-                            tpt_moira_clotho::parser::Parser::parse_macro_args(m.tokens.clone());
-                        if args.len() != 2 {
-                            self.err(span, "matches! expects exactly 2 arguments".to_string());
-                        }
-                        for a in &args {
-                            self.infer_expr(a);
+                        // The pattern is not an expression (it may bind with `ref`, use `|`, or
+                        // carry an `if` guard), so the split is the one the lowering uses.
+                        match tpt_moira_clotho::parser::Parser::parse_matches_args(m.tokens.clone())
+                        {
+                            Some((scrut, _pat)) => {
+                                self.infer_expr(&scrut);
+                            }
+                            None => {
+                                self.err(span, "matches! expects (expr, pattern)".to_string());
+                            }
                         }
                         Ty::Bool
                     }
@@ -1978,7 +1986,7 @@ impl TypeChecker {
                         let args =
                             tpt_moira_clotho::parser::Parser::parse_macro_args(m.tokens.clone());
                         for a in &args {
-                            self.infer_expr(a);
+                            self.infer_macro_arg(a);
                         }
                         Ty::Never
                     }
@@ -1996,7 +2004,7 @@ impl TypeChecker {
                             );
                         }
                         for a in &args {
-                            self.infer_expr(a);
+                            self.infer_macro_arg(a);
                         }
                         Ty::Apply("Result".to_string(), vec![Ty::Unit])
                     }
@@ -2055,7 +2063,12 @@ impl TypeChecker {
     fn check_binary(&mut self, span: Span, l: &Expr, op: BinOp, r: &Expr) -> Ty {
         if matches!(op, BinOp::Assign) {
             let lt = self.infer_expr(l);
+            // A call or struct literal on the right takes the target's type as its expectation.
+            if matches!(r.kind, ExprKind::Call(..) | ExprKind::Struct(..)) {
+                self.expected_call_ty = Some(lt.clone());
+            }
             let rt = self.infer_expr(r);
+            self.expected_call_ty = None;
             self.expect(&rt, &lt, span);
             // Assignment is an expression of type `()` in Rust; typing it as
             // the assigned value made `match x.as_str() { _ => flag = true }`
@@ -2084,7 +2097,9 @@ impl TypeChecker {
                 );
             }
             self.expect(&rt, &lt, span);
-            return lt;
+            // Like `=`, a compound assignment is an expression of type `()`, so a
+            // match arm `K::A => depth += 1,` agrees with unit-typed arms.
+            return Ty::Unit;
         }
         if matches!(op, BinOp::Range) {
             self.infer_expr(l);
@@ -2210,6 +2225,20 @@ impl TypeChecker {
         }
     }
 
+    /// Type a formatting-macro argument. A named argument (`name = value`, as in
+    /// `format!("{n}", n = x)`) is parsed as an assignment: only its value is typed, since
+    /// the name is a placeholder label, not a variable.
+    fn infer_macro_arg(&mut self, a: &Expr) -> Ty {
+        if let ExprKind::Binary(l, BinOp::Assign, r) = &a.kind {
+            if let ExprKind::Path(p) = &l.kind {
+                if p.segments.len() == 1 {
+                    return self.infer_expr(r);
+                }
+            }
+        }
+        self.infer_expr(a)
+    }
+
     fn check_call(&mut self, span: Span, callee: &Expr, args: &[Expr]) -> Ty {
         // The expected type is for this call only; nested calls must not see it.
         let expected = self.expected_call_ty.take();
@@ -2222,6 +2251,22 @@ impl TypeChecker {
         };
         let segments: Vec<String> = path.segments.iter().map(|s| s.node.clone()).collect();
         let name = segments.last().cloned().unwrap_or_default();
+        // `HashMap::new()` (and the other collection constructors) take the collection the
+        // context expects: the constructor's own type does not name its key and value types.
+        if args.is_empty() && name == "new" && segments.len() == 2 {
+            if let Some(exp) = &expected {
+                if let Ty::Apply(en, _) = exp {
+                    if *en == segments[0]
+                        && matches!(
+                            segments[0].as_str(),
+                            "HashMap" | "HashSet" | "BTreeMap" | "BTreeSet"
+                        )
+                    {
+                        return exp.clone();
+                    }
+                }
+            }
+        }
         // `Some(x)` is an `Option` of `x`'s type; `Ok(x)` / `Err(x)` a `Result` with that
         // side typed (the other side is unknown until the context fixes it).
         if segments.len() == 1
@@ -2229,12 +2274,34 @@ impl TypeChecker {
             && matches!(name.as_str(), "Some" | "Ok" | "Err")
             && self.lookup(&name).is_none()
         {
+            // The payload's expected type comes from the context (`let o: Option<HashMap<..>>
+            // = Some(HashMap::new())`): a call argument is typed against it.
+            let payload_expected = match (&expected, name.as_str()) {
+                (Some(Ty::Apply(en, ea)), "Some") if en == "Option" && ea.len() == 1 => {
+                    Some(ea[0].clone())
+                }
+                (Some(Ty::Apply(en, ea)), "Ok") if en == "Result" && !ea.is_empty() => {
+                    Some(ea[0].clone())
+                }
+                _ => None,
+            };
+            if let Some(pe) = payload_expected {
+                if matches!(args[0].kind, ExprKind::Call(..)) {
+                    self.expected_call_ty = Some(pe);
+                }
+            }
             let t = self.infer_expr(&args[0]);
+            self.expected_call_ty = None;
             return match name.as_str() {
                 "Some" => Ty::Apply("Option".to_string(), vec![t]),
                 "Ok" => Ty::Apply("Result".to_string(), vec![t, Ty::Unknown]),
                 _ => Ty::Apply("Result".to_string(), vec![Ty::Unknown, t]),
             };
+        }
+        // `Box::new(x)` is a `Box` of `x`'s type (see `type_to_ty_raw`).
+        if segments.len() == 2 && segments[0] == "Box" && name == "new" && args.len() == 1 {
+            let t = self.infer_expr(&args[0]);
+            return Ty::Apply("Box".to_string(), vec![t]);
         }
         let sig = match self.resolve_call(&segments, span) {
             Some(s) => s,
@@ -3212,6 +3279,8 @@ impl TypeChecker {
     /// methods and `impl Primitive` inherent methods resolve on them too.
     fn type_name(&self, ty: &Ty) -> Option<String> {
         match ty {
+            // A box's methods are its value's (auto-deref).
+            Ty::Apply(n, args) if n == "Box" && args.len() == 1 => self.type_name(&args[0]),
             Ty::Struct(n) | Ty::Apply(n, _) => Some(n.clone()),
             Ty::Ref(inner) | Ty::RefMut(inner) => self.type_name(inner),
             // Arrays and slices share one method table (`slice`).
@@ -3440,6 +3509,8 @@ impl TypeChecker {
     fn strip_refs(&self, ty: &Ty) -> Ty {
         match ty {
             Ty::Ref(inner) | Ty::RefMut(inner) => self.strip_refs(inner),
+            // Field access and method calls see through a box to its value.
+            Ty::Apply(n, args) if n == "Box" && args.len() == 1 => self.strip_refs(&args[0]),
             other => other.clone(),
         }
     }
@@ -3486,6 +3557,11 @@ impl TypeChecker {
         );
         self.assoc_fns
             .insert(("String".into(), "new".into()), sig(vec![], std("String")));
+        // `char::from_u32(n)`: `None` when `n` is not a Unicode scalar value.
+        self.assoc_fns.insert(
+            ("char".into(), "from_u32".into()),
+            sig(vec![U32], Apply("Option".into(), vec![Char])),
+        );
         self.assoc_fns.insert(
             ("String".into(), "from".into()),
             sig(vec![Unknown], std("String")),
@@ -4132,6 +4208,7 @@ impl TypeChecker {
             ("char", "is_numeric", vec![], Bool),
             ("char", "to_ascii_lowercase", vec![], Char),
             ("char", "to_ascii_uppercase", vec![], Char),
+            ("char", "to_digit", vec![U32], Apply("Option".into(), vec![U32])),
         ] {
             // A `String` has the same methods as its `str`.
             for r in [recv, "String"] {
@@ -4139,6 +4216,20 @@ impl TypeChecker {
                     .entry((r.to_string(), m.to_string()))
                     .or_insert_with(|| sig(params.clone(), ret.clone()));
             }
+        }
+
+        // ASCII-byte methods on `u8` (a byte is the same C value as an ASCII `char`).
+        for (m, ret) in [
+            ("is_ascii_digit", Bool),
+            ("is_ascii_alphabetic", Bool),
+            ("is_ascii_alphanumeric", Bool),
+            ("is_ascii_hexdigit", Bool),
+            ("to_ascii_lowercase", U8),
+            ("to_ascii_uppercase", U8),
+        ] {
+            self.methods
+                .entry(("u8".to_string(), m.to_string()))
+                .or_insert_with(|| sig(vec![], ret.clone()));
         }
 
         // Wider primitive output helpers (mirror the C/native backend runtimes).
@@ -4404,10 +4495,11 @@ impl TypeChecker {
                 if self.is_generic_param(&name) {
                     return Ty::Generic(name);
                 }
-                // `Box<T>` is modelled as `T`: a box is a pointer to its value, and Rust
-                // coerces `&Box<T>` to `&T`, which the checker does not track.
+                // `Box<T>` is a box of `T` (a pointer to its value in C). Field access and
+                // method calls see through it (`strip_refs`), and `compatible` accepts a box
+                // where its value is expected, as Rust's auto-deref does.
                 if name == "Box" && args.len() == 1 {
-                    return self.type_to_ty(&args[0]);
+                    return Ty::Apply(name, vec![self.type_to_ty(&args[0])]);
                 }
                 // A one-argument `Result<T>` is an alias that fixes the error type
                 // (`std::io::Result<T>`). The error is modeled as a string.
@@ -4474,6 +4566,17 @@ impl TypeChecker {
     fn compatible(&self, a: &Ty, b: &Ty) -> bool {
         if matches!(a, Ty::Unknown | Ty::Never) || matches!(b, Ty::Unknown | Ty::Never) {
             return true;
+        }
+        // A box is accepted where its value is expected (Rust's auto-deref coercion).
+        if let Ty::Apply(n, args) = a {
+            if n == "Box" && args.len() == 1 && !matches!(b, Ty::Apply(m, _) if m == "Box") {
+                return self.compatible(&args[0], b);
+            }
+        }
+        if let Ty::Apply(n, args) = b {
+            if n == "Box" && args.len() == 1 && !matches!(a, Ty::Apply(m, _) if m == "Box") {
+                return self.compatible(a, &args[0]);
+            }
         }
         // `String` and `str` are one type to the checker (the owned/borrowed split is
         // a codegen detail here): `String` values pass where `str` is expected and back.
