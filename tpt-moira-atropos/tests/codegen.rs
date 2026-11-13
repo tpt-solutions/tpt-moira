@@ -1117,3 +1117,36 @@ fn char_to_digit_runs() {
     };
     assert_eq!(out, "1\n0");
 }
+
+#[test]
+fn glob_imported_variant_resolves_to_its_enum() {
+    // Two enums share the variant name `Match`; the function-local `use B::*;` names `B`.
+    let out = match run_src(
+        "#[derive(Clone, Copy)]
+        enum A { Match, Other }
+        #[derive(Clone, Copy)]
+        enum B { Match, Plain }
+        fn pick_b(n: i64) -> B {
+            use B::*;
+            match n {
+                1 => Match,
+                _ => Plain,
+            }
+        }
+        fn main() {
+            let v = pick_b(1);
+            let code = match v {
+                B::Match => 7,
+                B::Plain => 3,
+            };
+            print_i64(code);
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping glob-variant run");
+            return;
+        }
+    };
+    assert_eq!(out, "7");
+}
