@@ -29,11 +29,22 @@ fn is_shared(name: &str) -> bool {
 struct Namer {
     /// `unit index -> prefix` (`None` for the root).
     prefixes: Vec<Option<String>>,
+    /// Names of the structs and enums defined by some unit.
+    types: BTreeSet<String>,
     /// `name -> units that define it` (non-shared functions and structs).
     defined_by: BTreeMap<String, BTreeSet<usize>>,
 }
 
 impl Namer {
+    /// The bundled name of `name` as seen from unit `unit`. A run of a longer name
+    /// (`as_type`) is renamed only when it names a struct or enum of the bundle.
+    fn rename(&self, unit: usize, name: &str, as_type: bool) -> String {
+        if as_type && !self.types.contains(name) {
+            return name.to_string();
+        }
+        self.target(unit, name)
+    }
+
     /// The bundled name of `name` as seen from unit `unit`.
     fn target(&self, unit: usize, name: &str) -> String {
         let owners = match self.defined_by.get(name) {
@@ -44,12 +55,10 @@ impl Namer {
         if owners.contains(&unit) {
             return self.own_name(unit, name);
         }
-        // Otherwise the root's definition, then the single extern owner.
+        // Otherwise the root's definition, then the first extern crate that defines it.
         if owners.contains(&0) {
             return name.to_string();
         }
-        // Several extern crates define it (each instantiated the same generic struct, say):
-        // it is named after the first of them, which emits the definition.
         match owners.iter().next() {
             Some(&owner) => self.own_name(owner, name),
             None => name.to_string(),
@@ -67,8 +76,8 @@ impl Namer {
 /// Rename one C identifier through `f`. A generated name such as `Result_Operand_LowerError`
 /// is one identifier, so when it is not itself a name of the bundle, its `_`-separated runs
 /// are renamed one by one (a run is renamed when `f` renames it).
-fn rename_ident(ident: &str, f: &dyn Fn(&str) -> String) -> String {
-    let whole = f(ident);
+fn rename_ident(ident: &str, f: &dyn Fn(&str, bool) -> String) -> String {
+    let whole = f(ident, false);
     if whole != ident {
         return whole;
     }
@@ -77,12 +86,14 @@ fn rename_ident(ident: &str, f: &dyn Fn(&str) -> String) -> String {
     let mut i = 0;
     while i < pieces.len() {
         let mut taken = None;
+        // Only a run that names a struct or enum of the bundle is renamed: a function's name
+        // inside a helper (`moira_vec_Ty_push`'s `push`) is left alone.
         for j in (i + 1..=pieces.len()).rev() {
             let cand = pieces[i..j].join("_");
             if cand.is_empty() {
                 continue;
             }
-            let renamed = f(&cand);
+            let renamed = f(&cand, true);
             if renamed != cand {
                 taken = Some((j, renamed));
                 break;
@@ -103,7 +114,7 @@ fn rename_ident(ident: &str, f: &dyn Fn(&str) -> String) -> String {
 }
 
 /// Rename every identifier of a C-like type string through `f`.
-fn rename_type_str(ty: &str, f: &dyn Fn(&str) -> String) -> String {
+fn rename_type_str(ty: &str, f: &dyn Fn(&str, bool) -> String) -> String {
     let mut out = String::with_capacity(ty.len());
     let mut ident = String::new();
     let flush = |ident: &mut String, out: &mut String| {
@@ -124,13 +135,13 @@ fn rename_type_str(ty: &str, f: &dyn Fn(&str) -> String) -> String {
     out
 }
 
-fn rename_operand(op: &mut Operand, f: &dyn Fn(&str) -> String) {
+fn rename_operand(op: &mut Operand, f: &dyn Fn(&str, bool) -> String) {
     if let Operand::Func(n) = op {
         *n = rename_ident(n, f);
     }
 }
 
-fn rename_rvalue(rv: &mut Rvalue, f: &dyn Fn(&str) -> String) {
+fn rename_rvalue(rv: &mut Rvalue, f: &dyn Fn(&str, bool) -> String) {
     match rv {
         Rvalue::Use(a)
         | Rvalue::Unary(_, a)
@@ -178,14 +189,14 @@ fn rename_rvalue(rv: &mut Rvalue, f: &dyn Fn(&str) -> String) {
 }
 
 /// Rename the type strings of a list of named fields.
-fn rename_field_types(fields: &mut Vec<(String, String)>, f: &dyn Fn(&str) -> String) {
+fn rename_field_types(fields: &mut Vec<(String, String)>, f: &dyn Fn(&str, bool) -> String) {
     for (_, ty) in fields.iter_mut() {
         *ty = rename_type_str(ty, f);
     }
 }
 
 /// Apply `f` to every name in one crate's MIR program.
-fn rename_program(p: &mut mir::MirProgram, f: &dyn Fn(&str) -> String) {
+fn rename_program(p: &mut mir::MirProgram, f: &dyn Fn(&str, bool) -> String) {
     for s in &mut p.structs {
         s.name = rename_ident(&s.name, f);
         for (_, ty) in &mut s.fields {
@@ -215,10 +226,10 @@ fn rename_program(p: &mut mir::MirProgram, f: &dyn Fn(&str) -> String) {
         }
     }
     for a in &mut p.async_fns {
-        a.fn_name = f(&a.fn_name);
-        a.fut_name = f(&a.fut_name);
-        a.poll_name = f(&a.poll_name);
-        a.run_name = f(&a.run_name);
+        a.fn_name = f(&a.fn_name, false);
+        a.fut_name = f(&a.fut_name, false);
+        a.poll_name = f(&a.poll_name, false);
+        a.run_name = f(&a.run_name, false);
         a.output_ty = rename_type_str(&a.output_ty, f);
         rename_field_types(&mut a.fut_fields, f);
     }
@@ -307,14 +318,22 @@ pub fn lower_bundle(
     for unit in units.iter_mut() {
         resolve_extern_calls(unit, &fn_names);
     }
+    let mut types: BTreeSet<String> = BTreeSet::new();
+    for unit in &units {
+        for st in &unit.structs {
+            types.insert(st.name.clone());
+        }
+    }
     let namer = Namer {
         prefixes,
+        types,
         defined_by,
     };
 
     let mut out = mir::MirProgram::default();
     for (idx, unit) in units.iter_mut().enumerate() {
-        rename_program(unit, &|n: &str| namer.target(idx, n));
+        let rename = |n: &str, as_type: bool| namer.rename(idx, n, as_type);
+        rename_program(unit, &rename);
         for s in unit.structs.drain(..) {
             if !out.structs.iter().any(|t| t.name == s.name) {
                 out.structs.push(s);
