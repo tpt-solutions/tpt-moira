@@ -1692,7 +1692,10 @@ impl TypeChecker {
                             .glob_enums
                             .iter()
                             .rev()
-                            .find(|o| self.assoc_consts.contains_key(&((*o).clone(), name.clone())))
+                            .find(|o| {
+                                self.assoc_consts
+                                    .contains_key(&((*o).clone(), name.clone()))
+                            })
                             .cloned();
                         // Nullary prelude values usable without a call site.
                         if let Some(owner) = imported {
@@ -1857,7 +1860,11 @@ impl TypeChecker {
                 // Every element must share a common element type; the array's
                 // type is `[elem; len]`. An empty array's element type is the
                 // context's (`&[]` in a match arm takes the other arms' type).
-                let mut elem_ty = if elems.is_empty() { Ty::Unknown } else { Ty::Int };
+                let mut elem_ty = if elems.is_empty() {
+                    Ty::Unknown
+                } else {
+                    Ty::Int
+                };
                 for (i, e) in elems.iter().enumerate() {
                     let t = self.infer_expr(e);
                     if i == 0 {
@@ -4235,7 +4242,12 @@ impl TypeChecker {
             ("char", "is_numeric", vec![], Bool),
             ("char", "to_ascii_lowercase", vec![], Char),
             ("char", "to_ascii_uppercase", vec![], Char),
-            ("char", "to_digit", vec![U32], Apply("Option".into(), vec![U32])),
+            (
+                "char",
+                "to_digit",
+                vec![U32],
+                Apply("Option".into(), vec![U32]),
+            ),
         ] {
             // A `String` has the same methods as its `str`.
             for r in [recv, "String"] {

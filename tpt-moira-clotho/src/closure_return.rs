@@ -161,17 +161,13 @@ fn rename_safe(e: &mut Expr) -> bool {
         },
         &mut |_| {},
     );
-    visit_expr(
-        e,
-        &mut |_| {},
-        &mut |b: &mut Block| {
-            for s in &b.stmts {
-                if matches!(s.kind, StmtKind::Local(_) | StmtKind::Item(_)) {
-                    bad = true;
-                }
+    visit_expr(e, &mut |_| {}, &mut |b: &mut Block| {
+        for s in &b.stmts {
+            if matches!(s.kind, StmtKind::Local(_) | StmtKind::Item(_)) {
+                bad = true;
             }
-        },
-    );
+        }
+    });
     !bad
 }
 
@@ -194,14 +190,20 @@ fn mentions_any(e: &mut Expr, names: &[String]) -> bool {
 /// Apply `f` to every block of an item's bodies (functions, impl methods, consts, statics).
 fn visit_item_bodies(item: &mut Item, f: &mut impl FnMut(&mut Block)) {
     match &mut item.kind {
-        ItemKind::Function(func) => { visit_block(&mut func.body, &mut |_| {}, f); }
+        ItemKind::Function(func) => {
+            visit_block(&mut func.body, &mut |_| {}, f);
+        }
         ItemKind::Impl(imp) => {
             for it in &mut imp.items {
                 visit_item_bodies(it, f);
             }
         }
-        ItemKind::Const(c) => { visit_expr(&mut c.value, &mut |_| {}, f); }
-        ItemKind::Static(s) => { visit_expr(&mut s.value, &mut |_| {}, f); }
+        ItemKind::Const(c) => {
+            visit_expr(&mut c.value, &mut |_| {}, f);
+        }
+        ItemKind::Static(s) => {
+            visit_expr(&mut s.value, &mut |_| {}, f);
+        }
         _ => {}
     }
 }
@@ -218,7 +220,9 @@ fn rewrite_block_lets(b: &mut Block, cands: &HashMap<String, Candidate>, fresh: 
                     hoist_call_args(e, cands, &mut out, fresh);
                 }
             }
-            StmtKind::Expr(e) | StmtKind::Semi(e) => { hoist_call_args(e, cands, &mut out, fresh); }
+            StmtKind::Expr(e) | StmtKind::Semi(e) => {
+                hoist_call_args(e, cands, &mut out, fresh);
+            }
             StmtKind::Item(_) => {}
         }
         let inlined = match &stmt.kind {
@@ -283,7 +287,9 @@ fn hoist_call_args(
         ExprKind::Unary(_, a)
         | ExprKind::Ref(a, _)
         | ExprKind::Cast(a, _)
-        | ExprKind::Field(a, _) => { hoist_call_args(a, cands, out, fresh); }
+        | ExprKind::Field(a, _) => {
+            hoist_call_args(a, cands, out, fresh);
+        }
         ExprKind::MethodCall(r, _, args) => {
             hoist_call_args(r, cands, out, fresh);
             for a in args {
@@ -527,21 +533,31 @@ fn count_refs(prog: &Program, name: &str) -> usize {
 
 pub(crate) fn visit_item_exprs(item: &mut Item, f: &mut impl FnMut(&mut Expr)) {
     match &mut item.kind {
-        ItemKind::Function(func) => { visit_block(&mut func.body, f, &mut |_| {}); }
+        ItemKind::Function(func) => {
+            visit_block(&mut func.body, f, &mut |_| {});
+        }
         ItemKind::Impl(imp) => {
             for it in &mut imp.items {
                 visit_item_exprs(it, f);
             }
         }
-        ItemKind::Const(c) => { visit_expr(&mut c.value, f, &mut |_| {}); }
-        ItemKind::Static(s) => { visit_expr(&mut s.value, f, &mut |_| {}); }
+        ItemKind::Const(c) => {
+            visit_expr(&mut c.value, f, &mut |_| {});
+        }
+        ItemKind::Static(s) => {
+            visit_expr(&mut s.value, f, &mut |_| {});
+        }
         _ => {}
     }
 }
 
 /// Visit a block: `fb` first (it may rewrite the statements), then each statement's
 /// expressions.
-pub(crate) fn visit_block(b: &mut Block, fe: &mut impl FnMut(&mut Expr), fb: &mut impl FnMut(&mut Block)) {
+pub(crate) fn visit_block(
+    b: &mut Block,
+    fe: &mut impl FnMut(&mut Expr),
+    fb: &mut impl FnMut(&mut Block),
+) {
     fb(b);
     for s in &mut b.stmts {
         match &mut s.kind {
@@ -550,7 +566,9 @@ pub(crate) fn visit_block(b: &mut Block, fe: &mut impl FnMut(&mut Expr), fb: &mu
                     visit_expr(e, fe, fb);
                 }
             }
-            StmtKind::Expr(e) | StmtKind::Semi(e) => { visit_expr(e, fe, fb); }
+            StmtKind::Expr(e) | StmtKind::Semi(e) => {
+                visit_expr(e, fe, fb);
+            }
             StmtKind::Item(_) => {}
         }
     }
@@ -561,7 +579,11 @@ pub(crate) fn visit_block(b: &mut Block, fe: &mut impl FnMut(&mut Expr), fb: &mu
 
 /// Visit an expression tree: `fe` on every expression node (before its children) and
 /// `fb` on every block.
-pub(crate) fn visit_expr(e: &mut Expr, fe: &mut impl FnMut(&mut Expr), fb: &mut impl FnMut(&mut Block)) {
+pub(crate) fn visit_expr(
+    e: &mut Expr,
+    fe: &mut impl FnMut(&mut Expr),
+    fb: &mut impl FnMut(&mut Block),
+) {
     fe(e);
     match &mut e.kind {
         ExprKind::Lit(_) | ExprKind::Path(_) | ExprKind::Break | ExprKind::Continue => {}
@@ -576,7 +598,9 @@ pub(crate) fn visit_expr(e: &mut Expr, fe: &mut impl FnMut(&mut Expr), fb: &mut 
         | ExprKind::Deref(a)
         | ExprKind::Cast(a, _)
         | ExprKind::Try(a)
-        | ExprKind::Await(a) => { visit_expr(a, fe, fb); }
+        | ExprKind::Await(a) => {
+            visit_expr(a, fe, fb);
+        }
         ExprKind::Call(c, args) => {
             visit_expr(c, fe, fb);
             for a in args {
@@ -602,7 +626,9 @@ pub(crate) fn visit_expr(e: &mut Expr, fe: &mut impl FnMut(&mut Expr), fb: &mut 
                 visit_expr(b, fe, fb);
             }
         }
-        ExprKind::Block(b) | ExprKind::Loop(b) | ExprKind::Unsafe(b) => { visit_block(b, fe, fb); }
+        ExprKind::Block(b) | ExprKind::Loop(b) | ExprKind::Unsafe(b) => {
+            visit_block(b, fe, fb);
+        }
         ExprKind::If(c, b, els) => {
             visit_expr(c, fe, fb);
             visit_block(b, fe, fb);
@@ -629,7 +655,9 @@ pub(crate) fn visit_expr(e: &mut Expr, fe: &mut impl FnMut(&mut Expr), fb: &mut 
                 visit_expr(x, fe, fb);
             }
         }
-        ExprKind::Closure { body, .. } => { visit_expr(body, fe, fb); }
+        ExprKind::Closure { body, .. } => {
+            visit_expr(body, fe, fb);
+        }
         ExprKind::Range(a, b, _) => {
             if let Some(x) = a {
                 visit_expr(x, fe, fb);

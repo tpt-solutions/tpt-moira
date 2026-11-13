@@ -959,7 +959,10 @@ fn returned_capturing_closure_inside_println_runs() {
             return;
         }
     };
-    assert_eq!(out, "5", "the closure inside a println argument should be hoisted and run");
+    assert_eq!(
+        out, "5",
+        "the closure inside a println argument should be hoisted and run"
+    );
 }
 
 #[test]
