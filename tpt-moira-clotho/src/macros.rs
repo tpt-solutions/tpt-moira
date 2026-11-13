@@ -153,21 +153,15 @@ pub fn expand_program(prog: &Program, table: &MacroTable) -> Program {
     Program { items }
 }
 
-/// Expand every macro invocation in a parsed program, distributing the work
-/// across worker threads so expansion overlaps with the rest of the build.
+/// Expand every macro invocation in a parsed program. This used to distribute the
+/// items across scoped worker threads; it now runs the single-threaded path, which
+/// gives the same result in the same order. Threads are outside the codegen subset
+/// (the compiler must compile its own source), and expansion is not the bottleneck.
 pub fn expand_program_concurrent(prog: &Program, table: &MacroTable) -> Program {
     if table.is_empty() {
         return prog.clone();
     }
-    let expanded: Vec<Item> = std::thread::scope(|s| {
-        let handles: Vec<_> = prog
-            .items
-            .iter()
-            .map(|item| s.spawn(|| expand_item(item, table)))
-            .collect();
-        handles.into_iter().map(|h| h.join().unwrap()).collect()
-    });
-    Program { items: expanded }
+    expand_program(prog, table)
 }
 
 fn expand_item(item: &Item, table: &MacroTable) -> Item {

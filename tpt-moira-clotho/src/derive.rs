@@ -107,11 +107,11 @@ fn derive_struct(trait_name: &str, s: &StructDef) -> Option<String> {
     let fields = &s.fields;
     let src = match trait_name {
         "Clone" => {
-            let inits = fields
+            let inits_parts: Vec<String> = fields
                 .iter()
                 .map(|f| format!("{}: self.{}.clone()", f.name.node, f.name.node))
-                .collect::<Vec<_>>()
-                .join(", ");
+                .collect();
+            let inits = inits_parts.join(", ");
             format!("impl Clone for {name} {{ fn clone(&self) -> Self {{ Self {{ {inits} }} }} }}")
         }
         "Copy" => {
@@ -122,15 +122,15 @@ fn derive_struct(trait_name: &str, s: &StructDef) -> Option<String> {
             format!("impl Debug for {name} {{ fn fmt(&self, f: &mut Formatter) -> () {{ 0; }} }}")
         }
         "Default" => {
-            let inits = fields
+            let inits_parts: Vec<String> = fields
                 .iter()
                 .map(|f| format!("{}: Default::default()", f.name.node))
-                .collect::<Vec<_>>()
-                .join(", ");
+                .collect();
+            let inits = inits_parts.join(", ");
             format!("impl Default for {name} {{ fn default() -> Self {{ Self {{ {inits} }} }} }}")
         }
         "PartialEq" => {
-            let conds = fields
+            let conds_parts: Vec<String> = fields
                 .iter()
                 .map(|f| {
                     format!(
@@ -138,8 +138,8 @@ fn derive_struct(trait_name: &str, s: &StructDef) -> Option<String> {
                         fn_field = f.name.node
                     )
                 })
-                .collect::<Vec<_>>()
-                .join(" && ");
+                .collect();
+            let conds = conds_parts.join(" && ");
             let conds = if conds.is_empty() {
                 "true".to_string()
             } else {
@@ -151,11 +151,11 @@ fn derive_struct(trait_name: &str, s: &StructDef) -> Option<String> {
         }
         "Eq" => format!("impl Eq for {name} {{ }}"),
         "Hash" => {
-            let body = fields
+            let body_parts: Vec<String> = fields
                 .iter()
                 .map(|f| format!("self.{fn_field}.hash(h);", fn_field = f.name.node))
-                .collect::<Vec<_>>()
-                .join(" ");
+                .collect();
+            let body = body_parts.join(" ");
             format!("impl Hash for {name} {{ fn hash(&self, h: &mut Hasher) -> () {{ {body} }} }}")
         }
         "Ord" => format!("impl Ord for {name} {{ fn cmp(&self, other: &Self) -> i32 {{ 0 }} }}"),
@@ -225,7 +225,7 @@ fn derive_enum(trait_name: &str, e: &EnumDef) -> Option<String> {
             if variants.iter().any(|v| variant_shape(v) == Shape::Struct) {
                 return None;
             }
-            let arms = variants
+            let arms_parts: Vec<String> = variants
                 .iter()
                 .map(|v| match variant_shape(v) {
                     Shape::Tuple(n) => {
@@ -241,8 +241,8 @@ fn derive_enum(trait_name: &str, e: &EnumDef) -> Option<String> {
                     }
                     _ => format!("Self::{v} => Self::{v},", v = v.name.node),
                 })
-                .collect::<Vec<_>>()
-                .join(" ");
+                .collect();
+            let arms = arms_parts.join(" ");
             format!(
                 "impl Clone for {name} {{ fn clone(&self) -> Self {{ match self {{ {arms} }} }} }}"
             )

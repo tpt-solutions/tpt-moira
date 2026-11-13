@@ -55,16 +55,12 @@ pub fn compile_at(source: &str, base: usize) -> ParseResult<Program> {
 /// background thread so tokenization/parsing can begin without blocking on the
 /// entire read completing. This is the I/O-decoupled entry point.
 pub fn compile_reader<R: Read + Send + 'static>(mut reader: R) -> ParseResult<Program> {
-    // Spawn the "disk" reader; the main thread waits for the bytes, but in a
-    // multi-file build this thread would feed a channel while other files are
-    // processed concurrently (see `compile_concurrent`).
-    let handle = std::thread::spawn(move || {
-        let mut buf = String::new();
-        reader.read_to_string(&mut buf).map(|_| buf)
-    });
-    let source = handle
-        .join()
-        .map_err(|_| Diag::error("frontend reader thread panicked", None))?
+    // The bytes are read on the calling thread. This used to run the read on a background
+    // thread; threads are outside the codegen subset (the compiler must compile its own
+    // source), and the result is the same, as with `compile_concurrent`.
+    let mut source = String::new();
+    reader
+        .read_to_string(&mut source)
         .map_err(|e: std::io::Error| Diag::error(format!("frontend read error: {e}"), None))?;
     compile(&source)
 }
