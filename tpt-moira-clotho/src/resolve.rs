@@ -226,7 +226,7 @@ impl Resolver {
                 }
             };
             if let Some(d) = self.resolve_type(u, prefix, name) {
-                if self.owners.get(name).map_or(false, |us| us.contains(&d)) {
+                if self.owners.get(name).is_some_and(|us| us.contains(&d)) {
                     segs[i].node = self.mangle(d, name);
                 }
             }
@@ -241,7 +241,7 @@ impl Resolver {
             if self
                 .owners
                 .get(name.as_str())
-                .map_or(false, |us| us.contains(&d))
+                .is_some_and(|us| us.contains(&d))
             {
                 *name = self.mangle(d, name);
             }
@@ -307,7 +307,7 @@ impl Resolver {
             && self
                 .owners
                 .get(name.as_str())
-                .map_or(false, |us| us.contains(&u))
+                .is_some_and(|us| us.contains(&u))
         {
             *name = self.mangle(u, name);
         }

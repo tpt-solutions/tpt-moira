@@ -761,7 +761,7 @@ fn capture_frag(frag: Frag, input: &[Token], pos: &mut usize) -> Option<usize> {
     }
     let k = &input[*pos].kind;
     match frag {
-        Frag::Meta => return meta_len(input, *pos),
+        Frag::Meta => meta_len(input, *pos),
         Frag::Tt => {
             // A `tt` captures a single token, or a whole delimited group as one
             // tree when the cursor sits on an opening delimiter.

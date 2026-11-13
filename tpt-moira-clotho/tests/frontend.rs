@@ -229,7 +229,6 @@ fn parse_method_call_turbofish() {
     assert_eq!(prog.items.len(), 1);
 }
 
-#[test]
 // Regression: nested parentheses inside a paren-delimited macro invocation
 // (`println!("{}", v.len())`) are macro *content*, not depth markers. They
 // must be captured so `v.len()` re-parses as a method call, not a field
@@ -258,6 +257,7 @@ fn macro_tokens_keep_nested_parens() {
     assert!(found, "macro call not parsed");
 }
 
+#[test]
 fn parse_enum_struct_variants() {
     // Regression: enum struct variants `Variant { field: Type, .. }` must parse
     // (the compiler's own `ast.rs` defines several, e.g. `ExprKind::Closure {

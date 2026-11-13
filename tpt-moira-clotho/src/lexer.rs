@@ -515,9 +515,7 @@ impl<'src> Lexer<'src> {
     /// is re-lexed. Real character literals are returned as `Some(Char(..))`.
     fn lex_quote(&mut self) -> Option<TokenKind> {
         self.bump(); // opening quote
-        let Some(nb) = self.peek_byte() else {
-            return None;
-        };
+        let nb = self.peek_byte()?;
         if nb.is_ascii_alphabetic() || nb == b'_' {
             // Either a single-char literal `'c'` or a lifetime `'name`.
             let name = self.lex_ident_body();
@@ -567,8 +565,8 @@ impl<'src> Lexer<'src> {
             _ => return first as char,
         };
         let mut buf = [first, 0, 0, 0];
-        for i in 1..len {
-            buf[i] = self.bump().unwrap_or(0);
+        for slot in buf.iter_mut().take(len).skip(1) {
+            *slot = self.bump().unwrap_or(0);
         }
         std::str::from_utf8(&buf[..len])
             .ok()

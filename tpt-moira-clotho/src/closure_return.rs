@@ -301,10 +301,8 @@ fn hoist_call_args(
                 hoist_call_args(a, cands, out, fresh);
             }
         }
-        ExprKind::Macro(m) => {
-            if is_format_macro(&m.path) {
-                m.tokens = hoist_macro_tokens(&m.tokens, cands, out, fresh);
-            }
+        ExprKind::Macro(m) if is_format_macro(&m.path) => {
+            m.tokens = hoist_macro_tokens(&m.tokens, cands, out, fresh);
         }
         _ => {}
     }

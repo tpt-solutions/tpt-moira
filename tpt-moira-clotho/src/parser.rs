@@ -548,27 +548,25 @@ impl Parser {
     /// visibility, so the qualifier (and any restriction group) is simply
     /// dropped. This is shared by item-level and field-level visibility.
     fn skip_vis(&mut self) {
-        if self.eat(&TokenKind::Pub) {
-            if self.eat(&TokenKind::LParen) {
-                let mut depth = 0i32;
-                loop {
-                    match self.peek_kind() {
-                        TokenKind::Eof => break,
-                        TokenKind::LParen | TokenKind::LBracket | TokenKind::LBrace => {
-                            depth += 1;
+        if self.eat(&TokenKind::Pub) && self.eat(&TokenKind::LParen) {
+            let mut depth = 0i32;
+            loop {
+                match self.peek_kind() {
+                    TokenKind::Eof => break,
+                    TokenKind::LParen | TokenKind::LBracket | TokenKind::LBrace => {
+                        depth += 1;
+                        self.bump();
+                    }
+                    TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace => {
+                        if depth == 0 {
                             self.bump();
+                            break;
                         }
-                        TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace => {
-                            if depth == 0 {
-                                self.bump();
-                                break;
-                            }
-                            depth -= 1;
-                            self.bump();
-                        }
-                        _ => {
-                            self.bump();
-                        }
+                        depth -= 1;
+                        self.bump();
+                    }
+                    _ => {
+                        self.bump();
                     }
                 }
             }
@@ -2790,9 +2788,10 @@ impl Parser {
                 // keeps the compiler's own source parseable.
                 self.bump();
                 let path = self.parse_path(true)?;
-                let is_fn_trait = path.segments.last().map_or(false, |s| {
-                    matches!(s.node.as_str(), "Fn" | "FnMut" | "FnOnce")
-                });
+                let is_fn_trait = path
+                    .segments
+                    .last()
+                    .is_some_and(|s| matches!(s.node.as_str(), "Fn" | "FnMut" | "FnOnce"));
                 let mut fn_args: Vec<Type> = Vec::new();
                 if self.eat(&TokenKind::LParen) {
                     // `impl FnMut(&str) -> Ret (+ Bound)*`: a closure type. Its parameter
