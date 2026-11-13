@@ -877,3 +877,243 @@ fn returned_non_capturing_closure_runs() {
     };
     assert_eq!(out, "42", "the returned closure should be callable");
 }
+
+#[test]
+fn returned_capturing_closure_runs_when_bound_by_let() {
+    // `let f = make(4);` inlines the returned `move |x| x + k` at the call site, so the
+    // capture is an ordinary let-bound local and the lifted closure gets it as an argument.
+    let out = match run_src(
+        "fn make(k: i64, m: i64) -> impl Fn(i64) -> i64 {
+            move |x: i64| x * k + m
+        }
+        fn main() {
+            let k: i64 = 2;
+            let f = make(k + 1, 10);
+            print_i64(f(3));
+            let mut i: i64 = 0;
+            while i < 2 {
+                let h = make(i, 100);
+                print_i64(h(1));
+                i = i + 1;
+            }
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping returned-capturing-closure run");
+            return;
+        }
+    };
+    assert_eq!(
+        out, "19\n100\n101",
+        "each `let f = make(..)` should bind its own captures"
+    );
+}
+
+#[test]
+fn returned_capturing_closure_passed_as_argument_runs() {
+    // `apply(make(4), 1)`: the pure-argument call is hoisted into a `let` before the
+    // statement, then inlined like any other `let f = make(..)`.
+    let out = match run_src(
+        "fn make(k: i64) -> impl Fn(i64) -> i64 {
+            move |x: i64| x + k
+        }
+        fn apply(f: fn(i64) -> i64, x: i64) -> i64 {
+            f(x)
+        }
+        fn main() {
+            let r = apply(make(4), 1);
+            print_i64(r);
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping argument-position closure run");
+            return;
+        }
+    };
+    assert_eq!(
+        out, "5",
+        "the hoisted closure should be passed as the fn argument"
+    );
+}
+
+#[test]
+fn returned_capturing_closure_inside_println_runs() {
+    // The call sits in a `println!` argument, which is a token stream until lowering;
+    // the pass hoists it out of the tokens into a `let` before the statement.
+    let out = match run_src(
+        "fn make(k: i64) -> impl Fn(i64) -> i64 {
+            move |x: i64| x + k
+        }
+        fn apply(f: fn(i64) -> i64, x: i64) -> i64 {
+            f(x)
+        }
+        fn main() {
+            println!(\"{}\", apply(make(4), 1));
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping println-argument closure run");
+            return;
+        }
+    };
+    assert_eq!(out, "5", "the closure inside a println argument should be hoisted and run");
+}
+
+#[test]
+fn compound_assignment_as_match_arm_runs() {
+    // `1 => depth += 1,` is a unit-typed arm, so it agrees with the `_ => {}` arm.
+    let out = match run_src(
+        "fn main() {
+            let x: i64 = 1;
+            let mut depth: i64 = 10;
+            match x {
+                1 => depth += 5,
+                _ => {}
+            }
+            print_i64(depth);
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping compound-assignment arm run");
+            return;
+        }
+    };
+    assert_eq!(out, "15");
+}
+
+#[test]
+fn generic_struct_literal_inside_vec_macro_runs() {
+    // `vec![Spanned { .. }]`: the struct literal lives in macro tokens, so monomorphization
+    // must rename it to its instance as well.
+    let out = match run_src(
+        "struct Spanned<T> {
+            node: T,
+            span: i64,
+        }
+        struct Path {
+            segments: Vec<Spanned<i64>>,
+        }
+        fn main() {
+            let p = Path { segments: vec![Spanned { node: 4i64, span: 1 }] };
+            print_i64(p.segments[0].node);
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping generic-struct-in-vec run");
+            return;
+        }
+    };
+    assert_eq!(out, "4");
+}
+
+#[test]
+fn boxed_recursive_option_runs() {
+    // `Option<Box<Node>>` fields, `Box::new` construction, `if let Some(b) = &..`,
+    // `*box` deref and a method on a struct reached through a plain field.
+    let out = match run_src(
+        "struct Node {
+            val: i64,
+            next: Option<Box<Node>>,
+        }
+        impl Node {
+            fn get(&self) -> i64 {
+                self.val
+            }
+        }
+        fn sum(n: &Node) -> i64 {
+            let mut total: i64 = n.val;
+            if let Some(b) = &n.next {
+                total = total + sum(b);
+            }
+            total
+        }
+        fn main() {
+            let tail = Node { val: 3, next: None };
+            let head = Node { val: 1, next: Some(Box::new(tail)) };
+            print_i64(sum(&head));
+            let bx: Box<i64> = Box::new(41);
+            print_i64(*bx + 1);
+            let n2 = Node { val: 8, next: None };
+            print_i64(n2.get());
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping boxed-list run");
+            return;
+        }
+    };
+    assert_eq!(out, "4\n42\n8");
+}
+
+#[test]
+fn option_of_hashmap_assigned_from_constructor_runs() {
+    // `acc = Some(HashMap::new())`: the assignment's target type reaches the call, and the
+    // constructor lowers to a map instance even though it is not a `let` initializer.
+    let out = match run_src(
+        "use std::collections::HashMap;
+        fn main() {
+            let mut acc: Option<HashMap<String, i64>> = None;
+            if acc.is_none() {
+                acc = Some(HashMap::new());
+            }
+            print_i64(acc.is_some() as i64);
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping Option<HashMap> run");
+            return;
+        }
+    };
+    assert_eq!(out, "1");
+}
+
+#[test]
+fn byte_ascii_methods_and_char_from_u32_run() {
+    // `u8` takes the ASCII methods (as C integers), and `char::from_u32` returns an
+    // `Option<char>` that is `None` for a surrogate.
+    let out = match run_src(
+        "fn main() {
+            let b: u8 = 55;
+            let c: u8 = 65;
+            print_i64(b.is_ascii_digit() as i64);
+            print_i64(c.is_ascii_alphabetic() as i64);
+            print_i64(c.to_ascii_lowercase() as i64);
+            print_i64(char::from_u32(65).is_some() as i64);
+            print_i64(char::from_u32(55296).is_some() as i64);
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping byte-method run");
+            return;
+        }
+    };
+    assert_eq!(out, "1\n1\n97\n1\n0");
+}
+
+#[test]
+fn char_to_digit_runs() {
+    // `c.to_digit(radix)` is `Some(digit)` for a digit in the radix, else `None`.
+    let out = match run_src(
+        "fn main() {
+            let b: char = '7';
+            let a: char = 'z';
+            print_i64(b.to_digit(10).is_some() as i64);
+            print_i64(a.to_digit(10).is_some() as i64);
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping to_digit run");
+            return;
+        }
+    };
+    assert_eq!(out, "1\n0");
+}
