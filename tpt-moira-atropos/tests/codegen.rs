@@ -810,12 +810,7 @@ fn nested_item_and_forward_call_run() {
     };
     assert_eq!(
         out.trim(),
-        "3\n8"
-            .replace("\n", "\n")
-            .trim()
-            .lines()
-            .collect::<Vec<_>>()
-            .join("\n")
+        "3\n8".trim().lines().collect::<Vec<_>>().join("\n")
     );
 }
 

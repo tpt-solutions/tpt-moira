@@ -348,7 +348,7 @@ fn emit_function(
         .iter()
         .map(|p| {
             let t = param_types.get(p.as_str()).copied().unwrap_or("long long");
-            format!("{}", c_decl(t, p, &struct_names))
+            c_decl(t, p, struct_names).to_string()
         })
         .collect();
     let param_str = if params.is_empty() {
@@ -375,7 +375,7 @@ fn emit_function(
             .as_deref()
             .map(|t| c_type(t, struct_names))
             .unwrap_or_else(|| "long long".to_string());
-        out.push_str(&format!("    {};\n", c_decl(&t, name, &struct_names)));
+        out.push_str(&format!("    {};\n", c_decl(&t, name, struct_names)));
     }
     // SSA temporary declarations. Iterate in a deterministic (sorted) order so
     // the emitted C is identical across runs/processes — `temp_types` is a
@@ -415,12 +415,7 @@ fn emit_function(
                     ));
                 }
                 // A void call is emitted as a bare statement (no destination).
-                mir::Rvalue::Call(callee, _)
-                    if matches!(
-                        callee,
-                        mir::Operand::Func(n) if void_names.contains(n.as_str())
-                    ) =>
-                {
+                mir::Rvalue::Call(mir::Operand::Func(n), _) if void_names.contains(n.as_str()) => {
                     out.push_str(&format!("    {};\n", emit_rvalue(&s.rvalue)));
                 }
                 // `Box::new(v)` (lowered to `moira_box_new(v)`): a fresh heap copy of `v`,

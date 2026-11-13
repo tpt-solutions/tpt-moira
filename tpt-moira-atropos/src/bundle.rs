@@ -187,7 +187,7 @@ fn rename_rvalue(rv: &mut Rvalue, f: &dyn Fn(&str, bool) -> String) {
 }
 
 /// Rename the type strings of a list of named fields.
-fn rename_field_types(fields: &mut Vec<(String, String)>, f: &dyn Fn(&str, bool) -> String) {
+fn rename_field_types(fields: &mut [(String, String)], f: &dyn Fn(&str, bool) -> String) {
     for (_, ty) in fields.iter_mut() {
         *ty = rename_type_str(ty, f);
     }
@@ -369,15 +369,12 @@ fn retype_call_results(p: &mut mir::MirProgram) {
             if ty == "long long" {
                 continue;
             }
-            let temp_untyped = func
-                .temp_types
-                .get(&place)
-                .map_or(true, |t| t == "long long");
+            let temp_untyped = func.temp_types.get(&place).is_none_or(|t| t == "long long");
             if temp_untyped {
                 func.temp_types.insert(place.clone(), ty.clone());
             }
             for (ln, lt) in func.locals.iter_mut() {
-                if *ln == place && lt.as_deref().map_or(true, |t| t == "long long") {
+                if *ln == place && lt.as_deref().is_none_or(|t| t == "long long") {
                     *lt = Some(ty.clone());
                 }
             }

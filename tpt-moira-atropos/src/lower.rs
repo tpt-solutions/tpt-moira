@@ -28,6 +28,12 @@ impl fmt::Display for LowerError {
 
 type Result<T> = std::result::Result<T, LowerError>;
 
+/// The lowered scrutinee: an optional value plus the bindings its pattern introduces.
+type ScrutineeLowering = (Option<mir::Operand>, Vec<(String, mir::Operand)>);
+
+/// Renamed-type map plus the `(field, rename)` pairs it produced.
+type FieldRenames = (HashMap<String, String>, Vec<(String, Option<String>)>);
+
 /// Lower a whole program. `use` declarations are ignored; unsupported items
 /// (enum, const, static, nested items) produce an error.
 /// Per-expression type hints: maps an expression's source span `(start, end)` to
@@ -410,7 +416,7 @@ pub fn lower_program_with_enums(
                     for c in l.closures.drain(..) {
                         out.functions.push(c);
                     }
-                    out.functions.extend(l.specs.drain(..));
+                    out.functions.append(&mut l.specs);
                     out.structs.extend(tuple_structs);
                 }
             }
@@ -458,7 +464,7 @@ pub fn lower_program_with_enums(
                     for f in l.closures.drain(..) {
                         out.functions.push(f);
                     }
-                    out.functions.extend(l.specs.drain(..));
+                    out.functions.append(&mut l.specs);
                     out.structs.extend(tuple_structs);
                 }
             }
@@ -842,7 +848,7 @@ fn signature_is_modeled(
         .all(|p| known(&p.ty, struct_names, &generics))
         && f.ret
             .as_ref()
-            .map_or(true, |t| known(t, struct_names, &generics))
+            .is_none_or(|t| known(t, struct_names, &generics))
 }
 
 /// Rename the variables of a block (its statements and terminator) by `map`.
@@ -1035,7 +1041,7 @@ fn type_to_c_expanded(ty: &ast::Type) -> String {
                 // A function type keeps its signature: `Fn<params..,result>`, which the C
                 // backend writes as a function pointer.
                 (Some("fn"), n) if n >= 1 => {
-                    let parts: Vec<String> = (0..n).map(|i| arg(i)).collect();
+                    let parts: Vec<String> = (0..n).map(arg).collect();
                     format!("Fn<{}>", parts.join(","))
                 }
                 (Some("fn"), n) => func_ptr_c_type(n.saturating_sub(1)),
@@ -1322,11 +1328,7 @@ fn collect_path_names(
             bind_pat_names_in(p, &mut b2);
             collect_path_names_block(b, &b2, out, seen);
         }
-        ExprKind::Return(e) => {
-            if let Some(e) = e {
-                collect_path_names(e, bound, out, seen);
-            }
-        }
+        ExprKind::Return(Some(e)) => collect_path_names(e, bound, out, seen),
         ExprKind::Break | ExprKind::Continue => {}
         ExprKind::Match(s, arms) => {
             collect_path_names(s, bound, out, seen);
@@ -1822,7 +1824,7 @@ impl Lower {
     /// passed to an unrelated function still lowers to its bare pointer
     /// (invoking such a pointer with captures is not representable in the
     /// subset and remains a documented limitation).
-    fn lower_closure(&mut self, params: &Vec<ast::Param>, body: &Expr) -> Result<mir::Operand> {
+    fn lower_closure(&mut self, params: &[ast::Param], body: &Expr) -> Result<mir::Operand> {
         let param_tys_hint: Vec<String> = self.closure_param_hint.take().unwrap_or_default();
         let captures = self.literal_captures(params, body)?;
 
@@ -1928,8 +1930,8 @@ impl Lower {
         sub.func.temp_types = sub.types.clone();
         self.closure_counter = sub.closure_counter;
         self.closures.push(sub.func.clone());
-        self.closures.extend(sub.closures.drain(..));
-        self.specs.extend(sub.specs.drain(..));
+        self.closures.append(&mut sub.closures);
+        self.specs.append(&mut sub.specs);
         self.spec_done = sub.spec_done.clone();
         // Record the captures so call sites through a bound local can pass them.
         self.closure_captures.insert(name.clone(), captures);
@@ -2088,8 +2090,8 @@ impl Lower {
         let func = l.lower_function(&g)?;
         self.closure_counter = l.closure_counter;
         self.spec_done = l.spec_done;
-        self.closures.extend(l.closures.drain(..));
-        self.specs.extend(l.specs.drain(..));
+        self.closures.append(&mut l.closures);
+        self.specs.append(&mut l.specs);
         self.closure_rets.insert(
             spec_name.to_string(),
             func.ret.clone().unwrap_or_else(|| "long long".to_string()),
@@ -2205,9 +2207,9 @@ impl Lower {
                         }
                         // A variant construction typed by the checker as an instance ().
                         _ if self.variant_c_type(init).is_some()
-                            && self.hint_of_expr(init).map_or(false, |h| {
+                            && self.hint_of_expr(init).is_some_and(|h| {
                                 mir::split_generic(&h)
-                                    .map_or(false, |(b, _)| b == "Option" || b == "Result")
+                                    .is_some_and(|(b, _)| b == "Option" || b == "Result")
                             }) =>
                         {
                             self.hint_of_expr(init)
@@ -2572,7 +2574,7 @@ impl Lower {
                 .find(|(n, _)| n == name)
                 .and_then(|(_, t)| t.clone())
         });
-        ty.map_or(false, |t| mir::slice_elem(&t).is_some())
+        ty.is_some_and(|t| mir::slice_elem(&t).is_some())
     }
 
     /// Lower `base[a..b]` (any of the range forms) to a slice value. The base is a
@@ -2756,7 +2758,7 @@ impl Lower {
             match name {
                 "iter" | "into_iter" if args.is_empty() => {
                     stages.reverse();
-                    let seq: &'a Expr = &**r;
+                    let seq: &'a Expr = r;
                     return if self.is_sequence(seq) {
                         Some(IterChain {
                             seq: Some(seq),
@@ -2776,7 +2778,7 @@ impl Lower {
                 }
                 // `s.chars()` / `s.bytes()` on a string: a source of characters.
                 "chars" | "bytes"
-                    if args.is_empty() && self.hint_of_expr(&**r).as_deref() == Some("str") =>
+                    if args.is_empty() && self.hint_of_expr(r).as_deref() == Some("str") =>
                 {
                     stages.reverse();
                     return Some(IterChain {
@@ -2788,14 +2790,14 @@ impl Lower {
                 }
                 _ => return None,
             }
-            cur = unparen(&**r);
+            cur = unparen(r);
         }
     }
 
     /// Whether `seq` is a vector, slice or array value the chain can index.
     fn is_sequence(&self, seq: &Expr) -> bool {
         self.vec_local(seq).is_some()
-            || self.hint_of_expr(seq).map_or(false, |h| {
+            || self.hint_of_expr(seq).is_some_and(|h| {
                 mir::vec_elem(&h).is_some()
                     || mir::slice_elem(&h).is_some()
                     || mir::vec_ptr_elem(&h).is_some()
@@ -3519,9 +3521,9 @@ impl Lower {
 
     /// Whether a map expression is a sorted collection (a `BTreeMap` or `BTreeSet`).
     fn is_sorted_expr(&self, e: &Expr) -> bool {
-        let by_hint = self.hint_of_expr(e).map_or(false, |h| {
-            h.starts_with("Sorted<") || h.starts_with("SortedSet<")
-        });
+        let by_hint = self
+            .hint_of_expr(e)
+            .is_some_and(|h| h.starts_with("Sorted<") || h.starts_with("SortedSet<"));
         let by_local = match &e.kind {
             ExprKind::Path(p) if p.segments.len() == 1 => {
                 let name = &p.segments[0].node;
@@ -3535,9 +3537,7 @@ impl Lower {
                             .find(|(n, _)| n == name)
                             .and_then(|(_, t)| t.clone())
                     })
-                    .map_or(false, |t| {
-                        t.starts_with("Sorted<") || t.starts_with("SortedSet<")
-                    })
+                    .is_some_and(|t| t.starts_with("Sorted<") || t.starts_with("SortedSet<"))
             }
             _ => false,
         };
@@ -3668,6 +3668,7 @@ impl Lower {
     }
 
     /// `for (k, v) in &m` (or `m.iter()`): an index loop over the map's keys and values.
+    #[allow(clippy::too_many_arguments)]
     fn lower_map_for(
         &mut self,
         mname: &str,
@@ -4464,7 +4465,7 @@ impl Lower {
             _ => match &recv.kind {
                 ExprKind::Path(p) if p.segments.len() == 1 => {
                     let n = &self.var_name(&p.segments[0].node);
-                    self.types.get(n).map_or(false, |t| t == "char")
+                    self.types.get(n).is_some_and(|t| t == "char")
                         || self
                             .func
                             .locals
@@ -4653,7 +4654,7 @@ impl Lower {
                     let n = &self.var_name(&p.segments[0].node);
                     self.types
                         .get(n)
-                        .map_or(false, |t| t == "char*" || t == "str")
+                        .is_some_and(|t| t == "char*" || t == "str")
                         || self.func.locals.iter().any(|(l, t)| {
                             l == n && matches!(t.as_deref(), Some("char*") | Some("str"))
                         })
@@ -5174,9 +5175,9 @@ impl Lower {
         // The receiver is a vector or slice: a local or parameter declared as one, or an
         // expression the checker typed as one.
         let is_seq = self.vec_local(recv).is_some()
-            || self.hint_of_expr(recv).map_or(false, |h| {
-                mir::vec_elem(&h).is_some() || mir::slice_elem(&h).is_some()
-            });
+            || self
+                .hint_of_expr(recv)
+                .is_some_and(|h| mir::vec_elem(&h).is_some() || mir::slice_elem(&h).is_some());
         if !is_seq {
             return Ok(None);
         }
@@ -5768,7 +5769,7 @@ impl Lower {
                 }
                 _ => None,
             });
-            let is_int = recv_ty.map_or(false, |h| {
+            let is_int = recv_ty.is_some_and(|h| {
                 matches!(
                     h.as_str(),
                     "i8" | "i16"
@@ -5842,7 +5843,7 @@ impl Lower {
                         let n = &self.var_name(&p.segments[0].node);
                         self.types
                             .get(n)
-                            .map_or(false, |t| t == "char*" || t == "str")
+                            .is_some_and(|t| t == "char*" || t == "str")
                             || self.func.locals.iter().any(|(l, t)| {
                                 l == n && matches!(t.as_deref(), Some("char*") | Some("str"))
                             })
@@ -5907,7 +5908,7 @@ impl Lower {
         if matches!(method, "starts_with" | "ends_with" | "contains")
             && args.len() == 1
             && matches!(args[0].kind, ExprKind::Lit(ast::Lit::Char(_)))
-            && self.hint_of_expr(recv).map_or(false, |h| h == "str")
+            && self.hint_of_expr(recv).is_some_and(|h| h == "str")
         {
             let s = self.lower_expr(recv)?;
             let c = self.lower_expr(&args[0])?;
@@ -7020,7 +7021,7 @@ impl Lower {
                 if let Some((ename, tag, 0)) = self.variant_info(p) {
                     // `None` as an `Option<T>` (the checker's type names the instance).
                     let ty = match self.hint_of_expr(e) {
-                        Some(h) if mir::split_generic(&h).map_or(false, |(b, _)| b == ename) => h,
+                        Some(h) if mir::split_generic(&h).is_some_and(|(b, _)| b == ename) => h,
                         _ => ename.clone(),
                     };
                     let t = self.fresh_temp(ty);
@@ -7294,7 +7295,7 @@ impl Lower {
                 }
                 // `T::default()` / `Default::default()`, typed by the checker.
                 if let ExprKind::Path(p) = &callee.kind {
-                    if p.segments.last().map_or(false, |s| s.node == "default") {
+                    if p.segments.last().is_some_and(|s| s.node == "default") {
                         if let Some(v) = self.lower_default_call(e, args)? {
                             return Ok(v);
                         }
@@ -7710,7 +7711,7 @@ impl Lower {
                 // element is destructured into its components.
                 // `for x in &arr` iterates the same array as `for x in arr`.
                 let arr_expr: &Expr = match &iter.kind {
-                    ExprKind::Ref(i, _) => &**i,
+                    ExprKind::Ref(i, _) => i,
                     _ => iter,
                 };
                 let array_len: Option<i128> = match &arr_expr.kind {
@@ -7727,7 +7728,7 @@ impl Lower {
                 };
                 if let ExprKind::MethodCall(r0, m, args) = &iter.kind {
                     if m.node == "rev" && args.is_empty() {
-                        if let Some((Some(l), Some(h), inclusive)) = range_bounds(unparen(&**r0)) {
+                        if let Some((Some(l), Some(h), inclusive)) = range_bounds(unparen(r0)) {
                             let name = pat_name(pat)?;
                             return self.lower_range_for_rev(l, h, inclusive, &name, body);
                         }
@@ -7737,11 +7738,11 @@ impl Lower {
                 if let ExprKind::MethodCall(cr, cm, cargs) = &iter.kind {
                     if cm.node == "chain" && cargs.len() == 1 {
                         let left_e: &Expr = match &cr.kind {
-                            ExprKind::MethodCall(r, m, a) if m.node == "iter" && a.is_empty() => &**r,
-                            _ => &**cr,
+                            ExprKind::MethodCall(r, m, a) if m.node == "iter" && a.is_empty() => r,
+                            _ => cr,
                         };
                         let right_e: &Expr = match &cargs[0].kind {
-                            ExprKind::MethodCall(r, m, a) if m.node == "iter" && a.is_empty() => &**r,
+                            ExprKind::MethodCall(r, m, a) if m.node == "iter" && a.is_empty() => r,
                             _ => &cargs[0],
                         };
                         if self.is_sequence(left_e) && self.is_sequence(right_e) {
@@ -7826,7 +7827,7 @@ impl Lower {
                                 self.types.insert(n.clone(), hint.clone());
                                 // A pattern-bound local is already declared; give it the hinted type.
                                 for (ln, lt) in self.func.locals.iter_mut() {
-                                    if *ln == n && lt.as_deref().map_or(true, |t| t == "long long")
+                                    if *ln == n && lt.as_deref().is_none_or(|t| t == "long long")
                                     {
                                         *lt = Some(hint.clone());
                                     }
@@ -8456,10 +8457,7 @@ impl Lower {
     /// Bind a pattern's names as new variables of the current scope. Each name gets a
     /// unique C name; its type is set for the lowering of the scope's body. Returns what
     /// `leave_bindings` needs to end the scope.
-    fn enter_bindings(
-        &mut self,
-        binds: &[(String, mir::Operand)],
-    ) -> (HashMap<String, String>, Vec<(String, Option<String>)>) {
+    fn enter_bindings(&mut self, binds: &[(String, mir::Operand)]) -> FieldRenames {
         let mut renames: HashMap<String, String> = HashMap::new();
         let mut saved: Vec<(String, Option<String>)> = Vec::new();
         for (name, val) in binds {
@@ -8507,10 +8505,7 @@ impl Lower {
         renames: &HashMap<String, String>,
         saved: Vec<(String, Option<String>)>,
     ) {
-        let popped: Vec<(String, Option<String>)> = match self.renames_stack.pop() {
-            Some(x) => x,
-            None => Vec::new(),
-        };
+        let popped: Vec<(String, Option<String>)> = self.renames_stack.pop().unwrap_or_default();
         {
             // Each name appears once in a scope, so the order of the restores does not matter.
             for entry in popped {
@@ -9239,8 +9234,7 @@ impl Lower {
         // literal takes its C struct from the destination type (see the codegen).
         // The checker's type for the whole expression names the enum instance (`Some(3)`
         // as an `Option<i64>`); failing that, a variable payload's type does.
-        let hinted =
-            want.filter(|w| mir::split_generic(w).map_or(false, |(base, _)| base == ename));
+        let hinted = want.filter(|w| mir::split_generic(w).is_some_and(|(base, _)| base == ename));
         let payload_ty = match (hinted, fields.get(1)) {
             (Some(w), _) => Some(w),
             (None, Some((_, mir::Operand::Var(n)))) if ename == "Option" => {
@@ -9320,7 +9314,7 @@ impl Lower {
         }
         self.types.insert(name.clone(), ename.to_string());
         for (ln, lt) in self.func.locals.iter_mut() {
-            if *ln == name && lt.as_deref().map_or(true, |t| t == "long long") {
+            if *ln == name && lt.as_deref().is_none_or(|t| t == "long long") {
                 *lt = Some(ename.to_string());
             }
         }
@@ -9382,7 +9376,7 @@ impl Lower {
         scrut: &mir::Operand,
         path: &ast::Path,
         subpats: &[ast::Pat],
-    ) -> Result<(Option<mir::Operand>, Vec<(String, mir::Operand)>)> {
+    ) -> Result<ScrutineeLowering> {
         let scrut_ptr = self.scrutinee_is_pointer(scrut);
         let vname = path
             .segments
@@ -9436,7 +9430,7 @@ impl Lower {
         tag: i128,
         names: &[String],
         fields: &[(String, ast::Pat)],
-    ) -> Result<(Option<mir::Operand>, Vec<(String, mir::Operand)>)> {
+    ) -> Result<ScrutineeLowering> {
         let scrut_ptr = self.scrutinee_is_pointer(scrut);
         self.type_enum_operand(scrut, ename);
         let tag_val = self.fresh_temp("long long");
@@ -9474,11 +9468,7 @@ impl Lower {
     /// Build the guard condition and binding assignments for a pattern against the
     /// scrutinee operand. Returns `(None, binds)` for irrefutable patterns (the
     /// arm is always taken) or `(Some(cond), binds)` for a literal comparison.
-    fn pattern_guard(
-        &mut self,
-        scrut: &mir::Operand,
-        pat: &ast::Pat,
-    ) -> Result<(Option<mir::Operand>, Vec<(String, mir::Operand)>)> {
+    fn pattern_guard(&mut self, scrut: &mir::Operand, pat: &ast::Pat) -> Result<ScrutineeLowering> {
         let scrut_ptr = self.scrutinee_is_pointer(scrut);
         match pat {
             ast::Pat::Ident(n) => {
