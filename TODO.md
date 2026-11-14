@@ -746,6 +746,13 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
             default (commit 88196de). Own errors: clotho 510, atropos 1365, lachesis 1381,
             driver 222 (sum 3478, from 3487). Not lowered yet: `filter`, `and_then`, and
             `or_else` with a closure that returns `None` (its body has no hint).
+            **Closures (2026-11-14, latest).** `and_then`, `filter` (closure gets a pointer to the
+            payload) are lowered; `or_else` and `ok_or_else` retype the lifted closure and the
+            value it returns to the type the call expects. A closure literal takes the annotated
+            type (`let e: Result<i64, i64> = b.ok_or_else(|| 4)`). The probe counts the crate's
+            own source too, so each new helper costs a few C errors in its crate (lachesis +7 for
+            `refine_closure_result`, the same effect as the escape pass before); write new code
+            in the subset's shape where that matters.
             Remaining families: string methods (`split`, `split_at`, `starts_with`,
             `strip_suffix`, `trim_end_matches`); slice and iterator methods (`zip`, `split_last`,
             `to_vec`, `values`, `with_capacity`); `saturating_*`; and receivers that have no
