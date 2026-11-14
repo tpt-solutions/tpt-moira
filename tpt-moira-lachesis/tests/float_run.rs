@@ -15,7 +15,11 @@ fn find_cc() -> Option<&'static str> {
 fn run(name: &str, src: &str) -> Option<String> {
     let prog = tpt_moira_clotho::compile_source(src).expect("program should parse");
     let (res, hints) = tpt_moira_lachesis::type_check_typed(&prog, &[]);
-    assert!(res.is_ok(), "{name}: program should type-check: {:?}", res.err());
+    assert!(
+        res.is_ok(),
+        "{name}: program should type-check: {:?}",
+        res.err()
+    );
     let mir = tpt_moira_atropos::lower_program_typed(&prog, &hints).expect("should lower");
     let c = tpt_moira_atropos::codegen_c::emit_c(&mir);
     let cc = find_cc()?;
@@ -61,7 +65,9 @@ fn main() {
     println!("{}", 2.0f64);
 }
 "#;
-    let Some(out) = run("floats", src) else { return };
+    let Some(out) = run("floats", src) else {
+        return;
+    };
     assert_eq!(
         out,
         "2.5\n3.75\n0.30000000000000004\n-1.25\n1000000000000000000000 0.0000001\n0.3333333333333333\n2\n"
