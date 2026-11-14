@@ -205,6 +205,9 @@ fn expand_stmt(s: &Stmt, table: &MacroTable) -> Stmt {
     Stmt { kind }
 }
 
+// `&**b` names the box's expression: the Moira checker and lowering take a `&Box<Expr>`
+// as a pointer to a pointer, so the dereference is spelled out.
+#[allow(clippy::explicit_auto_deref)]
 fn expand_expr(e: &Expr, table: &MacroTable) -> Expr {
     let span = e.span;
     let kind = match &e.kind {
@@ -254,14 +257,14 @@ fn expand_expr(e: &Expr, table: &MacroTable) -> Expr {
                 .iter()
                 .map(|(n, v)| (n.clone(), expand_expr(v, table)))
                 .collect(),
-            base.as_ref().map(|b| Box::new(expand_expr(b, table))),
+            base.as_ref().map(|b| Box::new(expand_expr(&**b, table))),
         ),
         ExprKind::Block(b) => ExprKind::Block(expand_block(b, table)),
         ExprKind::If(cond, then_b, else_b) => ExprKind::If(
             Box::new(expand_expr(cond, table)),
             expand_block(then_b, table),
             else_b.as_ref().map(|b| match &b.kind {
-                ExprKind::If(..) => Box::new(expand_expr(b, table)),
+                ExprKind::If(..) => Box::new(expand_expr(&**b, table)),
                 ExprKind::Block(b2) => Box::new(Expr {
                     kind: ExprKind::Block(expand_block(b2, table)),
                     span: b.span,
@@ -294,6 +297,9 @@ fn expand_expr(e: &Expr, table: &MacroTable) -> Expr {
 }
 
 /// Substitute parameter identifiers in `expr` with their argument expressions.
+// `&**b` names the box's expression: the Moira checker and lowering take a `&Box<Expr>`
+// as a pointer to a pointer, so the dereference is spelled out.
+#[allow(clippy::explicit_auto_deref)]
 fn subst_expr(expr: &Expr, subst: &HashMap<String, Expr>) -> Expr {
     let span = expr.span;
     let kind = match &expr.kind {
@@ -334,14 +340,14 @@ fn subst_expr(expr: &Expr, subst: &HashMap<String, Expr>) -> Expr {
                 .iter()
                 .map(|(n, v)| (n.clone(), subst_expr(v, subst)))
                 .collect(),
-            base.as_ref().map(|b| Box::new(subst_expr(b, subst))),
+            base.as_ref().map(|b| Box::new(subst_expr(&**b, subst))),
         ),
         ExprKind::Block(b) => ExprKind::Block(subst_block(b, subst)),
         ExprKind::If(cond, then_b, else_b) => ExprKind::If(
             Box::new(subst_expr(cond, subst)),
             subst_block(then_b, subst),
             else_b.as_ref().map(|b| match &b.kind {
-                ExprKind::If(..) => Box::new(subst_expr(b, subst)),
+                ExprKind::If(..) => Box::new(subst_expr(&**b, subst)),
                 ExprKind::Block(b2) => Box::new(Expr {
                     kind: ExprKind::Block(subst_block(b2, subst)),
                     span: b.span,

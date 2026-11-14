@@ -264,6 +264,8 @@ fn hint_compound(ty: &Ty) -> Option<String> {
             let payload = match &args[0] {
                 Ty::Ref(inner) | Ty::RefMut(inner) => match &**inner {
                     Ty::Struct(n) if n != "String" && n != "Vec" => Some(format!("{n}*")),
+                    // A reference to a box is the box's pointer (a `Box<T>` is already one).
+                    Ty::Apply(n, _) if n == "Box" => hint_elem_name(inner),
                     // A reference to a scalar is a pointer to it (`Option<&i64>`).
                     other => hint_elem_name(other).map(|h| format!("{h}*")),
                 },

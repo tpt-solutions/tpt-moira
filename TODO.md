@@ -902,6 +902,16 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
             **`if` branches (2026-11-14).** A bare `None` in one branch of an `if`/`else` takes the
             other branch's type, and its tail records it (`record_tail_type`), as `match` arms do.
             Test: `if_branch_none_takes_other_branch_type_runs`. Own C: clotho 305 -> 274.
+            **Reference to a box (2026-11-14).** `Option<&Box<T>>` payloads and closure parameters
+            of that type were typed with an extra pointer (`Expr**`); a box is already its
+            pointer, so `hint_elem_name` is used without the `*`. Also the macro expander passes
+            `&**b` for boxed sub-expressions (the lowering takes `&Box<Expr>` as a pointer to a
+            pointer). Own C: clotho 274 -> 252.
+            **Open:** `&b` for a boxed local `b: Box<P>` lowers to `P**` (a box and a reference are
+            both pointers in C, so the lowering cannot tell them apart without the checker's type).
+            A test for `Option<&Box<P>>` was tried and removed for this reason.
+            **Open:** `format!` of a user type with a `Display` impl (`{}` on a `TokenKind`) is
+            lowered as an integer (`moira_int_to_string`): the impl's `fmt` is not called.
             **Open:** an unsuffixed literal payload (`Some(5)`) in an `if` initialiser gets the
             default `i32`: an `if` does not pass an annotation's expectation to its branches, and
             an unannotated `let` is not unified with the return type later.
