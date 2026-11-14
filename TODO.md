@@ -794,7 +794,20 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
             - driver: check 2 errors; own C 220. It uses threads for its large stack (outside the
               codegen subset); the two checker errors are `&Path` parameters of callees in
               lachesis modules whose cross-module rewrite has not been located yet.
-            The gap is the codegen subset's breadth, not one bug: each crate uses the std
+            **Clotho first (2026-11-14).** Added a type-propagation pass before C emission
+            (`tpt-moira-atropos/src/retype.rs`, commit 39eea12): temporaries take the type of
+            their definition (call result, field, index, reference, struct literal), a returned
+            value takes the return type, and a default return type takes the pointer or struct
+            type it returns. Clotho's own C: 502 -> 407 errors; atropos 1360 (bundled), lachesis
+            1372, driver 220. What remains in clotho's C, by kind: (1) methods on pattern
+            bindings with no hint (`item.is_cfg_test()` in a match arm, emitted as a bare
+            `is_cfg_test(item)`); (2) iterator chains with a `zip` or `map(fn)` source or a
+            `collect` into a map (`params.iter().map(|p| p.as_str()).zip(args.iter()).collect()`,
+            emitted as bare `iter`/`map`/`zip`/`collect`); (3) some `int` results assigned to
+            tuple and map temporaries (`t = 0` for a `Tuple`); (4) closure arguments whose type
+            differs from the parameter's (`expand_depth(depth, self, t)`). Next: (1) and (2) are
+            lowering coverage; (4) is a closure-type mismatch in the caller's hint.
+ each crate uses the std
             surface and the typed-temporary lowering broadly, and each new feature also adds
             its own source to the probe. The route that worked for the four checker-side
             blockers (path types, threads, `use` aliases) is to remove std surface from each
