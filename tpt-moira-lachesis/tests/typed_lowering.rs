@@ -710,3 +710,25 @@ fn main() {
         assert_eq!(lines, vec!["7", "4"]);
     }
 }
+
+/// `Vec::retain` keeps the elements its closure accepts, in order, and shortens the vector.
+#[test]
+fn vec_retain_keeps_accepted_elements_and_runs() {
+    let src = r#"
+fn main() {
+    let mut v: Vec<i64> = Vec::new();
+    v.push(1);
+    v.push(4);
+    v.push(9);
+    v.push(2);
+    v.retain(|x| *x > 1);
+    println!("{}", v.len());
+    println!("{}", v.pop().unwrap());
+    println!("{}", v.pop().unwrap());
+}
+"#;
+    if let Some(out) = check_and_run("vec_retain", src) {
+        let lines: Vec<&str> = out.lines().filter(|l| !l.is_empty()).collect();
+        assert_eq!(lines, vec!["3", "2", "9"]);
+    }
+}

@@ -4781,6 +4781,119 @@ impl Lower {
 
     /// Sort the vector `recv` in place with an insertion sort: each item is moved left past
     /// the items that should come after it.
+    /// `v.retain(|x| keep)` on a named vector: the elements the closure accepts are moved
+    /// to the front, and the length becomes their count. The closure gets a pointer to each
+    /// element. `None` when the receiver is not a named vector.
+    fn lower_vec_retain(&mut self, recv: &Expr, closure: &Expr) -> Result<Option<mir::Operand>> {
+        let Some((vname, elem, is_ptr)) = self.vec_local(recv) else {
+            return Ok(None);
+        };
+        self.closure_param_hint = Some(vec![format!("{elem}*")]);
+        let callee = self.closure_callee(closure);
+        self.closure_param_hint = None;
+        let (f, caps) = callee?;
+        let len = self.fresh_temp("long long");
+        self.emit(
+            len.clone(),
+            mir::Rvalue::Field(mir::Operand::var(vname.clone()), "len".into(), is_ptr),
+        );
+        let data = self.fresh_temp(format!("{elem}*"));
+        self.emit(
+            data.clone(),
+            mir::Rvalue::Field(mir::Operand::var(vname.clone()), "data".into(), is_ptr),
+        );
+        let i = self.fresh_temp("long long");
+        self.emit(i.clone(), mir::Rvalue::Use(mir::Operand::Const(0)));
+        let kept = self.fresh_temp("long long");
+        self.emit(kept.clone(), mir::Rvalue::Use(mir::Operand::Const(0)));
+        let head = self.new_block();
+        let body = self.new_block();
+        let store = self.new_block();
+        let step = self.new_block();
+        let exit = self.new_block();
+        self.set_term(mir::Terminator::Goto(head));
+
+        self.current = head;
+        let more = self.fresh_temp("long long");
+        self.emit(
+            more.clone(),
+            mir::Rvalue::Binary(
+                mir::BinOp::Lt,
+                mir::Operand::var(i.clone()),
+                mir::Operand::var(len.clone()),
+            ),
+        );
+        self.set_term(mir::Terminator::If(mir::Operand::var(more), body, exit));
+
+        self.current = body;
+        let item_ptr = self.fresh_temp(format!("{elem}*"));
+        self.emit(
+            item_ptr.clone(),
+            mir::Rvalue::IndexRef(
+                mir::Operand::var(data.clone()),
+                mir::Operand::var(i.clone()),
+            ),
+        );
+        let mut call_args = caps;
+        call_args.push(mir::Operand::var(item_ptr));
+        let keep = self.fresh_temp("long long");
+        self.emit(
+            keep.clone(),
+            mir::Rvalue::Call(mir::Operand::Func(f), call_args),
+        );
+        self.set_term(mir::Terminator::If(mir::Operand::var(keep), store, step));
+
+        self.current = store;
+        let value = self.fresh_temp(elem.clone());
+        self.emit(
+            value.clone(),
+            mir::Rvalue::Index(
+                mir::Operand::var(data.clone()),
+                mir::Operand::var(i.clone()),
+            ),
+        );
+        self.emit(
+            "__scratch".to_string(),
+            mir::Rvalue::StoreIndex(
+                mir::Operand::var(data.clone()),
+                mir::Operand::var(kept.clone()),
+                mir::Operand::var(value),
+            ),
+        );
+        self.emit(
+            kept.clone(),
+            mir::Rvalue::Binary(
+                mir::BinOp::Add,
+                mir::Operand::var(kept.clone()),
+                mir::Operand::Const(1),
+            ),
+        );
+        self.set_term(mir::Terminator::Goto(step));
+
+        self.current = step;
+        self.emit(
+            i.clone(),
+            mir::Rvalue::Binary(
+                mir::BinOp::Add,
+                mir::Operand::var(i.clone()),
+                mir::Operand::Const(1),
+            ),
+        );
+        self.set_term(mir::Terminator::Goto(head));
+
+        self.current = exit;
+        self.emit(
+            "__scratch".to_string(),
+            mir::Rvalue::StoreField(
+                mir::Operand::var(vname),
+                "len".into(),
+                mir::Operand::var(kept),
+                is_ptr,
+            ),
+        );
+        Ok(Some(mir::Operand::Unit))
+    }
+
     fn lower_vec_sort(&mut self, recv: &Expr, cmp: SortCmp) -> Result<mir::Operand> {
         let (vname, elem, is_ptr) = match self.vec_local(recv) {
             Some(v) => v,
@@ -8456,6 +8569,11 @@ impl Lower {
                 }
                 if let Some(v) = self.lower_vec_mut_method(recv, &method.node, args)? {
                     return Ok(v);
+                }
+                if method.node == "retain" && args.len() == 1 {
+                    if let Some(v) = self.lower_vec_retain(recv, &args[0])? {
+                        return Ok(v);
+                    }
                 }
                 if method.node == "map_err" && args.len() == 1 {
                     if let Some(v) = self.lower_result_map_err(e, recv, &args[0])? {

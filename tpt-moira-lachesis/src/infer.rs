@@ -3032,6 +3032,13 @@ impl TypeChecker {
             if n == "Vec" && targs.len() == 1 && args.is_empty() && (m == "first" || m == "last") {
                 return Ty::Apply("Option".into(), vec![ref_item(targs[0].clone())]);
             }
+            // `retain(|x| keep)` keeps the elements the closure accepts; the closure gets a
+            // reference to each element.
+            if n == "Vec" && targs.len() == 1 && args.len() == 1 && m == "retain" {
+                let elem_ref = ref_item(targs[0].clone());
+                self.closure_result(&args[0], &elem_ref);
+                return Ty::Unit;
+            }
             // `pop()` removes and returns the last element.
             if n == "Vec" && targs.len() == 1 && args.is_empty() && m == "pop" {
                 return Ty::Apply("Option".into(), vec![targs[0].clone()]);
