@@ -348,6 +348,27 @@ pub fn lower_program_with_enums(
             });
         }
     }
+    // The structs of the other crates in the bundle are known for their field types (a
+    // field read of an extern struct needs its C type); they are emitted by their own unit,
+    // so they are not added to `out`.
+    for p in extra {
+        let extern_aliases = AliasTable::from_program(p);
+        for item in &p.items {
+            if let (false, ItemKind::Struct(s)) = (item.is_cfg_test(), &item.kind) {
+                let known = known_structs.iter().any(|k| k.name == s.name.node);
+                if !known && s.generics.params.is_empty() {
+                    known_structs.push(mir::StructDef {
+                        name: s.name.node.clone(),
+                        fields: s
+                            .fields
+                            .iter()
+                            .map(|f| (f.name.node.clone(), type_to_c(&f.ty, &extern_aliases)))
+                            .collect(),
+                    });
+                }
+            }
+        }
+    }
     for item in &prog.items {
         // `#[cfg(test)]` items (e.g. `mod tests`) are not part of the
         // compiled artifact; test-only code uses macros and library surface

@@ -84,7 +84,7 @@ pub fn check_with_externs(prog: &Program, externs: &[(String, Program)]) -> Resu
     // The type checker's expression types become the lowering's hints, so the
     // borrow check lowers the program with the same types as codegen will.
     let (type_res, hints) = type_check_typed(prog, externs);
-    let borrow_res = borrow_check_program_typed(prog, &hints);
+    let borrow_res = borrow_check_program_with_externs(prog, &hints, externs);
 
     let mut errs: Vec<Diag> = Vec::new();
     match type_res {
@@ -114,7 +114,18 @@ pub fn borrow_check_program_typed(
     prog: &Program,
     hints: &std::collections::HashMap<(usize, usize), String>,
 ) -> Result<(), Vec<Diag>> {
-    let mir = tpt_moira_atropos::lower_program_typed(prog, hints)
+    borrow_check_program_with_externs(prog, hints, &[])
+}
+
+/// Like [`borrow_check_program_typed`], for a program that uses the enums and structs of
+/// extern crates: the lowering needs their definitions (a pattern on an extern enum).
+pub fn borrow_check_program_with_externs(
+    prog: &Program,
+    hints: &std::collections::HashMap<(usize, usize), String>,
+    externs: &[(String, Program)],
+) -> Result<(), Vec<Diag>> {
+    let extra: Vec<&Program> = externs.iter().map(|(_, p)| p).collect();
+    let mir = tpt_moira_atropos::lower_program_with_enums(prog, hints, &extra)
         .map_err(|e| vec![Diag::error(format!("lowering error: {e}"), None)])?;
     borrow_check(&mir)
 }
