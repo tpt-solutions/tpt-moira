@@ -771,8 +771,11 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
             lowered as `place = place op rhs` (before it was lost: it wrote a temporary).
             Own errors: clotho 511, atropos 1376, lachesis 1378, driver 223. The rise in
             atropos (+23) is the new lowering code, compiled as part of atropos.
-            Open: `entry` for non-scalar values (`or_default` on a `Vec` value), `entry` with
-            `and_modify`, `values_mut`, `last_mut`, and `Option::take` on a non-place receiver.
+            **Later (2026-11-14).** Done: `entry(k).or_default()` for vector values and
+            `.push(x)` on an entry slot (0146152); `Vec::first_mut`/`last_mut` (e76b3aa);
+            `entry(k).and_modify(f)` (e044c1c). Own errors now: clotho 503, atropos 1386,
+            lachesis 1376, driver 223.
+            Still open: `values_mut`, and `Option::take` on a receiver that is not a place.
             Remaining families: string methods (`split`, `split_at`, `starts_with`,
             `strip_suffix`, `trim_end_matches`); slice and iterator methods (`zip`, `split_last`,
             `to_vec`, `values`, `with_capacity`); `saturating_*`; and receivers that have no
