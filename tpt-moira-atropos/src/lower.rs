@@ -5349,6 +5349,121 @@ impl Lower {
         Ok(Some(mir::Operand::var(result)))
     }
 
+    /// `res.map_err(|e| body)` on a `Result<T, E>` value: an `Ok` is copied, and an `Err`
+    /// holds the closure's result. `None` unless both the receiver and the expression have
+    /// `Result` types.
+    fn lower_result_map_err(
+        &mut self,
+        e: &Expr,
+        recv: &Expr,
+        closure: &Expr,
+    ) -> Result<Option<mir::Operand>> {
+        let Some(out_ty) = self.hint_of_expr(e) else {
+            return Ok(None);
+        };
+        let recv_hint = self.hint_of_expr(recv);
+        let Some(("Result", targs)) = recv_hint.as_deref().and_then(mir::split_generic) else {
+            return Ok(None);
+        };
+        if targs.len() != 2 || mir::split_generic(&out_ty).map(|(b, _)| b) != Some("Result") {
+            return Ok(None);
+        }
+        let ok_ty = targs[0].to_string();
+        let err_ty = targs[1].to_string();
+        let res = self.lower_expr(recv)?;
+        let rname = match &res {
+            mir::Operand::Var(n) => n.clone(),
+            _ => {
+                return Err(LowerError(
+                    "`map_err` on a result needs a named value".into(),
+                ))
+            }
+        };
+        let ptr = self.scrutinee_is_pointer(&res);
+        let tag = self.fresh_temp("long long");
+        self.emit(
+            tag.clone(),
+            mir::Rvalue::Field(mir::Operand::var(rname.clone()), "tag".into(), ptr),
+        );
+        let is_ok = self.fresh_temp("long long");
+        self.emit(
+            is_ok.clone(),
+            mir::Rvalue::Binary(
+                mir::BinOp::Eq,
+                mir::Operand::var(tag),
+                mir::Operand::Const(0),
+            ),
+        );
+        let result = self.fresh_temp(out_ty);
+        let ok_blk = self.new_block();
+        let err_blk = self.new_block();
+        let join = self.new_block();
+        self.set_term(mir::Terminator::If(
+            mir::Operand::var(is_ok),
+            ok_blk,
+            err_blk,
+        ));
+
+        self.current = ok_blk;
+        let okv = self.fresh_temp(ok_ty);
+        self.emit(
+            okv.clone(),
+            mir::Rvalue::Field(
+                mir::Operand::var(rname.clone()),
+                payload_field("Result", 0, 0),
+                ptr,
+            ),
+        );
+        self.emit(
+            result.clone(),
+            mir::Rvalue::StructLit(
+                "Result".to_string(),
+                vec![
+                    ("tag".to_string(), mir::Operand::Const(0)),
+                    (payload_field("Result", 0, 0), mir::Operand::var(okv)),
+                ],
+            ),
+        );
+        self.set_term(mir::Terminator::Goto(join));
+
+        self.current = err_blk;
+        self.closure_param_hint = Some(vec![err_ty.clone()]);
+        let callee = self.closure_callee(closure);
+        self.closure_param_hint = None;
+        let (f, caps) = callee?;
+        let errv = self.fresh_temp(err_ty);
+        self.emit(
+            errv.clone(),
+            mir::Rvalue::Field(mir::Operand::var(rname), payload_field("Result", 1, 0), ptr),
+        );
+        let mut args = caps;
+        args.push(mir::Operand::var(errv));
+        let ret = self
+            .closure_rets
+            .get(&f)
+            .cloned()
+            .unwrap_or_else(|| "long long".to_string());
+        let mapped = self.fresh_temp(ret);
+        self.emit(
+            mapped.clone(),
+            mir::Rvalue::Call(mir::Operand::Func(f), args),
+        );
+        self.emit(
+            result.clone(),
+            mir::Rvalue::StructLit(
+                "Result".to_string(),
+                vec![
+                    ("tag".to_string(), mir::Operand::Const(1)),
+                    (payload_field("Result", 1, 0), mir::Operand::var(mapped)),
+                ],
+            ),
+        );
+        self.set_term(mir::Terminator::Goto(join));
+
+        self.current = join;
+        Ok(Some(mir::Operand::var(result)))
+    }
+
     /// `v.clone()` on a value: a vector is copied element by element into a new vector, a
     /// string is duplicated, and any other value is copied. A user type's own `clone`
     /// method is dispatched by `lower_user_method` instead.
@@ -8320,6 +8435,11 @@ impl Lower {
                 }
                 if let Some(v) = self.lower_vec_mut_method(recv, &method.node, args)? {
                     return Ok(v);
+                }
+                if method.node == "map_err" && args.len() == 1 {
+                    if let Some(v) = self.lower_result_map_err(e, recv, &args[0])? {
+                        return Ok(v);
+                    }
                 }
                 // `opt.take()` on an `Option<T>` local: the value, leaving `None` behind.
                 if method.node == "take" && args.is_empty() {

@@ -3002,6 +3002,12 @@ impl TypeChecker {
             {
                 return Ty::Apply("Option".into(), vec![deref_item(targs[0].clone())]);
             }
+            // `Result<T, E>::map_err(|e| body)` keeps the success type and maps the error.
+            if n == "Result" && targs.len() == 2 && args.len() == 1 && method.node == "map_err" {
+                let err = targs[1].clone();
+                let mapped = self.closure_result(&args[0], &err);
+                return Ty::Apply("Result".into(), vec![targs[0].clone(), mapped]);
+            }
             // `Option<T>::map(|x| body)` binds `x` to the payload and is `Option<body>`.
             if n == "Option" && targs.len() == 1 && args.len() == 1 && method.node == "map" {
                 let payload = targs[0].clone();

@@ -671,3 +671,42 @@ fn main() {
         assert_eq!(lines, vec!["true", "7", "2", "1", "false", "-1"]);
     }
 }
+
+/// `map_err` keeps the success type, so a `?` after it reads the fields of the success value,
+/// and an `Err` holds the mapped error.
+#[test]
+fn result_map_err_then_question_mark_runs() {
+    let src = r#"
+struct Unit {
+    n: i64,
+}
+
+fn make(ok: bool) -> Result<Unit, i64> {
+    if ok {
+        Ok(Unit { n: 7 })
+    } else {
+        Err(3)
+    }
+}
+
+fn run(ok: bool) -> Result<i64, i64> {
+    let u = make(ok).map_err(|e| e + 1)?;
+    Ok(u.n)
+}
+
+fn main() {
+    match run(true) {
+        Ok(v) => print_i64(v),
+        Err(e) => print_i64(e),
+    }
+    match run(false) {
+        Ok(v) => print_i64(v),
+        Err(e) => print_i64(e),
+    }
+}
+"#;
+    if let Some(out) = check_and_run("result_map_err", src) {
+        let lines: Vec<&str> = out.lines().filter(|l| !l.is_empty()).collect();
+        assert_eq!(lines, vec!["7", "4"]);
+    }
+}
