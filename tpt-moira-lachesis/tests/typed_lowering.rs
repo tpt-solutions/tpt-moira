@@ -825,3 +825,31 @@ fn main() {
         assert_eq!(lines, vec!["6", "-1"]);
     }
 }
+
+/// `Option::and_then` and `Option::filter` take a closure over the payload, and `or_else`
+/// takes a closure that returns an option of the same type.
+#[test]
+fn option_and_then_filter_or_else_run() {
+    let src = r#"
+fn half(x: i64) -> Option<i64> {
+    if x % 2 == 0 { Some(x / 2) } else { None }
+}
+
+fn main() {
+    let a: Option<i64> = Some(8);
+    let b: Option<i64> = Some(7);
+    let c: Option<i64> = None;
+    print_i64(a.and_then(|x| half(x)).unwrap_or(-1));
+    print_i64(b.and_then(|x| half(x)).unwrap_or(-1));
+    print_i64(c.and_then(|x| half(x)).unwrap_or(-1));
+    print_i64(a.filter(|x| *x > 5).unwrap_or(-2));
+    print_i64(a.filter(|x| *x > 50).unwrap_or(-2));
+    print_i64(c.or_else(|| None).unwrap_or(-3));
+    print_i64(b.or_else(|| Some(1)).unwrap_or(-3));
+}
+"#;
+    if let Some(out) = check_and_run("option_and_then", src) {
+        let lines: Vec<&str> = out.lines().filter(|l| !l.is_empty()).collect();
+        assert_eq!(lines, vec!["4", "-1", "-1", "8", "-2", "-3", "7"]);
+    }
+}

@@ -5533,6 +5533,193 @@ impl Lower {
         Ok(Some(mir::Operand::var(result)))
     }
 
+    /// Give a lifted closure the return type its caller expects. A closure is lowered before
+    /// its use, and a body with no hint of its own (a bare `None`) is typed as the default
+    /// `long long`; the caller knows the type, so the function's return type is set to it.
+    fn retype_closure(&mut self, name: &str, ty: &str) {
+        self.closure_rets.insert(name.to_string(), ty.to_string());
+        for f in self.closures.iter_mut() {
+            if f.name == name {
+                f.ret = Some(ty.to_string());
+                // The value returned is typed the same way (a bare `None` is not yet typed).
+                let returned: Vec<String> = f
+                    .blocks
+                    .iter()
+                    .filter_map(|b| match &b.term {
+                        mir::Terminator::Return(Some(mir::Operand::Var(v))) => Some(v.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                for v in returned {
+                    f.temp_types.insert(v, ty.to_string());
+                }
+            }
+        }
+    }
+
+    /// `opt.and_then(f)` and `opt.filter(f)` on a named `Option` value, the closure being
+    /// lifted. `and_then` yields `f(payload)` (an option) when `Some`; `filter` yields the
+    /// option itself when `f(&payload)` holds. `None` for other shapes.
+    fn lower_option_closure_method(
+        &mut self,
+        e: &Expr,
+        recv: &Expr,
+        method: &str,
+        closure: &Expr,
+    ) -> Result<Option<mir::Operand>> {
+        let recv_hint = self.hint_of_expr(recv);
+        let Some(("Option", targs)) = recv_hint.as_deref().and_then(mir::split_generic) else {
+            return Ok(None);
+        };
+        if targs.len() != 1 {
+            return Ok(None);
+        }
+        let payload = targs[0].to_string();
+        let Some(out_ty) = self.hint_of_expr(e) else {
+            return Ok(None);
+        };
+        let opt = self.lower_expr(recv)?;
+        let oname = match &opt {
+            mir::Operand::Var(n) => n.clone(),
+            _ => {
+                return Err(LowerError(format!(
+                    "`{method}` on an option needs a named value"
+                )))
+            }
+        };
+        let ptr = self.scrutinee_is_pointer(&opt);
+        let tag = self.fresh_temp("long long");
+        self.emit(
+            tag.clone(),
+            mir::Rvalue::Field(mir::Operand::var(oname.clone()), "tag".into(), ptr),
+        );
+        let is_some = self.fresh_temp("long long");
+        self.emit(
+            is_some.clone(),
+            mir::Rvalue::Binary(
+                mir::BinOp::Eq,
+                mir::Operand::var(tag),
+                mir::Operand::Const(0),
+            ),
+        );
+        let result = self.fresh_temp(out_ty.clone());
+        let some_blk = self.new_block();
+        let none_blk = self.new_block();
+        let join = self.new_block();
+        self.set_term(mir::Terminator::If(
+            mir::Operand::var(is_some),
+            some_blk,
+            none_blk,
+        ));
+
+        self.current = some_blk;
+        // The argument: the payload by value (`and_then`), or a pointer to it (`filter`).
+        let (arg_hint, arg) = if method == "filter" {
+            let addr = self.fresh_temp(format!("{payload}*"));
+            self.emit(
+                addr.clone(),
+                mir::Rvalue::FieldAddr(
+                    mir::Operand::var(oname.clone()),
+                    payload_field("Option", 0, 0),
+                    ptr,
+                ),
+            );
+            (format!("{payload}*"), mir::Operand::var(addr))
+        } else {
+            let v = self.fresh_temp(payload.clone());
+            self.emit(
+                v.clone(),
+                mir::Rvalue::Field(
+                    mir::Operand::var(oname.clone()),
+                    payload_field("Option", 0, 0),
+                    ptr,
+                ),
+            );
+            (payload.clone(), mir::Operand::var(v))
+        };
+        self.closure_param_hint = Some(vec![arg_hint]);
+        let callee = self.closure_callee(closure);
+        self.closure_param_hint = None;
+        let (f, caps) = callee?;
+        let mut call_args = caps;
+        call_args.push(arg.clone());
+        if method == "and_then" {
+            self.retype_closure(&f, &out_ty);
+            self.emit(
+                result.clone(),
+                mir::Rvalue::Call(mir::Operand::Func(f), call_args),
+            );
+        } else {
+            // `filter`: the test is the closure's `bool`; the `Some` side keeps the payload.
+            let keep = self.fresh_temp("long long");
+            self.emit(
+                keep.clone(),
+                mir::Rvalue::Call(mir::Operand::Func(f), call_args),
+            );
+            let keep_blk = self.new_block();
+            let drop_blk = self.new_block();
+            self.set_term(mir::Terminator::If(
+                mir::Operand::var(keep),
+                keep_blk,
+                drop_blk,
+            ));
+            self.current = keep_blk;
+            let value = self.fresh_temp(payload.clone());
+            self.emit(
+                value.clone(),
+                mir::Rvalue::Field(
+                    mir::Operand::var(oname.clone()),
+                    payload_field("Option", 0, 0),
+                    ptr,
+                ),
+            );
+            self.emit(
+                result.clone(),
+                mir::Rvalue::StructLit(
+                    "Option".to_string(),
+                    vec![
+                        ("tag".to_string(), mir::Operand::Const(0)),
+                        (payload_field("Option", 0, 0), mir::Operand::var(value)),
+                    ],
+                ),
+            );
+            self.set_term(mir::Terminator::Goto(join));
+            self.current = drop_blk;
+            self.emit(
+                result.clone(),
+                mir::Rvalue::StructLit(
+                    "Option".to_string(),
+                    vec![("tag".to_string(), mir::Operand::Const(1))],
+                ),
+            );
+            self.set_term(mir::Terminator::Goto(join));
+            self.current = none_blk;
+            self.emit(
+                result.clone(),
+                mir::Rvalue::StructLit(
+                    "Option".to_string(),
+                    vec![("tag".to_string(), mir::Operand::Const(1))],
+                ),
+            );
+            self.set_term(mir::Terminator::Goto(join));
+            self.current = join;
+            return Ok(Some(mir::Operand::var(result)));
+        }
+        self.set_term(mir::Terminator::Goto(join));
+
+        self.current = none_blk;
+        self.emit(
+            result.clone(),
+            mir::Rvalue::StructLit(
+                "Option".to_string(),
+                vec![("tag".to_string(), mir::Operand::Const(1))],
+            ),
+        );
+        self.set_term(mir::Terminator::Goto(join));
+        self.current = join;
+        Ok(Some(mir::Operand::var(result)))
+    }
+
     /// `res.map_err(|e| body)` on a `Result<T, E>` value: an `Ok` is copied, and an `Err`
     /// holds the closure's result. `None` unless both the receiver and the expression have
     /// `Result` types.
@@ -6650,6 +6837,9 @@ impl Lower {
                 let callee = self.closure_callee(f);
                 self.closure_param_hint = None;
                 let (lifted, caps) = callee?;
+                if method == "or_else" {
+                    self.retype_closure(&lifted, &hint);
+                }
                 let r = self.fresh_temp(if method == "or_else" {
                     hint.clone()
                 } else {
@@ -8839,6 +9029,11 @@ impl Lower {
                 }
                 if method.node == "retain" && args.len() == 1 {
                     if let Some(v) = self.lower_vec_retain(recv, &args[0])? {
+                        return Ok(v);
+                    }
+                }
+                if matches!(method.node.as_str(), "and_then" | "filter") && args.len() == 1 {
+                    if let Some(v) = self.lower_option_closure_method(e, recv, &method.node, &args[0])? {
                         return Ok(v);
                     }
                 }
