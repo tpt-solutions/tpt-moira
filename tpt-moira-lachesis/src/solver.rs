@@ -306,9 +306,16 @@ pub fn implements_rule(t: TraitId, ty: &Ty) -> bool {
     let numeric = ty.is_numeric();
     match t {
         TraitId::Add | TraitId::Sub | TraitId::Mul | TraitId::Div | TraitId::Rem => numeric,
-        TraitId::BitAnd | TraitId::BitOr | TraitId::BitXor => ty.is_integer(),
+        TraitId::BitAnd | TraitId::BitOr | TraitId::BitXor => {
+            ty.is_integer() || matches!(ty, Ty::Bool)
+        }
         TraitId::Shl | TraitId::Shr => ty.is_integer(),
-        TraitId::Eq => numeric || matches!(ty, Ty::Bool | Ty::Char | Ty::Str),
+        TraitId::Eq => {
+            numeric
+                || matches!(ty, Ty::Bool | Ty::Char | Ty::Str)
+                || matches!(ty, Ty::Array(e, _) if implements_rule(TraitId::Eq, e))
+                || matches!(ty, Ty::Apply(n, a) if n == "Vec" && a.len() == 1 && implements_rule(TraitId::Eq, &a[0]))
+        }
         TraitId::Ord => numeric || matches!(ty, Ty::Bool | Ty::Char),
         // User-defined traits are not producible by this rule; the solver uses
         // the user's `impl` clauses instead.

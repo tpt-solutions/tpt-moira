@@ -108,9 +108,19 @@ impl TraitDb {
                 // Floats and all integers implement the arithmetic traits.
                 numeric
             }
-            BuiltinTrait::BitAnd | BuiltinTrait::BitOr | BuiltinTrait::BitXor => ty.is_integer(),
+            // `bool` is a logical operand of `&`, `|` and `^`.
+            BuiltinTrait::BitAnd | BuiltinTrait::BitOr | BuiltinTrait::BitXor => {
+                ty.is_integer() || matches!(ty, Ty::Bool)
+            }
             BuiltinTrait::Shl | BuiltinTrait::Shr => ty.is_integer(),
-            BuiltinTrait::Eq => numeric || matches!(ty, Ty::Bool | Ty::Char | Ty::Str),
+            // Sequences compare element-wise: an array or a vector of equatable elements is
+            // equatable (`Vec<&str> == ["a", "b"]`).
+            BuiltinTrait::Eq => {
+                numeric
+                    || matches!(ty, Ty::Bool | Ty::Char | Ty::Str)
+                    || matches!(ty, Ty::Array(e, _) if TraitDb::implements(BuiltinTrait::Eq, e))
+                    || matches!(ty, Ty::Apply(n, a) if n == "Vec" && a.len() == 1 && TraitDb::implements(BuiltinTrait::Eq, &a[0]))
+            }
             BuiltinTrait::Ord => numeric || matches!(ty, Ty::Bool | Ty::Char),
         }
     }

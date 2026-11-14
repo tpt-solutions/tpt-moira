@@ -2353,7 +2353,10 @@ impl TypeChecker {
         ) {
             let lt = self.infer_expr(l);
             let rt = peel_scalar_ref(self.infer_expr(r));
-            if !matches!(lt, Ty::Unknown) && !lt.is_numeric() {
+            // `&=`, `|=` and `^=` also apply to `bool`.
+            let logical = matches!(op, BinOp::BitAndAssign | BinOp::BitOrAssign | BinOp::BitXorAssign)
+                && matches!(lt, Ty::Bool);
+            if !matches!(lt, Ty::Unknown) && !lt.is_numeric() && !logical {
                 self.err(
                     span,
                     "compound assignment requires a numeric type".to_string(),
@@ -3370,6 +3373,8 @@ impl TypeChecker {
             if (n == "HashMap" || n == "BTreeMap") && targs.len() == 2 {
                 let v = targs[1].clone();
                 let result = match (method.node.as_str(), args.len()) {
+                    // `get`/`remove` give `Option<V>`. (Rust's `get` is `Option<&V>`; the lowering
+                    // of map lookups produces the value, so the checker keeps that shape.)
                     ("get" | "remove", 1) => Some(Ty::Apply("Option".to_string(), vec![v])),
                     ("insert", 2) => Some(Ty::Apply("Option".to_string(), vec![v])),
                     ("entry", 1) => Some(Ty::Apply(
@@ -4793,6 +4798,7 @@ impl TypeChecker {
             ("str", "replace", vec![Unknown, Unknown], Str),
             ("str", "replacen", vec![Unknown, Unknown, Unknown], Str),
             ("Vec", "join", vec![Unknown], Str),
+            ("slice", "join", vec![Unknown], Str),
             (
                 "str",
                 "find",
@@ -5220,6 +5226,14 @@ impl TypeChecker {
         if let Ty::Apply(n, args) = b {
             if n == "Box" && args.len() == 1 && !matches!(a, Ty::Apply(m, _) if m == "Box") {
                 return self.compatible(a, &args[0]);
+            }
+        }
+        // Deref coercion through a box: `&Box<T>` is accepted where `&T` is expected.
+        if let (Ty::Ref(ai) | Ty::RefMut(ai), Ty::Ref(bi) | Ty::RefMut(bi)) = (a, b) {
+            if let Ty::Apply(n, args) = &**ai {
+                if n == "Box" && args.len() == 1 && !matches!(**bi, Ty::Apply(ref m, _) if m == "Box") {
+                    return self.compatible(&args[0], bi);
+                }
             }
         }
         // Deref coercion: `&&T` (or `&mut &T`) is accepted where `&T` is expected.

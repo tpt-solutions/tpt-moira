@@ -751,3 +751,36 @@ fn impl_into_parameters_accept_convertible_arguments() {
                fn main2() -> usize { label(\"a\") + label(String::new()) }";
     assert!(type_ok(src));
 }
+
+#[test]
+fn std_sequence_equality_bool_bitops_and_box_refs_are_accepted() {
+    assert!(check(&parse(
+        "fn takes(e: &Expr) -> i64 { 1 }
+        struct Expr { v: i64 }
+        fn main() {
+            let segs: Vec<&str> = vec![\"String\", \"from\"];
+            let same = segs == [\"String\", \"from\"];
+            let mut flag = false;
+            flag |= same;
+            let b: Box<Expr> = Box::new(Expr { v: 1 });
+            let n = takes(&b);
+            let _ = flag & same;
+        }"
+    ))
+    .is_ok());
+}
+
+#[test]
+fn pattern_bindings_through_a_reference_are_references() {
+    assert!(check(&parse(
+        "enum E { A(i64), B }
+        fn f(e: &E) -> i64 {
+            match e {
+                E::A(v) => *v,
+                E::B => 0,
+            }
+        }
+        fn main() { let _ = f(&E::B); }"
+    ))
+    .is_ok());
+}
