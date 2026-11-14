@@ -720,8 +720,13 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
             `Vec::{is_empty, truncate, pop}` lowered in place (`lower_vec_mut_method`), `Vec::pop`
             typed as `Option<T>` in the checker. Clotho 608 -> 592, atropos 1312 -> 1310,
             lachesis 1784 -> 1779, driver 272 -> 270. Test: `typed_lowering.rs::vec_pop_truncate_and_is_empty_run`.
-            Next: the checker types for iterator adapters (`map`, `iter`, `collect`) so their
-            results have hints, then the hinted-but-unlowered list above, most frequent first.
+            Correction (2026-11-14): the checker already types iterators (`Ty::Apply("Iter", [item])`,
+            `check_iter_method`); the unhinted `map` calls are receivers the checker types as
+            `Iter` whose hint is absent (`hint_of_ty` has no arm for `Iter`), and chains that
+            the lowering does not lower outside `for` loops and `collect` into a `Vec`/map. Some
+            pass a function item (`args.iter().map(map)` in alias.rs), which the lowering does not
+            accept as a closure. Next: lower iterator chains as a whole (a source, then adapters,
+            then a terminal), and accept a function item as an adapter argument.
             (2) atropos and lachesis: the 152 and 114 remaining checker errors are the
             std-library surface (`PathBuf`/`Path` methods, `AtomicUsize`, `Formatter`,
             `str::from_utf8`, `String::replace`, `read_to_string`) and `Item`/`&Item`
