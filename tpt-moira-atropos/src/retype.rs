@@ -140,6 +140,8 @@ fn infer(
         Rvalue::Ref(op, _) => operand_type(op, types).map(|t| format!("{t}*")),
         Rvalue::Cast(_, ty) => Some(ty.clone()),
         Rvalue::StructLit(name, _) => fields.contains_key(name).then(|| name.clone()),
+        // A tuple literal is its generated struct.
+        Rvalue::Tuple(ty, _) => Some(ty.clone()),
         _ => None,
     }
 }

@@ -840,6 +840,12 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
             four of the new errors name the new functions, the rest come from their `while`
             loops and `Option` handling. Next: clotho's C kinds, led by `Option` initialisers
             (16), subscripted non-arrays (14), and `ExprKind` assigned from `int` (13).
+            **Retype: tuple temporaries (2026-11-14).** `retype.rs` now types a tuple literal's
+            temporary as its generated struct. Clotho's own C count did not move (412): the
+            failing initialisers in `parse_rep_tmpl` are the tuple's fields `.f2 = kind`, where
+            the local `kind` is declared `long long` although it holds a `RepKind` (a `match`
+            binding that got the default type). That is a lowering typing gap for pattern
+            locals, the next thing to fix there.
  each crate uses the std
             surface and the typed-temporary lowering broadly, and each new feature also adds
             its own source to the probe. The route that worked for the four checker-side
