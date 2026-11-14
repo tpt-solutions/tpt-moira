@@ -106,25 +106,14 @@ fn strip_generic_items(program: &Program) -> Program {
                     ItemKind::Function(f) => f.generics.params.is_empty(),
                     _ => true,
                 });
-                items.push(ast::Item {
-                    kind: ItemKind::Impl(imp),
-                    ..item.clone()
-                });
+                let mut kept = item.clone();
+                kept.kind = ItemKind::Impl(imp);
+                items.push(kept);
             }
             _ => items.push(item.clone()),
         }
     }
     Program { items }
-}
-
-thread_local! {
-    /// Set while the borrow checker lowers a program: an unknown callee is then emitted as
-    /// before (the type checker has already judged the program), instead of being an error.
-    static LENIENT_CALLS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-fn lenient_calls() -> bool {
-    LENIENT_CALLS.with(|c| c.get())
 }
 
 /// [`lower_program_with_enums`] for the borrow checker: a call that codegen cannot lower is not
@@ -134,10 +123,7 @@ pub fn lower_program_for_borrow_check(
     hints: &TypeHints,
     extra: &[&Program],
 ) -> Result<mir::MirProgram> {
-    LENIENT_CALLS.with(|c| c.set(true));
-    let r = lower_program_with_enums(program, hints, extra);
-    LENIENT_CALLS.with(|c| c.set(false));
-    r
+    lower_program_impl(program, hints, extra, true)
 }
 
 /// Lower `prog`, which may match on the enums of `extra` programs (other crates of a
@@ -147,6 +133,17 @@ pub fn lower_program_with_enums(
     program: &Program,
     hints: &TypeHints,
     extra: &[&Program],
+) -> Result<mir::MirProgram> {
+    lower_program_impl(program, hints, extra, false)
+}
+
+/// The lowering of a program; `lenient` is set for the borrow checker (see
+/// [`lower_program_for_borrow_check`]).
+fn lower_program_impl(
+    program: &Program,
+    hints: &TypeHints,
+    extra: &[&Program],
+    lenient: bool,
 ) -> Result<mir::MirProgram> {
     // Generic definitions are not code: their instances are (see `strip_generic_items`).
     let stripped = strip_generic_items(program);
@@ -454,6 +451,7 @@ pub fn lower_program_with_enums(
                     let mut g = f.clone();
                     g.name.node = format!("{ty}__{}", f.name.node);
                     let mut l = Lower::new(&known_structs, shared.clone());
+                    l.lenient_calls = lenient;
                     l.async_fns = async_names.clone();
                     l.all_fn_names = all_fn_names.clone();
                     l.const_values = const_values.clone();
@@ -493,6 +491,7 @@ pub fn lower_program_with_enums(
             ItemKind::Function(f) => {
                 if f.is_async {
                     let mut l = Lower::new(&known_structs, shared.clone());
+                    l.lenient_calls = lenient;
                     l.async_fns = async_names.clone();
                     l.all_fn_names = all_fn_names.clone();
                     l.const_values = const_values.clone();
@@ -515,6 +514,7 @@ pub fn lower_program_with_enums(
                     out.async_fns.push(ad.def);
                 } else {
                     let mut l = Lower::new(&known_structs, shared.clone());
+                    l.lenient_calls = lenient;
                     l.async_fns = async_names.clone();
                     l.all_fn_names = all_fn_names.clone();
                     l.const_values = const_values.clone();
@@ -1327,6 +1327,9 @@ struct Lower {
     /// Lengths of `let`-bound array literals (e.g. `let xs = [1, 2, 3];`), so a
     /// later `for x in xs { .. }` can iterate the known-length array.
     array_lens: HashMap<String, usize>,
+    /// Lowering for the borrow checker (see `lower_program_for_borrow_check`): an unknown callee
+    /// is emitted as before instead of being an error.
+    lenient_calls: bool,
     /// The C element type of each `let`-bound array literal (an enum for an array of
     /// variants, else `long long`), so a `for` over it binds elements of that type.
     array_elems: HashMap<String, String>,
@@ -1686,6 +1689,7 @@ impl Lower {
             types: HashMap::new(),
             loops: Vec::new(),
             array_lens: HashMap::new(),
+            lenient_calls: false,
             array_elems: HashMap::new(),
             const_values: HashMap::new(),
             variants: HashMap::new(),
@@ -2082,6 +2086,7 @@ impl Lower {
         // Build the lifted function in its own context, seeded with the enclosing
         // environment so nested closures and async names resolve.
         let mut sub = Lower::new(&self.structs, self.hints.clone());
+        sub.lenient_calls = self.lenient_calls;
         sub.async_fns = self.async_fns.clone();
         sub.all_fn_names = self.all_fn_names.clone();
         sub.aliases = self.aliases.clone();
@@ -2333,6 +2338,7 @@ impl Lower {
             leading.push((cap.clone(), cap_ty));
         }
         let mut l = Lower::new(&self.structs, self.hints.clone());
+        l.lenient_calls = self.lenient_calls;
         l.async_fns = self.async_fns.clone();
         l.all_fn_names = self.all_fn_names.clone();
         l.aliases = self.aliases.clone();
@@ -9351,7 +9357,7 @@ impl Lower {
                             // Not a function, a builtin, or a closure local: the callee is an
                             // undeclared C name. Name the construct instead of emitting it.
                             let var = self.var_name(&name);
-                            if !lenient_calls()
+                            if !self.lenient_calls
                                 && !self.types.contains_key(&var)
                                 && !self.func.locals.iter().any(|(l, _)| *l == var)
                             {
@@ -10198,7 +10204,7 @@ impl Lower {
                 // The fallback calls a function named after the method: only valid when such a
                 // function exists. Otherwise the receiver's type is one the lowering does not
                 // know, and the call would name an undeclared C function.
-                if !lenient_calls() && !self.all_fn_names.contains(&method.node) {
+                if !self.lenient_calls && !self.all_fn_names.contains(&method.node) {
                     return Err(LowerError(format!(
                         "method `{}` on a receiver whose type the codegen subset does not know yet",
                         method.node

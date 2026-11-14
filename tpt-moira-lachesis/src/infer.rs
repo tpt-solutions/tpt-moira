@@ -3469,6 +3469,14 @@ impl TypeChecker {
                 if args.is_empty() && method.node == "clone" {
                     return self.strip_refs(&recv_ty);
                 }
+                // `as_ref` / `borrow` / `deref` view the value through a reference (a box's
+                // contents, a shared pointer's value); `as_mut` through a mutable one.
+                if args.is_empty() && matches!(method.node.as_str(), "as_ref" | "borrow" | "deref") {
+                    return Ty::Ref(Box::new(self.strip_refs(&recv_ty)));
+                }
+                if args.is_empty() && method.node == "as_mut" {
+                    return Ty::RefMut(Box::new(self.strip_refs(&recv_ty)));
+                }
                 // A method on an unknown receiver is unknown too (the absorbing type).
                 if matches!(self.strip_refs(&recv_ty), Ty::Unknown) {
                     return Ty::Unknown;
