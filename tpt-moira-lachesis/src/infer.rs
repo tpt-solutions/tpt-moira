@@ -2509,6 +2509,17 @@ impl TypeChecker {
         };
         let segments: Vec<String> = path.segments.iter().map(|s| s.node.clone()).collect();
         let name = segments.last().cloned().unwrap_or_default();
+        // `std::mem::take(&mut place)` moves the place's current value out and leaves a
+        // default behind, so it has the place's type.
+        if args.len() == 1
+            && name == "take"
+            && segments.len() >= 2
+            && segments[segments.len() - 2] == "mem"
+        {
+            if let ExprKind::Ref(place, true) = &args[0].kind {
+                return self.infer_expr(place);
+            }
+        }
         // `HashMap::new()` (and the other collection constructors) take the collection the
         // context expects: the constructor's own type does not name its key and value types.
         if args.is_empty() && name == "new" && segments.len() == 2 {
@@ -5141,6 +5152,9 @@ impl TypeChecker {
                             || n == "Cow" && matches!(expected, Ty::Str)
                             || n == "PathBuf" && matches!(expected, Ty::Struct(p) if p == "Path")
                     }
+                    // `PathBuf` is modeled as `str` (see `prim`), so a `&PathBuf`
+                    // that the checker holds as `&str` coerces to `&Path` too.
+                    Ty::Str => matches!(expected, Ty::Struct(p) if p == "Path"),
                     _ => false,
                 },
                 _ => false,

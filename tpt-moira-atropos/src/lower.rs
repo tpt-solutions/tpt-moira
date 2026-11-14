@@ -7262,6 +7262,11 @@ impl Lower {
                 None => return Ok(None),
             }
         }
+        if segs[0] == "mem" && segs[1] == "take" && args.len() == 1 {
+            if let Some(v) = self.lower_mem_take(&args[0])? {
+                return Ok(Some(v));
+            }
+        }
         let Some((cname, _kind, ret)) = self
             .methods
             .get(&(segs[0].clone(), segs[1].clone()))
@@ -7282,6 +7287,58 @@ impl Lower {
         let t = self.fresh_temp(ret);
         self.emit(t.clone(), mir::Rvalue::Call(mir::Operand::Func(cname), ops));
         Ok(Some(mir::Operand::var(t)))
+    }
+
+    /// `std::mem::take(&mut place)` for a vector place: the place's value moves into
+    /// a fresh temporary and the place is left as an empty vector. Only a local or a
+    /// field of a vector type is handled; anything else returns `Ok(None)` so the
+    /// generic call path applies.
+    fn lower_mem_take(&mut self, arg: &Expr) -> Result<Option<mir::Operand>> {
+        let place = match &arg.kind {
+            ExprKind::Ref(place, true) => &**place,
+            _ => return Ok(None),
+        };
+        if !matches!(place.kind, ExprKind::Path(_) | ExprKind::Field(..)) {
+            return Ok(None);
+        }
+        let Some(hint) = self.hint_of_expr(place) else {
+            return Ok(None);
+        };
+        let Some(elem) = mir::vec_elem(&hint).map(|s| s.to_string()) else {
+            return Ok(None);
+        };
+        // Everything that can fail has run above, so no statement is emitted twice.
+        let old_src = self.lower_expr(place)?;
+        let old = self.fresh_temp(mir::vec_type(&elem));
+        self.emit(old.clone(), mir::Rvalue::Use(old_src));
+        let empty = self.fresh_temp(mir::vec_type(&elem));
+        self.emit(
+            empty.clone(),
+            mir::Rvalue::Call(mir::Operand::Func(mir::vec_fn_name(&elem, "new")), vec![]),
+        );
+        match &place.kind {
+            ExprKind::Path(_) => match self.lower_expr(place)? {
+                mir::Operand::Var(n) => self.emit(n, mir::Rvalue::Use(mir::Operand::var(empty))),
+                _ => return Err(LowerError("mem::take target must be a variable".into())),
+            },
+            ExprKind::Field(base, field) => {
+                let b = self.lower_expr(base)?;
+                let deref = match &b {
+                    mir::Operand::Var(n) => self.temp_type_of(n).ends_with('*'),
+                    _ => false,
+                };
+                let fname = match field.node.parse::<usize>() {
+                    Ok(i) => format!("f{i}"),
+                    Err(_) => field.node.clone(),
+                };
+                self.emit(
+                    "__scratch".to_string(),
+                    mir::Rvalue::StoreField(b, fname, mir::Operand::var(empty), deref),
+                );
+            }
+            _ => {}
+        }
+        Ok(Some(mir::Operand::var(old)))
     }
 
     fn lower_enum_method(
