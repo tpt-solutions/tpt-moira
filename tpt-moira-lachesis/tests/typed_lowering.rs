@@ -1243,3 +1243,27 @@ fn main() {
         assert_eq!(lines, vec!["5", "0", "100"]);
     }
 }
+
+/// `Vec::new()` as an enum variant's payload takes the payload's declared type, so it is
+/// the vector the variant holds (not an untyped constructor call).
+#[test]
+fn variant_payload_constructor_takes_declared_type_runs() {
+    let src = r#"
+enum K {
+    P(Vec<i64>, i64),
+    Q,
+}
+fn build() -> K {
+    K::P(Vec::new(), 3)
+}
+fn main() {
+    match build() {
+        K::P(v, n) => print_i64(v.len() as i64 + n),
+        K::Q => print_i64(0),
+    }
+}
+"#;
+    if let Some(out) = check_and_run("variant_vec_payload", src) {
+        assert_eq!(out.trim(), "3");
+    }
+}

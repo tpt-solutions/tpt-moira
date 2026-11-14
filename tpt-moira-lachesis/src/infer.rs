@@ -187,6 +187,19 @@ fn has_unknown(t: &Ty) -> bool {
     }
 }
 
+/// Whether a type still names a generic parameter (so it cannot be an expectation yet).
+fn has_generic(t: &Ty) -> bool {
+    match t {
+        Ty::Generic(_) => true,
+        Ty::Apply(_, args) | Ty::Tuple(args) => args.iter().any(has_generic),
+        Ty::Ref(inner) | Ty::RefMut(inner) | Ty::Array(inner, _) | Ty::Future(inner) => {
+            has_generic(inner)
+        }
+        Ty::Fn(params, ret) => params.iter().any(has_generic) || has_generic(ret),
+        _ => false,
+    }
+}
+
 fn merge_struct_fields(
     cx: &mut TypeChecker,
     name: &str,
@@ -1000,8 +1013,31 @@ impl TypeChecker {
                     // Tuple variants (`Some(T)`) are constructor functions:
                     // register `Variant(..) -> Enum` (bare and qualified).
                     let ret = cx.type_to_ty(&enum_ty);
+                    // The payload's declared types are the parameters, so an argument such as
+                    // `Vec::new()` takes its expected type; a generic payload stays open.
+                    let params: Vec<Ty> = fields
+                        .iter()
+                        .map(|f| {
+                            let t = cx.type_to_ty(&f.ty);
+                            // A user generic struct instance is named differently at a
+                            // constructor (`Spanned__String`): only the standard collections
+                            // and plain types are taken as they are.
+                            let standard = match &t {
+                                Ty::Apply(n, _) => matches!(
+                                    n.as_str(),
+                                    "Vec" | "Option" | "Result" | "HashMap" | "HashSet" | "Box"
+                                ),
+                                _ => true,
+                            };
+                            if has_generic(&t) || has_unknown(&t) || !standard {
+                                Ty::Unknown
+                            } else {
+                                t
+                            }
+                        })
+                        .collect();
                     let sig = FnSig {
-                        params: vec![Ty::Unknown; fields.len()],
+                        params,
                         ret,
                         is_async: false,
                         generics: Generics::default(),
@@ -2573,7 +2609,13 @@ impl TypeChecker {
                         self.closure_expected = Some(ps.clone());
                     }
                 }
+                // A call argument takes its parameter's type as its expectation (`Vec::new()`
+                // passed as a `Vec<Type>` parameter), when that type is already concrete.
+                if matches!(a.kind, ExprKind::Call(..)) && !has_generic(pt) {
+                    self.expected_call_ty = Some(pt.clone());
+                }
                 let at = self.infer_expr(a);
+                self.expected_call_ty = None;
                 self.closure_expected = None;
                 if !self.unify_ty(pt, &at, &mut sub) {
                     self.err(

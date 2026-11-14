@@ -892,6 +892,13 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
             (`closure_param_hint` at the call's arguments). An `Option<i64>` parameter was typed
             as the bare `struct Option` before. Test: `closure_argument_takes_fn_parameter_types_runs`.
             Clotho's C count is unchanged (322): none of its closure arguments reach this case.
+            **Call arguments and variant payloads (2026-11-14).** A call argument that is a call
+            (`Vec::new()`) takes its parameter's concrete type as expectation (`has_generic`
+            keeps generic parameters open). A tuple variant's constructor takes its declared
+            payload types as parameters, except generic ones and user generic struct instances
+            (they are named differently at a constructor, `Spanned__String`, so they stay open).
+            Test: `variant_payload_constructor_takes_declared_type_runs`. Own C: clotho 322 -> 305;
+            lachesis checker 89 (unchanged).
             **Note:** `tpt-moira-lachesis/src/infer.rs` was edited by another process during this
             session (a `is_int_ty` helper and a body-tail change appeared and were removed
             again). The committed change is only the hunks listed above; that edit was not kept.
