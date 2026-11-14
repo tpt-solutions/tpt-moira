@@ -1444,9 +1444,10 @@ impl TypeChecker {
             }
             Pat::Wild => {}
             // `&pat` matches through one reference: the inner pattern binds the referent.
+            // On a value, `ref x` (which the parser also models as `&x`) binds a reference to it.
             Pat::Ref(inner) => match scrut_ty {
                 Ty::Ref(t) | Ty::RefMut(t) => self.bind_pattern(inner, &(**t).clone()),
-                other => self.bind_pattern(inner, other),
+                other => self.bind_pattern(inner, &Ty::Ref(Box::new(other.clone()))),
             },
             Pat::Or(a, b) => {
                 self.bind_pattern(a, scrut_ty);
@@ -3878,8 +3879,9 @@ impl TypeChecker {
             ("rev", 0) => Some(iter_of(item)),
             ("cloned" | "copied", 0) => Some(iter_of(deref_item(item))),
             ("map", 1) => Some(iter_of(self.closure_result(&args[0], &item))),
+            // `filter` and `find` pass their predicate a reference to the item.
             ("filter", 1) => {
-                self.closure_result(&args[0], &item);
+                self.closure_result(&args[0], &Ty::Ref(Box::new(item.clone())));
                 Some(iter_of(item))
             }
             ("any" | "all", 1) => {
@@ -3887,7 +3889,7 @@ impl TypeChecker {
                 Some(Ty::Bool)
             }
             ("find", 1) => {
-                self.closure_result(&args[0], &item);
+                self.closure_result(&args[0], &Ty::Ref(Box::new(item.clone())));
                 Some(Ty::Apply("Option".to_string(), vec![item]))
             }
             // `max` / `min` / `last` give the element by value (the lowering copies it), so the
@@ -3917,7 +3919,11 @@ impl TypeChecker {
             // `zip(other)` pairs the items of both iterators.
             ("zip", 1) => {
                 let other = self.infer_expr(&args[0]);
-                let other_item = self.item_of(args[0].span, &other);
+                let mut other_item = self.item_of(args[0].span, &other);
+                // Zipping with a reference (`zip(&v)`) yields references to the elements.
+                if matches!(other, Ty::Ref(_) | Ty::RefMut(_)) && !matches!(other_item, Ty::Unknown) {
+                    other_item = Ty::Ref(Box::new(other_item));
+                }
                 Some(iter_of(Ty::Tuple(vec![item, other_item])))
             }
             ("chain", 1) => {
