@@ -502,7 +502,9 @@ impl<'src> Lexer<'src> {
                     Some(other) => s.push(other as char),
                     None => break,
                 },
-                Some(other) => s.push(other as char),
+                // A non-ASCII character is several bytes: decode the whole sequence.
+                Some(other) if other < 0x80 => s.push(other as char),
+                Some(other) => s.push(self.finish_utf8(other)),
             }
         }
         TokenKind::Str(s)
@@ -568,30 +570,30 @@ impl<'src> Lexer<'src> {
         // point decodes directly from its bytes. The bytes are read in order, and only
         // as many as the sequence has (written without iterator adapters or slices, so
         // the Stage-1 subset can lower it).
-        let buf = match len {
-            2 => [first, self.bump().unwrap_or(0), 0, 0],
-            3 => {
-                let b1 = self.bump().unwrap_or(0);
-                [first, b1, self.bump().unwrap_or(0), 0]
-            }
-            _ => {
-                let b1 = self.bump().unwrap_or(0);
-                let b2 = self.bump().unwrap_or(0);
-                [first, b1, b2, self.bump().unwrap_or(0)]
-            }
+        // The continuation bytes are read in order, each only when the sequence has it.
+        let b1 = if len >= 2 {
+            self.bump().unwrap_or(0)
+        } else {
+            0
+        };
+        let b2 = if len >= 3 {
+            self.bump().unwrap_or(0)
+        } else {
+            0
+        };
+        let b3 = if len >= 4 {
+            self.bump().unwrap_or(0)
+        } else {
+            0
         };
         let code: u32 = match len {
-            2 => ((buf[0] as u32 & 0x1F) << 6) | (buf[1] as u32 & 0x3F),
-            3 => {
-                ((buf[0] as u32 & 0x0F) << 12)
-                    | ((buf[1] as u32 & 0x3F) << 6)
-                    | (buf[2] as u32 & 0x3F)
-            }
+            2 => ((first as u32 & 0x1F) << 6) | (b1 as u32 & 0x3F),
+            3 => ((first as u32 & 0x0F) << 12) | ((b1 as u32 & 0x3F) << 6) | (b2 as u32 & 0x3F),
             _ => {
-                ((buf[0] as u32 & 0x07) << 18)
-                    | ((buf[1] as u32 & 0x3F) << 12)
-                    | ((buf[2] as u32 & 0x3F) << 6)
-                    | (buf[3] as u32 & 0x3F)
+                ((first as u32 & 0x07) << 18)
+                    | ((b1 as u32 & 0x3F) << 12)
+                    | ((b2 as u32 & 0x3F) << 6)
+                    | (b3 as u32 & 0x3F)
             }
         };
         char::from_u32(code).unwrap_or('\u{FFFD}')
@@ -797,4 +799,23 @@ pub fn tokenize(src: &str) -> Vec<Token> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod utf8_tests {
+    use super::*;
+
+    /// Two-, three- and four-byte characters decode to themselves inside a string literal.
+    #[test]
+    fn multi_byte_characters_in_string_literals_decode() {
+        let toks = tokenize("\"a\u{e9}\u{20ac}\u{1F600}z\"");
+        let strs: Vec<String> = toks
+            .iter()
+            .filter_map(|t| match &t.kind {
+                TokenKind::Str(s) => Some(s.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(strs, vec!["a\u{e9}\u{20ac}\u{1F600}z".to_string()]);
+    }
 }

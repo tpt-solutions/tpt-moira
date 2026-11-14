@@ -860,6 +860,11 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
             struct (`ExprKind`). `arm_diverges` now looks through a block's tail or last
             statement, as the direct `return`/`break`/`continue` check already did. Test:
             `match_arm_block_that_returns_yields_no_value_runs`. Own C: clotho 399 -> 380.
+            **Lexer: UTF-8 (2026-11-14).** `finish_utf8` reads its continuation bytes into
+            scalars (an array in a `match` arm is not lowered as an array, which broke the
+            `buf[..]` subscripts): clotho C 380 -> 368. Also a real bug: a normal string literal
+            appended each byte as a `char`, so `"é"` lexed as two characters; it now decodes
+            the sequence (`lex_string`). Test: `multi_byte_characters_in_string_literals_decode`.
  each crate uses the std
             surface and the typed-temporary lowering broadly, and each new feature also adds
             its own source to the probe. The route that worked for the four checker-side
