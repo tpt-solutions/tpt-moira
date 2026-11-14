@@ -733,6 +733,17 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
             `trim_end`, `to_string` on an unknown receiver); slice/iterator methods (`zip`,
             `split_last`, `to_vec`, `values`, `with_capacity`); `saturating_*` (typed, not
             lowered). The driver's `spawn`/`scope` need thread support in the subset.
+            **Option combinators (2026-11-14, later).** Lowered: `unwrap_or_default`, `Result::ok`,
+            `Option::ok_or_else`, `Option::take` (local or field), `bool::then_some`. Commits
+            ae83088 and 6bf7a21. Counts (own / extern): clotho 503 / 0; atropos 1379 / 481;
+            lachesis 1383 / 2014; driver 222 / 3182. Still open: the literal in `|| 4` gets the
+            checker's default `i32` even where the context says `i64` (`ok_or_else(|| 4)` against
+            `Result<i64, i64>` mismatches in C); the checker should take the expected type of a
+            closure's result from the context.
+            Remaining families: string methods (`split`, `split_at`, `starts_with`,
+            `strip_suffix`, `trim_end_matches`); slice and iterator methods (`zip`, `split_last`,
+            `to_vec`, `values`, `with_capacity`); `saturating_*`; and receivers that have no
+            checker type (chained calls the checker leaves `Unknown`).
             These numbers are not comparable with the earlier per-crate ones: the bundled unit
             now type-checks the extern types, so errors that were hidden behind `unknown type
             name 'Expr'` appear. The largest own group is `request for member ... not a
