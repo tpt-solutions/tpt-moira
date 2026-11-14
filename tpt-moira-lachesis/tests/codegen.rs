@@ -1544,3 +1544,23 @@ fn to_vec_of_vec_and_slice_runs() {
     };
     assert_eq!(out, "8", "`to_vec` copies a vector and a slice");
 }
+
+#[test]
+fn local_closure_shadows_same_named_function_and_runs() {
+    let out = match run_src(
+        "fn visit(a: i64, b: i64) -> i64 {
+            a + b
+        }
+        fn main() {
+            let visit = |x: i64| x * 10;
+            print_i64(visit(4));
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping shadowing run");
+            return;
+        }
+    };
+    assert_eq!(out, "40", "a local binding shadows a function of the same name");
+}

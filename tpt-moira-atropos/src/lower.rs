@@ -9325,7 +9325,11 @@ impl Lower {
                         // A name that is not a known top-level function is an indirect call
                         // through a function-pointer local (a closure value); everything
                         // else is a direct call to a top-level function.
-                        let op = if self.all_fn_names.contains(&name) {
+                        // A local (a closure or a parameter) shadows a function of the same name.
+                        let local_name = self.var_name(&name);
+                        let is_local = self.types.contains_key(&local_name)
+                            || self.func.locals.iter().any(|(l, _)| *l == local_name);
+                        let op = if self.all_fn_names.contains(&name) && !is_local {
                             mir::Operand::Func(callee_name)
                         } else if matches!(
                             name.as_str(),

@@ -2624,7 +2624,10 @@ impl TypeChecker {
             let t = self.infer_expr(&args[0]);
             return Ty::Apply("Box".to_string(), vec![t]);
         }
-        let sig = match self.resolve_call(&segments, span) {
+        // A local binding (a closure, or a parameter of a function type) shadows a function of the
+        // same name (Rust's scoping): the call goes through the local.
+        let local_fn = segments.len() == 1 && self.lookup(&name).is_some();
+        let sig = match if local_fn { None } else { self.resolve_call(&segments, span) } {
             Some(s) => s,
             None => {
                 // A closure or function-typed local (`f(x)` for `f: impl Fn(..)`) is
@@ -4779,6 +4782,17 @@ impl TypeChecker {
                 vec![U32],
                 Apply("Option".into(), vec![U32]),
             ),
+            // Further std methods the self-host sources use. Results whose type needs a
+            // generic or an iterator item type are `Unknown`, which the checker absorbs.
+            ("str", "trim_start_matches", vec![Unknown], Str),
+            ("str", "trim_end_matches", vec![Unknown], Str),
+            ("str", "split", vec![Unknown], Apply("Iter".into(), vec![Str])),
+            ("str", "split_whitespace", vec![], Apply("Iter".into(), vec![Str])),
+            ("str", "char_indices", vec![], Apply("Iter".into(), vec![Unknown])),
+            ("str", "split_at", vec![Usize], Unknown),
+            ("str", "parse", vec![], Unknown),
+            ("String", "clear", vec![], Unit),
+            ("String", "split_at", vec![Usize], Unknown),
         ] {
             // A `String` has the same methods as its `str`.
             for r in [recv, "String"] {
@@ -4786,6 +4800,21 @@ impl TypeChecker {
                     .entry((r.to_string(), m.to_string()))
                     .or_insert_with(|| sig(params.clone(), ret.clone()));
             }
+        }
+
+        for (recv, m, params, ret) in [
+            ("f64", "is_nan", vec![], Bool),
+            ("f64", "is_infinite", vec![], Bool),
+            ("f64", "to_bits", vec![], U64),
+            ("Option", "or", vec![Unknown], Unknown),
+            ("Vec", "sort_by", vec![Unknown], Unit),
+            ("Vec", "sort_by_key", vec![Unknown], Unit),
+            ("BTreeSet", "contains", vec![Unknown], Bool),
+            ("Arc", "get", vec![Unknown], Unknown),
+        ] {
+            self.methods
+                .entry((recv.to_string(), m.to_string()))
+                .or_insert_with(|| sig(params.clone(), ret.clone()));
         }
 
         // ASCII-byte methods on `u8` (a byte is the same C value as an ASCII `char`).
