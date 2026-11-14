@@ -887,9 +887,11 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
             `name @` patterns, so a name bound by `Slot::Val(v)` inside a closure body was taken
             for a capture of an outer `v`. Test: `pattern_bound_name_in_closure_body_is_not_a_capture_runs`
             (fails without the fix). Own C: clotho 339 -> 322.
-            **Open:** a closure passed as an argument does not get the callee's `Fn` parameter
-            types (`struct Option` for an `impl Fn(Option<i64>)`), so such a closure's parameters
-            are typed as the bare enum.
+            **Closure arguments take the `Fn` parameter types (2026-11-14).** A closure passed to
+            a user function takes the parameter types of the callee's `impl Fn(..)` parameter
+            (`closure_param_hint` at the call's arguments). An `Option<i64>` parameter was typed
+            as the bare `struct Option` before. Test: `closure_argument_takes_fn_parameter_types_runs`.
+            Clotho's C count is unchanged (322): none of its closure arguments reach this case.
             **Note:** `tpt-moira-lachesis/src/infer.rs` was edited by another process during this
             session (a `is_int_ty` helper and a body-tail change appeared and were removed
             again). The committed change is only the hunks listed above; that edit was not kept.

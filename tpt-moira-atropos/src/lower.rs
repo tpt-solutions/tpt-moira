@@ -9040,8 +9040,19 @@ impl Lower {
                     _ => None,
                 };
                 for a in args {
+                    // A closure argument takes the parameter types of the callee's `Fn` parameter.
+                    let pt_hint = param_tys.as_ref().and_then(|p| p.get(operands.len())).cloned();
+                    if let (ExprKind::Closure { .. }, Some(pt)) = (&a.kind, &pt_hint) {
+                        if let Some(("Fn", parts)) = mir::split_generic(pt) {
+                            if let Some((_, closure_params)) = parts.split_last() {
+                                self.closure_param_hint =
+                                    Some(closure_params.iter().map(|s| s.to_string()).collect());
+                            }
+                        }
+                    }
                     let v = self.lower_expr(a)?;
-                    let pt = param_tys.as_ref().and_then(|p| p.get(operands.len())).cloned();
+                    self.closure_param_hint = None;
+                    let pt = pt_hint;
                     let v = match pt {
                         Some(pt) => self.adapt_arg(v, &pt),
                         None => v,

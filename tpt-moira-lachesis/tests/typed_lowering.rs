@@ -1216,3 +1216,30 @@ fn main() {
         assert_eq!(lines, vec!["5", "100"]);
     }
 }
+
+/// A closure argument takes the payload type of its `Fn` parameter: an `Option<i64>` argument
+/// is matched as an option of `i64`, and its pattern's `v` is the closure's own.
+#[test]
+fn closure_argument_takes_fn_parameter_types_runs() {
+    let src = r#"
+fn apply(f: impl Fn(Option<i64>) -> i64, v: Option<i64>) -> i64 {
+    f(v)
+}
+fn main() {
+    let v: i64 = 100;
+    print_i64(apply(|o| match o {
+        Some(v) => v + 1,
+        None => 0,
+    }, Some(4)));
+    print_i64(apply(|o| match o {
+        Some(v) => v + 1,
+        None => 0,
+    }, None));
+    print_i64(v);
+}
+"#;
+    if let Some(out) = check_and_run("closure_option_arg", src) {
+        let lines: Vec<&str> = out.lines().filter(|l| !l.is_empty()).collect();
+        assert_eq!(lines, vec!["5", "0", "100"]);
+    }
+}
