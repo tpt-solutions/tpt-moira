@@ -853,3 +853,23 @@ fn main() {
         assert_eq!(lines, vec!["4", "-1", "-1", "8", "-2", "-3", "7"]);
     }
 }
+
+/// An unsuffixed literal in a closure passed to `ok_or_else` takes the type of the annotated
+/// result (`i64`), not the default `i32`.
+#[test]
+fn unsuffixed_literal_in_closure_takes_the_annotated_type() {
+    let src = r#"
+fn main() {
+    let none: Option<i64> = None;
+    let some: Option<i64> = Some(9);
+    let e: Result<i64, i64> = none.ok_or_else(|| 4);
+    let f: Result<i64, i64> = some.ok_or_else(|| 4);
+    print_i64(e.unwrap_or(-2));
+    print_i64(f.unwrap_or(-2));
+}
+"#;
+    if let Some(out) = check_and_run("closure_literal", src) {
+        let lines: Vec<&str> = out.lines().filter(|l| !l.is_empty()).collect();
+        assert_eq!(lines, vec!["-2", "9"]);
+    }
+}

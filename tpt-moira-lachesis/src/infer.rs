@@ -1189,6 +1189,7 @@ impl TypeChecker {
                             self.expected_call_ty = None;
                             let span = init.span;
                             self.expect(&it, &ann_ty, span);
+                            self.refine_closure_result(init, &ann_ty);
                         }
                         ann_ty
                     } else if let Some(init) = &l.init {
@@ -1610,6 +1611,33 @@ impl TypeChecker {
         };
         self.env.pop();
         Ty::Fn(param_tys, Box::new(ret_ty))
+    }
+
+    /// An unsuffixed literal that is the result of a closure passed to `ok_or_else`,
+    /// `or_else` or `and_then` takes the type the annotation of the whole call gives it: in
+    /// `let e: Result<i64, i64> = b.ok_or_else(|| 4)` the literal is an `i64`, not the default
+    /// `i32`. Only a closure body the checker typed as the default integer is refined.
+    fn refine_closure_result(&mut self, init: &Expr, ann: &Ty) {
+        let ExprKind::MethodCall(_, method, args) = &init.kind else {
+            return;
+        };
+        if args.len() != 1 {
+            return;
+        }
+        let ExprKind::Closure { body, .. } = &args[0].kind else {
+            return;
+        };
+        let target = match (method.node.as_str(), ann) {
+            ("ok_or_else", Ty::Apply(n, a)) if n == "Result" && a.len() == 2 => a[1].clone(),
+            ("or_else" | "and_then", Ty::Apply(n, _)) if n == "Option" => ann.clone(),
+            _ => return,
+        };
+        let key = (body.span.start, body.span.end);
+        if self.expr_types.get(&key) == Some(&Ty::Int) {
+            self.expr_types.insert(key, target.clone());
+            self.expr_types
+                .insert((args[0].span.start, args[0].span.end), target);
+        }
     }
 
     /// Type-check the `?` operator: `e?` where `e` is a `Result`/`Option` (or any
