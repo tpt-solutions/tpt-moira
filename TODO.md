@@ -877,6 +877,19 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
             `closure_literal_passed_by_mut_reference_runs`. Own C: clotho 360 -> 339. Next kind:
             `visit_expr` argument types (6+6+6), which are the closure parameter types of its
             callers, and `struct Option` initialisers (9).
+            **Capturing closures were wrong under Moira (2026-11-14).** `mentions_any` and
+            `rename_safe` set a captured flag inside a `visit_expr` callback. A capture is passed
+            by value, so the flag never reached the caller: both results were wrong once compiled
+            by Moira (`rename_safe` always true). The walk now threads its state explicitly:
+            `visit_expr_with`/`visit_block_with` pass `&mut S` to every callback, and the two
+            callers keep their flags there (`MentionScan` holds the names too). Also a real
+            capture-analysis bug: `bind_pat_names_in` ignored variant, reference, or-, struct and
+            `name @` patterns, so a name bound by `Slot::Val(v)` inside a closure body was taken
+            for a capture of an outer `v`. Test: `pattern_bound_name_in_closure_body_is_not_a_capture_runs`
+            (fails without the fix). Own C: clotho 339 -> 322.
+            **Open:** a closure passed as an argument does not get the callee's `Fn` parameter
+            types (`struct Option` for an `impl Fn(Option<i64>)`), so such a closure's parameters
+            are typed as the bare enum.
             **Note:** `tpt-moira-lachesis/src/infer.rs` was edited by another process during this
             session (a `is_int_ty` helper and a body-tail change appeared and were removed
             again). The committed change is only the hunks listed above; that edit was not kept.

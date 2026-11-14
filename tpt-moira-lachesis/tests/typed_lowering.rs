@@ -1189,3 +1189,30 @@ fn main() {
         assert_eq!(out.trim(), "5");
     }
 }
+
+/// A name bound by a pattern inside a closure body is the closure's own, not a capture of
+/// an outer variable of the same name.
+#[test]
+fn pattern_bound_name_in_closure_body_is_not_a_capture_runs() {
+    let src = r#"
+enum Slot {
+    Val(i64),
+    Empty,
+}
+fn apply(f: impl Fn(Slot) -> i64, v: Slot) -> i64 {
+    f(v)
+}
+fn main() {
+    let v: i64 = 100;
+    print_i64(apply(|o| match o {
+        Slot::Val(v) => v + 1,
+        Slot::Empty => 0,
+    }, Slot::Val(4)));
+    print_i64(v);
+}
+"#;
+    if let Some(out) = check_and_run("pattern_capture", src) {
+        let lines: Vec<&str> = out.lines().filter(|l| !l.is_empty()).collect();
+        assert_eq!(lines, vec!["5", "100"]);
+    }
+}

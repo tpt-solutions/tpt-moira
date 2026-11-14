@@ -1488,13 +1488,26 @@ fn bind_pat_names_in(pat: &Pat, out: &mut std::collections::HashSet<String>) {
         Pat::Ident(n) => {
             out.insert(n.node.clone());
         }
-        Pat::Tuple(ps) => {
+        Pat::Tuple(ps) | Pat::Variant(_, ps) => {
             for p in ps {
                 bind_pat_names_in(p, out);
             }
         }
-        Pat::Wild => {}
-        _ => {}
+        Pat::Ref(p) => bind_pat_names_in(p, out),
+        Pat::Or(a, b) => {
+            bind_pat_names_in(a, out);
+            bind_pat_names_in(b, out);
+        }
+        Pat::Struct(_, fields) => {
+            for (_, p) in fields {
+                bind_pat_names_in(p, out);
+            }
+        }
+        Pat::Bind(name, p) => {
+            out.insert(name.clone());
+            bind_pat_names_in(p, out);
+        }
+        Pat::Wild | Pat::Lit(_) | Pat::Path(_) | Pat::Range(..) => {}
     }
 }
 

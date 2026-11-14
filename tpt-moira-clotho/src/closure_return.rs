@@ -146,10 +146,11 @@ fn collect_candidates(prog: &Program) -> (HashMap<String, Candidate>, Vec<String
 /// True when the expression binds no names of its own and contains no macro, so that
 /// renaming a free variable throughout it is sound.
 fn rename_safe(e: &mut Expr) -> bool {
-    let mut bad = false;
-    visit_expr(
+    let mut bad: bool = false;
+    visit_expr_with(
         e,
-        &mut |x: &mut Expr| {
+        &mut bad,
+        &mut |x: &mut Expr, flag: &mut bool| {
             if matches!(
                 x.kind,
                 ExprKind::Closure { .. }
@@ -157,35 +158,56 @@ fn rename_safe(e: &mut Expr) -> bool {
                     | ExprKind::For(..)
                     | ExprKind::Macro(_)
             ) {
-                bad = true;
+                *flag = true;
             }
         },
-        &mut |_| {},
+        &mut |_blk: &mut Block, _st: &mut bool| {},
     );
-    visit_expr(e, &mut |_| {}, &mut |b: &mut Block| {
-        for s in &b.stmts {
-            if matches!(s.kind, StmtKind::Local(_) | StmtKind::Item(_)) {
-                bad = true;
-            }
-        }
-    });
-    !bad
-}
-
-fn mentions_any(e: &mut Expr, names: &[String]) -> bool {
-    let mut found = false;
-    visit_expr(
+    visit_expr_with(
         e,
-        &mut |x: &mut Expr| {
-            if let ExprKind::Path(p) = &x.kind {
-                if p.segments.len() == 1 && names.contains(&p.segments[0].node) {
-                    found = true;
+        &mut bad,
+        &mut |_ex: &mut Expr, _st: &mut bool| {},
+        &mut |b: &mut Block, flag: &mut bool| {
+            for s in &b.stmts {
+                if matches!(s.kind, StmtKind::Local(_) | StmtKind::Item(_)) {
+                    *flag = true;
                 }
             }
         },
-        &mut |_| {},
     );
-    found
+    !bad
+}
+
+/// The state of [`mentions_any`]: the names searched for, and whether one was found.
+struct MentionScan {
+    names: Vec<String>,
+    found: bool,
+}
+
+fn mentions_any(e: &mut Expr, names: &[String]) -> bool {
+    let mut owned: Vec<String> = Vec::new();
+    let mut k = 0;
+    while k < names.len() {
+        owned.push(names[k].clone());
+        k += 1;
+    }
+    let mut scan = MentionScan {
+        names: owned,
+        found: false,
+    };
+    visit_expr_with(
+        e,
+        &mut scan,
+        &mut |x: &mut Expr, sc: &mut MentionScan| {
+            if let ExprKind::Path(p) = &x.kind {
+                if p.segments.len() == 1 && sc.names.contains(&p.segments[0].node) {
+                    sc.found = true;
+                }
+            }
+        },
+        &mut |_blk: &mut Block, _sc: &mut MentionScan| {},
+    );
+    scan.found
 }
 
 /// Apply `f` to every block of an item's bodies (functions, impl methods, consts, statics).
@@ -760,6 +782,125 @@ pub(crate) fn visit_expr(
             }
             if let Some(x) = b {
                 visit_expr(x, fe, fb);
+            }
+        }
+    }
+}
+
+/// [`visit_block`] with a state `st` passed to every callback (a closure cannot update a
+/// captured variable in the Moira subset, so the state is an argument instead).
+pub(crate) fn visit_block_with<S>(
+    b: &mut Block,
+    st: &mut S,
+    fe: &mut impl FnMut(&mut Expr, &mut S),
+    fb: &mut impl FnMut(&mut Block, &mut S),
+) {
+    fb(b, st);
+    for s in &mut b.stmts {
+        match &mut s.kind {
+            StmtKind::Local(l) => {
+                if let Some(e) = &mut l.init {
+                    visit_expr_with(e, st, fe, fb);
+                }
+            }
+            StmtKind::Expr(e) | StmtKind::Semi(e) => {
+                visit_expr_with(e, st, fe, fb);
+            }
+            StmtKind::Item(_) => {}
+        }
+    }
+    if let Some(t) = &mut b.tail {
+        visit_expr_with(t, st, fe, fb);
+    }
+}
+
+/// [`visit_expr`] with a state `st` passed to every callback.
+pub(crate) fn visit_expr_with<S>(
+    e: &mut Expr,
+    st: &mut S,
+    fe: &mut impl FnMut(&mut Expr, &mut S),
+    fb: &mut impl FnMut(&mut Block, &mut S),
+) {
+    fe(e, st);
+    match &mut e.kind {
+        ExprKind::Lit(_) | ExprKind::Path(_) | ExprKind::Break | ExprKind::Continue => {}
+        ExprKind::Macro(_) => {}
+        ExprKind::Binary(a, _, b) | ExprKind::Index(a, b) | ExprKind::ArrayRepeat(a, b) => {
+            visit_expr_with(a, st, fe, fb);
+            visit_expr_with(b, st, fe, fb);
+        }
+        ExprKind::Unary(_, a)
+        | ExprKind::Field(a, _)
+        | ExprKind::Ref(a, _)
+        | ExprKind::Deref(a)
+        | ExprKind::Cast(a, _)
+        | ExprKind::Try(a)
+        | ExprKind::Await(a) => {
+            visit_expr_with(a, st, fe, fb);
+        }
+        ExprKind::Call(c, args) => {
+            visit_expr_with(c, st, fe, fb);
+            for a in args {
+                visit_expr_with(a, st, fe, fb);
+            }
+        }
+        ExprKind::MethodCall(r, _, args) => {
+            visit_expr_with(r, st, fe, fb);
+            for a in args {
+                visit_expr_with(a, st, fe, fb);
+            }
+        }
+        ExprKind::Array(v) | ExprKind::Tuple(v) => {
+            for a in v {
+                visit_expr_with(a, st, fe, fb);
+            }
+        }
+        ExprKind::Struct(_, fields, base) => {
+            for (_, v) in fields {
+                visit_expr_with(v, st, fe, fb);
+            }
+            if let Some(b) = base {
+                visit_expr_with(b, st, fe, fb);
+            }
+        }
+        ExprKind::Block(b) | ExprKind::Loop(b) | ExprKind::Unsafe(b) => {
+            visit_block_with(b, st, fe, fb);
+        }
+        ExprKind::If(c, b, els) => {
+            visit_expr_with(c, st, fe, fb);
+            visit_block_with(b, st, fe, fb);
+            if let Some(x) = els {
+                visit_expr_with(x, st, fe, fb);
+            }
+        }
+        ExprKind::While(c, b) => {
+            visit_expr_with(c, st, fe, fb);
+            visit_block_with(b, st, fe, fb);
+        }
+        ExprKind::For(_, it, b) => {
+            visit_expr_with(it, st, fe, fb);
+            visit_block_with(b, st, fe, fb);
+        }
+        ExprKind::Return(v) => {
+            if let Some(x) = v {
+                visit_expr_with(x, st, fe, fb);
+            }
+        }
+        ExprKind::Match(s, arms) => {
+            visit_expr_with(s, st, fe, fb);
+            for (_, x) in arms {
+                visit_expr_with(x, st, fe, fb);
+            }
+        }
+        ExprKind::Closure { body, .. } => {
+            visit_expr_with(body, st, fe, fb);
+        }
+        ExprKind::Range(a, b, _) => {
+            if let Some(x) = a {
+                visit_expr_with(x, st, fe, fb);
+            }
+            if let Some(x) = b {
+                visit_expr_with(x, st, fe, fb);
             }
         }
     }
