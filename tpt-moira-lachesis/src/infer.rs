@@ -2532,7 +2532,9 @@ impl TypeChecker {
             // inline (`<T: Show>`) and `where`-clause (`where T: Show`)
             // predicates.
             let enforce = |cx: &mut Self, concrete: &Ty, bn: &str| {
-                if bn.is_empty() {
+                // `Send` and `Sync` are auto traits: a value of a type the program can build
+                // is one of them (a function pointer is), so there is nothing to check.
+                if bn.is_empty() || matches!(bn, "Send" | "Sync") {
                     return;
                 }
                 // A bare generic struct (`Self` inside a generic impl) carries no type
@@ -4042,11 +4044,11 @@ impl TypeChecker {
         );
         self.methods.insert(
             ("PathBuf".into(), "join".into()),
-            sig(vec![Ref(Box::new(Str))], std("PathBuf")),
+            sig(vec![Ref(Box::new(Str))], Str),
         );
         self.methods.insert(
             ("Path".into(), "join".into()),
-            sig(vec![Ref(Box::new(Str))], std("PathBuf")),
+            sig(vec![Ref(Box::new(Str))], Str),
         );
 
         // `to_string` on the numeric/primitive types (via the standard
@@ -4100,9 +4102,9 @@ impl TypeChecker {
             ),
         );
         self.assoc_fns.insert(
-            // Real `Path::new` returns `&Path`.
+            // `Path::new` borrows a path, which is a string here (see `PathBuf`).
             ("Path".into(), "new".into()),
-            sig(vec![Ref(Box::new(Str))], Ref(Box::new(std("Path")))),
+            sig(vec![Ref(Box::new(Str))], Ref(Box::new(Str))),
         );
         self.assoc_fns
             .insert(("io".into(), "stdin".into()), sig(vec![], std("Stdin")));
@@ -4149,17 +4151,13 @@ impl TypeChecker {
         );
         self.assoc_fns
             .insert(("Stdio".into(), "piped".into()), sig(vec![], std("Stdio")));
-        self.assoc_fns.insert(
-            ("fs".into(), "temp_dir".into()),
-            sig(vec![], std("PathBuf")),
-        );
-        self.assoc_fns.insert(
-            ("env".into(), "temp_dir".into()),
-            sig(vec![], std("PathBuf")),
-        );
+        self.assoc_fns
+            .insert(("fs".into(), "temp_dir".into()), sig(vec![], Str));
+        self.assoc_fns
+            .insert(("env".into(), "temp_dir".into()), sig(vec![], Str));
         self.assoc_fns.insert(
             ("env".into(), "current_dir".into()),
-            sig(vec![], Apply("Result".to_string(), vec![std("PathBuf")])),
+            sig(vec![], Apply("Result".to_string(), vec![Str])),
         );
         self.assoc_fns.insert(
             ("fs".into(), "remove_file".into()),
@@ -4210,14 +4208,10 @@ impl TypeChecker {
                 ),
             ),
         );
-        self.methods.insert(
-            ("Path".into(), "to_path_buf".into()),
-            sig(vec![], std("PathBuf")),
-        );
-        self.methods.insert(
-            ("PathBuf".into(), "to_path_buf".into()),
-            sig(vec![], std("PathBuf")),
-        );
+        self.methods
+            .insert(("Path".into(), "to_path_buf".into()), sig(vec![], Str));
+        self.methods
+            .insert(("PathBuf".into(), "to_path_buf".into()), sig(vec![], Str));
         // --- Round: driver self-host gap-closing (2026-08-22) ----------------
         // `Result` combinators used by the compiler's own driver (closures are
         // passed as opaque `Unknown` arguments).
@@ -4303,6 +4297,9 @@ impl TypeChecker {
             ("Path".into(), "to_string_lossy".into()),
             sig(vec![], std("Cow")),
         );
+        // A path is a string here, so its lossy conversion is the string itself.
+        self.methods
+            .insert(("str".into(), "to_string_lossy".into()), sig(vec![], Str));
         self.methods
             .insert(("Path".into(), "display".into()), sig(vec![], Unknown));
         self.methods
@@ -4337,13 +4334,11 @@ impl TypeChecker {
             ("Stdio".into(), "inherit".into()),
             sig(vec![], std("Stdio")),
         );
-        self.assoc_fns.insert(
-            ("PathBuf".into(), "new".into()),
-            sig(vec![], std("PathBuf")),
-        );
+        self.assoc_fns
+            .insert(("PathBuf".into(), "new".into()), sig(vec![], Str));
         self.assoc_fns.insert(
             ("PathBuf".into(), "from".into()),
-            sig(vec![Ref(Box::new(Str))], std("PathBuf")),
+            sig(vec![Ref(Box::new(Str))], Str),
         );
         self.assoc_fns.insert(
             ("String".into(), "from".into()),

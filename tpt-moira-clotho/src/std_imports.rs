@@ -167,6 +167,18 @@ fn resolve_fn(f: &mut Function, on: bool) {
 
 /// Rename the std `Path` type to `PathBuf` throughout `ty` when `on`.
 fn rewrite_ty(ty: &mut Type, on: bool) {
+    // A fully qualified `std::path::Path` is never the AST's own `Path`: it is rewritten in
+    // every scope.
+    if let TypeKind::Path(p, _) = &mut ty.kind {
+        if p.segments.len() == 3
+            && p.segments[0].node == "std"
+            && p.segments[1].node == "path"
+            && p.segments[2].node == "Path"
+        {
+            p.segments = vec![p.segments[2].clone()];
+            p.segments[0].node = "PathBuf".to_string();
+        }
+    }
     if !on {
         return;
     }

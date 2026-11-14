@@ -413,6 +413,18 @@ fn emit_text(text: &str, output: &Option<String>) {
 ///
 /// With `--parity` the error-message parity audit is printed; with `--propose`
 /// the offline AI root-cause proposer runs and appends to the triage queue.
+/// Append the records to the triage queue, when there is one.
+fn push_triage_records(
+    queue: &mut Option<TriageQueue>,
+    records: Vec<tpt_moira_lachesis::propose::TriageRecord>,
+) {
+    if let Some(q) = queue {
+        for rec in records {
+            let _ = q.push(rec);
+        }
+    }
+}
+
 fn run_diff(
     source: &str,
     program: &tpt_moira_clotho::ast::Program,
@@ -429,10 +441,10 @@ fn run_diff(
     let rustc_errors = run_rustc_check(source);
     let report = classify(&moira_errors, &rustc_errors);
 
-    let allow_file = allowlist_path
-        .map(std::path::Path::new)
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| std::path::PathBuf::from(Allowlist::DEFAULT_FILE));
+    let allow_file = match allowlist_path {
+        Some(p) => std::path::Path::new(p).to_path_buf(),
+        None => std::path::PathBuf::from(Allowlist::DEFAULT_FILE),
+    };
     let mut allowlist = match Allowlist::load(&allow_file) {
         Ok(a) => a,
         Err(e) => {
@@ -492,14 +504,15 @@ fn run_diff(
                 TriageQueue::open(&std::env::temp_dir().join("moira_triage.jsonl")).ok()
             }
         };
+        let mut records = Vec::new();
         for &d in &report.divergences {
             let rec = make_record(d, &moira_errors, &rustc_errors, &proposer, hash);
             println!("  PROPOSAL [{}]: {}", rec.label, rec.root_cause);
             println!("           fix: {}", rec.minimal_fix);
-            if let Some(q) = &mut queue {
-                let _ = q.push(rec);
-            }
+            records.push(rec);
         }
+        // The queue is written after the loop, not inside it, so the borrow of it is one block.
+        push_triage_records(&mut queue, records);
         if let Some(q) = &queue {
             println!("moira-diff: triage queue has {} record(s)", q.len());
         }
