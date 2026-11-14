@@ -57,10 +57,9 @@ Target: compile a strict subset of Rust (no complex trait resolution, no async/a
       (`MOIRA_TIMINGS=1`, median, cache off): read+parse ~0.5 ms, lower+SSA ~0.9 ms,
       C emission ~2.7 ms (this includes a full type check to produce typed hints, ~1.4 ms).
       Halving all compile work would move the xlarge ratio from ~4.5x to ~5.5x, not 10x.
-      **Decision needed:** keep wall-clock as the headline (current), or adopt an
-      in-process compile-time metric for the 10x claim. Recommendation: keep wall-clock
-      as the headline and report the floor-bounded ceiling beside it. Leave the 10x
-      target open and marked as blocked by the host until the metric is decided.
+      **Decision (2026-11-15, per the recommendation):** keep wall-clock as the headline
+      and report the floor-bounded ceiling beside it. The in-process compile-time metric
+      is not adopted. The 10x target stays open and is blocked by the host floor.
   - [x] Extend `tpt-moira-bench` to time the *full* pipeline (type-check +
         borrow-check + incremental cache), not just front-end + SSA mid-end
         — `--full` now times `moira --emit check`; the table prints which
@@ -661,6 +660,15 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
       Probe now: clotho C 230, atropos 1215 (check 143, up 4 from an untraced cause), lachesis
       1250 (check 88), driver 209 (check ok).
     - [ ] Re-run `x.py self-host` after each milestone above; update the crate-by-crate self-hostable count (the `mod` and generics-`<` parse gaps are resolved — remaining blockers are type-check depth: `match`/closures/generics-in-`infer`/tuple-destructure)
+          - Status (2026-11-15, re-run): `x.py self-host` reports `1/5` self-hostable
+            (`tpt-moira-alloc` only). Clotho's C had 234 `gcc -fsyntax-only` errors at the
+            start of the session and 229 after these fixes: `is_some_and` on `Option`,
+            `Vec<String>::contains` (content comparison helper), and a `format!` of a
+            non-scalar now fails in lowering with a named error instead of printing the
+            value's bits as an integer. Clotho's next blocker is that error: `TokenKind`
+            has a user `impl Display`, and `format!` of a user type with `Display` is not
+            lowered yet (it needs a `Formatter` model and `write!` into it). Tests:
+            `tpt-moira-atropos/tests/codegen.rs` (three new). Workspace `cargo test` is green.
           - Status (2026-08-22): the `x.py self-host` probe now measures parse
             independently of type-check (`moira --emit ast` sets `parse_ok`;
             `moira --check` sets `check_ok`; `moira --emit c` sets `codegen_ok`), so

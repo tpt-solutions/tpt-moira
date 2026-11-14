@@ -632,6 +632,39 @@ fn is_iter_terminal(name: &str) -> bool {
 }
 
 /// Whether a C element type is a scalar whose values compare with `<` and `>`.
+/// Whether a Rust type (the referent of a reference) is one `format!` lowers: an integer, a float,
+/// `bool`, `char`, or a string. Anything else (an enum or a struct) is not, and a reference to it
+/// must not format as an integer.
+fn is_formattable_scalar(t: &str) -> bool {
+    matches!(
+        t,
+        "bool"
+            | "char"
+            | "str"
+            | "String"
+            | "char*"
+            | "f32"
+            | "f64"
+            | "double"
+            | "float"
+            | "i8"
+            | "i16"
+            | "i32"
+            | "i64"
+            | "i128"
+            | "isize"
+            | "u8"
+            | "u16"
+            | "u32"
+            | "u64"
+            | "u128"
+            | "usize"
+            | "int"
+            | "long long"
+            | "unsigned long long"
+    )
+}
+
 fn is_scalar_c_type(t: &str) -> bool {
     matches!(
         t,
@@ -7368,6 +7401,7 @@ impl Lower {
             method,
             "is_some"
                 | "is_none"
+                | "is_some_and"
                 | "is_ok"
                 | "is_err"
                 | "unwrap"
@@ -7459,6 +7493,41 @@ impl Lower {
             "as_deref" | "as_ref" | "copied" | "cloned" => Ok(Some(op)),
             "is_some" | "is_ok" => Ok(Some(test(self, ok_tag))),
             "is_none" | "is_err" => Ok(Some(test(self, 1 - ok_tag))),
+            "is_some_and" if args.len() == 1 => {
+                // `opt.is_some_and(|v| pred)`: the predicate runs on the payload only when
+                // the option holds a value; otherwise the result is `false`.
+                let Some(f) = args.first() else {
+                    return Err(LowerError("`is_some_and` needs a closure".into()));
+                };
+                self.closure_param_hint = Some(vec![payload_ty.clone()]);
+                let callee = self.closure_callee(f);
+                self.closure_param_hint = None;
+                let (lifted, caps) = callee?;
+                let r = self.fresh_temp("long long");
+                let cond = test(self, ok_tag);
+                let then_blk = self.new_block();
+                let else_blk = self.new_block();
+                let join = self.new_block();
+                self.set_term(mir::Terminator::If(cond, then_blk, else_blk));
+                self.current = then_blk;
+                let v = self.fresh_temp(payload_ty.clone());
+                self.emit(
+                    v.clone(),
+                    mir::Rvalue::Field(op.clone(), payload_field("Option", 0, 0), ptr),
+                );
+                let mut call_args = caps;
+                call_args.push(mir::Operand::var(v));
+                self.emit(
+                    r.clone(),
+                    mir::Rvalue::Call(mir::Operand::Func(lifted), call_args),
+                );
+                self.set_term(mir::Terminator::Goto(join));
+                self.current = else_blk;
+                self.emit(r.clone(), mir::Rvalue::Use(mir::Operand::Const(0)));
+                self.set_term(mir::Terminator::Goto(join));
+                self.current = join;
+                Ok(Some(mir::Operand::var(r)))
+            }
             "unwrap" | "expect" => {
                 let v = self.fresh_temp(payload_ty);
                 self.emit(v.clone(), mir::Rvalue::Field(op, "f0".into(), ptr));
@@ -9844,6 +9913,10 @@ impl Lower {
                     let (vname, elem, is_ptr) = self.vec_local(recv).unwrap();
                     let helper = match method.node.as_str() {
                         "push" | "len" | "is_empty" => Some(method.node.clone()),
+                        // Only string elements have a `contains` helper (content comparison).
+                        "contains" if args.len() == 1 && elem == "str" => {
+                            Some(method.node.clone())
+                        }
                         _ => None,
                     };
                     if let Some(helper) = helper {
@@ -9862,7 +9935,7 @@ impl Lower {
                             self.expect_ty = None;
                             operands.push(o?);
                         }
-                        let result_ty = if helper == "is_empty" {
+                        let result_ty = if helper == "is_empty" || helper == "contains" {
                             "bool"
                         } else {
                             "long long"
@@ -10975,6 +11048,24 @@ impl Lower {
                                 _ => "long long".to_string(),
                             },
                         };
+                        // A reference to a non-scalar (an enum, say) has no `Display` lowering:
+                        // report it rather than formatting its bits as an integer.
+                        if let Some(h) = self.hint_of_expr(a) {
+                            if h.ends_with('*') && !is_formattable_scalar(h.trim_end_matches('*')) {
+                                return Err(LowerError(format!(
+                                    "`format!`/`println!` of a value of type `{}` has no lowering yet (only integers, floats, bools and strings format)",
+                                    h.trim_end_matches('*')
+                                )));
+                            }
+                        }
+                        if !ty.contains("char*")
+                            && ty != "str"
+                            && !is_formattable_scalar(ty.trim_end_matches('*'))
+                        {
+                            return Err(LowerError(format!(
+                                "`format!`/`println!` of a value of type `{ty}` has no lowering yet (only integers, floats, bools and strings format)"
+                            )));
+                        }
                         // A pointer or struct has no `Display` lowering here; formatting it as an
                         // integer would print a wrong value, so it is an error instead.
                         if !ty.contains("char*")

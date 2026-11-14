@@ -823,8 +823,16 @@ fn vec_helpers(elem: &str, struct_names: &std::collections::HashSet<&str>) -> St
         "static long long {len}({name}* v) {{ return v->len; }}\n"
     ));
     s.push_str(&format!(
-        "static long long {is_empty}({name}* v) {{ return v->len == 0; }}\n\n"
+        "static long long {is_empty}({name}* v) {{ return v->len == 0; }}\n"
     ));
+    // `contains` compares strings by content; other element types have no `==` helper yet.
+    if ec == "char*" {
+        let contains = mir::vec_fn_name(elem, "contains");
+        s.push_str(&format!(
+            "static long long {contains}({name}* v, char* x) {{ for (long long i = 0; i < v->len; i++) if (strcmp(v->data[i], x) == 0) return 1; return 0; }}\n"
+        ));
+    }
+    s.push('\n');
     s
 }
 

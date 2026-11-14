@@ -1279,3 +1279,81 @@ fn if_let_enum_pattern_and_while_let_run() {
     };
     assert_eq!(out, "12\n1\n3");
 }
+
+#[test]
+fn option_is_some_and_runs() {
+    let out = match run_src(
+        "fn main() {
+            let a: Option<i64> = Some(4);
+            let b: Option<i64> = None;
+            let big = |x: i64| x > 3;
+            if a.is_some_and(big) {
+                print_i32(1);
+            } else {
+                print_i32(0);
+            }
+            if b.is_some_and(big) {
+                print_i32(1);
+            } else {
+                print_i32(0);
+            }
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping is_some_and run");
+            return;
+        }
+    };
+    assert_eq!(out, "1\n0", "`is_some_and` applies the predicate only to `Some`");
+}
+
+#[test]
+fn vec_of_strings_contains_compares_content_and_runs() {
+    let out = match run_src(
+        "fn main() {
+            let mut names: Vec<String> = Vec::new();
+            names.push(\"alpha\".to_string());
+            names.push(\"beta\".to_string());
+            let probe = \"beta\".to_string();
+            let missing = \"gamma\".to_string();
+            if names.contains(&probe) {
+                print_i32(1);
+            } else {
+                print_i32(0);
+            }
+            if names.contains(&missing) {
+                print_i32(1);
+            } else {
+                print_i32(0);
+            }
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping Vec<String>::contains run");
+            return;
+        }
+    };
+    assert_eq!(out, "1\n0", "`contains` on Vec<String> compares by content");
+}
+
+#[test]
+fn format_of_enum_without_display_lowering_is_rejected() {
+    let src = "enum K { A(i64), B }
+        fn show(k: &K) -> String {
+            match k {
+                K::A(_) => String::new(),
+                other => format!(\"found {}\", other),
+            }
+        }
+        fn main() { let _ = show(&K::B); }";
+    let prog = tpt_moira_clotho::compile_source(src).expect("source should parse");
+    let err = tpt_moira_atropos::lower_program(&prog)
+        .err()
+        .expect("formatting an enum must be a lowering error, not integer output");
+    assert!(
+        format!("{err}").contains("has no lowering yet"),
+        "unexpected error: {err}"
+    );
+}
