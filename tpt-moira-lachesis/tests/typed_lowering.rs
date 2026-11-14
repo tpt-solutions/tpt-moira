@@ -1292,3 +1292,21 @@ fn main() {
         assert_eq!(lines, vec!["-1", "5"]);
     }
 }
+
+/// A reference to a `String` field is the string itself: the binding reads the field's text.
+#[test]
+fn reference_to_string_field_reads_its_text_runs() {
+    let src = r#"
+struct Node {
+    text: String,
+}
+fn main() {
+    let n = Node { text: "hi".to_string() };
+    let r = &n.text;
+    println!("{}", r);
+}
+"#;
+    if let Some(out) = check_and_run("string_field_ref", src) {
+        assert_eq!(out.trim(), "hi");
+    }
+}

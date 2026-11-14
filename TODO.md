@@ -907,6 +907,9 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
             pointer, so `hint_elem_name` is used without the `*`. Also the macro expander passes
             `&**b` for boxed sub-expressions (the lowering takes `&Box<Expr>` as a pointer to a
             pointer). Own C: clotho 274 -> 252.
+            **Reference to a string (2026-11-14).** `&s` / `&n.text` for a string (`str`, C
+            `char*`) is the string's pointer, as a slice is; it was a `char**`. Test:
+            `reference_to_string_field_reads_its_text_runs`. Own C: clotho 252 -> 250.
             **Open:** `&b` for a boxed local `b: Box<P>` lowers to `P**` (a box and a reference are
             both pointers in C, so the lowering cannot tell them apart without the checker's type).
             A test for `Option<&Box<P>>` was tried and removed for this reason.

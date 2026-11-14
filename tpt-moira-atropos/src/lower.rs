@@ -9189,7 +9189,8 @@ impl Lower {
                     }
                 };
                 let inner = self.temp_type_of(&name_of(&o));
-                if mir::slice_elem(&inner).is_some() {
+                // A slice and a string are already pointers: a reference to one is that pointer.
+                if mir::slice_elem(&inner).is_some() || inner == "char*" || inner == "str" {
                     return Ok(o);
                 }
                 let t = self.fresh_temp(format!("{}*", inner));
