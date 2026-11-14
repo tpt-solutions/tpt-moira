@@ -4299,6 +4299,14 @@ impl TypeChecker {
             .insert(("fs".into(), "temp_dir".into()), sig(vec![], Str));
         self.assoc_fns
             .insert(("env".into(), "temp_dir".into()), sig(vec![], Str));
+        // The driver's `MOIRA_TIMINGS` phase timer: an environment lookup and a monotonic
+        // clock. Their values are opaque to the checker (`Unknown`, absorbing uses).
+        self.assoc_fns
+            .insert(("env".into(), "var_os".into()), sig(vec![Ref(Box::new(Str))], Unknown));
+        self.assoc_fns
+            .insert(("Instant".into(), "now".into()), sig(vec![], Unknown));
+        self.methods
+            .insert(("Instant".into(), "elapsed".into()), sig(vec![], Unknown));
         self.assoc_fns.insert(
             ("env".into(), "current_dir".into()),
             sig(vec![], Apply("Result".to_string(), vec![Str])),

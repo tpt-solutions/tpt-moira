@@ -26,6 +26,38 @@ fn main() -> ExitCode {
     }
 }
 
+/// Per-phase wall-clock timing, printed to stderr when `MOIRA_TIMINGS` is set.
+///
+/// A timer reports when it is dropped, so a phase is timed by binding one at the
+/// top of its block. With the variable unset it does nothing.
+struct PhaseTimer {
+    name: &'static str,
+    start: std::time::Instant,
+    enabled: bool,
+}
+
+impl PhaseTimer {
+    fn start(name: &'static str) -> Self {
+        PhaseTimer {
+            name,
+            start: std::time::Instant::now(),
+            enabled: std::env::var_os("MOIRA_TIMINGS").is_some(),
+        }
+    }
+}
+
+impl Drop for PhaseTimer {
+    fn drop(&mut self) {
+        if self.enabled {
+            eprintln!(
+                "moira: timing {:<12} {:>9.3} ms",
+                self.name,
+                self.start.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+    }
+}
+
 fn real_main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
@@ -93,6 +125,7 @@ fn real_main() -> ExitCode {
     // Every file loaded, with its span base, to locate a checker diagnostic in its file.
     let mut source_files: Vec<tpt_moira_clotho::SourceFile> = Vec::new();
     let (source, program) = if let Some(path) = positional.first() {
+        let _parse_timer = PhaseTimer::start("read+parse");
         let src = match std::fs::read_to_string(path) {
             Ok(s) => s,
             Err(e) => {
@@ -242,6 +275,7 @@ fn real_main() -> ExitCode {
     // Lachesis type + borrow checker before lowering/codegen. The result is read
     // through the whole-pipeline content-addressed cache when caching is on.
     if check {
+        let _check_timer = PhaseTimer::start("check");
         if let Err(diags) = pipeline().checked(&source, || check_call(&program)) {
             for d in &diags {
                 eprintln!("moira: {}", d);
@@ -256,6 +290,7 @@ fn real_main() -> ExitCode {
         }
     }
 
+    let _emit_timer = PhaseTimer::start("emit");
     match emit.as_str() {
         "check" => match pipeline().checked(&source, || check_call(&program)) {
             Ok(()) => println!("moira: type-check and borrow-check passed"),

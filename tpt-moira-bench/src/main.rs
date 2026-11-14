@@ -38,6 +38,8 @@ const REGRESSION_PCT: f64 = 10.0;
 const ITERS: usize = 30;
 /// A short warm-up run excluded from measurements (JIT/cache effects).
 const WARMUP: usize = 3;
+/// Pass-rate history written by `tools/crates_probe.py` (shown by `--dashboard`).
+const DEFAULT_CRATES_HISTORY: &str = "build/crates_probe/history.jsonl";
 
 const SMALL: &str = r#"
 fn add(a: i32, b: i32) -> i32 { a + b }
@@ -276,6 +278,8 @@ fn main() {
     let mut rustc_mode = RustcMode::Metadata;
     let mut cc_mode = CcMode::None;
     let mut results_dir = PathBuf::from(DEFAULT_RESULTS_DIR);
+    let mut corpus: Option<PathBuf> = None;
+    let mut crates_history = PathBuf::from(DEFAULT_CRATES_HISTORY);
 
     let mut i = 1;
     while i < args.len() {
@@ -283,6 +287,26 @@ fn main() {
             "--record" => record = true,
             "--dashboard" => dashboard = true,
             "--full" => moira_mode = MoiraMode::Check,
+            "--corpus" => match args.get(i + 1) {
+                Some(d) => {
+                    corpus = Some(PathBuf::from(d));
+                    i += 1;
+                }
+                None => {
+                    eprintln!("error: --corpus requires a directory of `.rs` files");
+                    std::process::exit(2);
+                }
+            },
+            "--crates-history" => match args.get(i + 1) {
+                Some(f) => {
+                    crates_history = PathBuf::from(f);
+                    i += 1;
+                }
+                None => {
+                    eprintln!("error: --crates-history requires a file argument");
+                    std::process::exit(2);
+                }
+            },
             "--cc" => match args.get(i + 1) {
                 Some(m) => {
                     match m.as_str() {
@@ -342,10 +366,18 @@ fn main() {
 
     if dashboard {
         print_dashboard(&results_dir);
+        print_crates_trend(&crates_history);
         return;
     }
 
-    run_benchmark(record, &results_dir, moira_mode, rustc_mode, cc_mode);
+    run_benchmark(
+        record,
+        &results_dir,
+        moira_mode,
+        rustc_mode,
+        cc_mode,
+        corpus.as_deref(),
+    );
 
     if moira_is_missing() {
         eprintln!("\nwarning: `moira` binary not found; run `cargo build` first.");
@@ -366,18 +398,60 @@ fn run_benchmark(
     moira_mode: MoiraMode,
     rustc_mode: RustcMode,
     cc_mode: CcMode,
+    corpus: Option<&Path>,
 ) {
+    // Every timed Moira run is a cold compile: the pipeline cache would otherwise
+    // answer repeated runs of the same source from disk, which `rustc` does not do
+    // (its incremental cache is off for these invocations). Child processes inherit it.
+    std::env::set_var("MOIRA_NO_CACHE", "1");
+
     let moira = find_moira();
     let rustc = find_rustc();
     let cc = cc_mode.binary().and_then(find_cc);
 
     let cc_label = cc_mode.label();
 
+    // The programs to time: the built-in battery, or every `.rs` file of a corpus.
+    let programs: Vec<(String, Source)> = match corpus {
+        Some(dir) => match corpus_files(dir) {
+            Ok(files) if !files.is_empty() => files
+                .into_iter()
+                .map(|p| {
+                    let name = p
+                        .file_stem()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| "?".into());
+                    (name, Source::File(p))
+                })
+                .collect(),
+            Ok(_) => {
+                eprintln!("error: corpus `{}` contains no `.rs` files", dir.display());
+                std::process::exit(2);
+            }
+            Err(e) => {
+                eprintln!("error: cannot read corpus `{}`: {e}", dir.display());
+                std::process::exit(2);
+            }
+        },
+        None => BENCHMARKS
+            .iter()
+            .map(|(n, s)| (n.to_string(), Source::Inline(*s)))
+            .collect(),
+    };
+
     println!("╭──────────────────────────────────────────────────────────────────────────╮");
     println!("│  Moira compile-time benchmark — Phase-1 subset                             │");
     println!("╰──────────────────────────────────────────────────────────────────────────╯");
+    match corpus {
+        Some(dir) => println!(
+            "  corpus: {} ({} file(s)); a file Moira rejects is skipped (n/a).",
+            dir.display(),
+            programs.len()
+        ),
+        None => println!("  programs: built-in Phase-1 battery ({} programs).", programs.len()),
+    }
     println!(
-        "  {} iterations per program (median reported). Moira = {}.",
+        "  {} iterations per program (median reported). Moira = {}, cold (MOIRA_NO_CACHE=1).",
         ITERS,
         moira_mode.label()
     );
@@ -415,8 +489,13 @@ fn run_benchmark(
     let mut cc_attempted = false;
     let mut cc_succeeded = false;
     let mut entries: Vec<Entry> = Vec::new();
-    for (name, src) in BENCHMARKS {
-        let file = write_temp("rs", src);
+    for (name, source) in &programs {
+        // Built-in programs are written to a temp file that is removed afterwards;
+        // corpus files are timed in place and never deleted.
+        let (file, owned) = match source {
+            Source::Inline(src) => (write_temp("rs", src), true),
+            Source::File(p) => (p.clone(), false),
+        };
 
         let m_args = moira_args(&file, moira_mode);
         let r_args = rustc_args(&file, rustc_mode);
@@ -489,9 +568,14 @@ fn run_benchmark(
 
         // Remove the temp source and the emitted artifact(s) so repeated runs
         // and different crates don't leak temp files.
-        let _ = std::fs::remove_file(&file);
+        if owned {
+            let _ = std::fs::remove_file(&file);
+        }
+        // Only artifacts are removed: the input path appears in each argument list.
         for a in m_args.iter().chain(r_args.iter()).chain(cc_args.iter()) {
-            let _ = std::fs::remove_file(a);
+            if Path::new(a) != file.as_path() {
+                let _ = std::fs::remove_file(a);
+            }
         }
         let _ = std::fs::remove_file(&c_src_file);
     }
@@ -545,6 +629,39 @@ fn run_benchmark(
         );
     }
 
+    // Host floor: the cost of starting a process that does no compiler work. Every
+    // Moira measurement includes it, so it bounds the wall-clock speedup achievable
+    // on this host: even with zero compile time, `rustc_ms / floor_ms` is the ceiling.
+    // An empty source is the cheapest real invocation (it exits 0 and does no work).
+    let empty = write_temp("rs", "");
+    let floor_args = moira_args(&empty, MoiraMode::Ssa);
+    let floor_ms = moira
+        .as_ref()
+        .and_then(|bin| time_cmd(bin, &floor_args, ITERS));
+    let _ = std::fs::remove_file(&empty);
+    for a in &floor_args {
+        if Path::new(a) != empty.as_path() {
+            let _ = std::fs::remove_file(a);
+        }
+    }
+    if let Some(floor) = floor_ms {
+        let ceilings: Vec<f64> = entries
+            .iter()
+            .filter_map(|e| e.rustc_ms.map(|r| r / floor))
+            .collect();
+        println!();
+        println!(
+            "  process-start floor (moira on an empty source, `--emit ssa`): {floor:.2} ms"
+        );
+        if let Some(c) = geomean(&ceilings) {
+            println!(
+                "  wall-clock ceiling: even with zero compile time, the speedup over {} cannot exceed {:.2}x on this host",
+                rustc_mode.label(),
+                c
+            );
+        }
+    }
+
     if cc_attempted && !cc_succeeded {
         println!();
         println!(
@@ -577,6 +694,59 @@ fn run_benchmark(
             }
             Err(e) => eprintln!("\nerror: failed to record run: {e}"),
         }
+    }
+}
+
+/// Where a benchmark program's source comes from.
+enum Source {
+    /// A built-in program, written to a temp file for each run.
+    Inline(&'static str),
+    /// A corpus file, timed in place.
+    File(PathBuf),
+}
+
+/// The `.rs` files directly inside `dir`, sorted by name so runs are comparable.
+fn corpus_files(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let mut files: Vec<PathBuf> = std::fs::read_dir(dir)?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.is_file() && p.extension().is_some_and(|x| x == "rs"))
+        .collect();
+    files.sort();
+    Ok(files)
+}
+
+/// Print the crates.io pass-rate trend recorded by `tools/crates_probe.py`
+/// (one JSON line per probe run). Silent when the history file does not exist.
+fn print_crates_trend(path: &Path) {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return;
+    };
+    println!();
+    println!("crates.io probe trend  (file: {})", path.display());
+    println!("  {:<22} {:<10} {:>8} {:>8} {:>8}", "timestamp", "commit", "crates", "parse", "check");
+    for line in text.lines().filter(|l| !l.trim().is_empty()) {
+        let field = |key: &str| -> String {
+            let needle = format!("\"{key}\": ");
+            match line.find(&needle) {
+                Some(at) => {
+                    let rest = &line[at + needle.len()..];
+                    let end = rest.find([',', '}']).unwrap_or(rest.len());
+                    rest[..end].trim().trim_matches('"').to_string()
+                }
+                None => "-".to_string(),
+            }
+        };
+        let crates = field("crates");
+        let parse = field("parse_ok");
+        let check = field("check_ok");
+        println!(
+            "  {:<22} {:<10} {:>8} {:>8} {:>8}",
+            field("timestamp"),
+            field("commit"),
+            crates,
+            parse,
+            check
+        );
     }
 }
 

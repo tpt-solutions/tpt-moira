@@ -146,8 +146,15 @@ def diagnostics(stderr: str) -> list[str]:
         # Skip the summary line; it is not a diagnostic itself.
         if msg.startswith("aborting:"):
             continue
+        # A `  at <file>:<line>:<col>` line locates the diagnostic above it; it is not a
+        # diagnostic of its own (counting it would make every location a gap class).
+        if LOCATION_RE.match(msg):
+            continue
         msgs.append(msg)
     return msgs
+
+
+LOCATION_RE = re.compile(r"^\s*at .+:\d+:\d+$")
 
 
 def classify(msg: str) -> str:
