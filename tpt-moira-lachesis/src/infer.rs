@@ -3127,7 +3127,9 @@ impl TypeChecker {
                         if matches!(&recv_ty, Ty::Apply(v, a) if v == "Vec" && matches!(a.as_slice(), [Ty::Unknown]))
                         {
                             let et = self.infer_expr(&args[0]);
-                            if !matches!(et, Ty::Unknown) {
+                            // An element type that still has unknown parts (`Vec<Unknown>`) is
+                            // not yet the element type: keep waiting for a later push.
+                            if !has_unknown(&et) {
                                 let vt = Ty::Apply("Vec".to_string(), vec![et]);
                                 for scope in self.env.iter_mut().rev() {
                                     if let Some(slot) = scope.get_mut(&name) {

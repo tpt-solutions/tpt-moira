@@ -635,6 +635,12 @@ fn is_iter_terminal(name: &str) -> bool {
 /// Whether a Rust type (the referent of a reference) is one `format!` lowers: an integer, a float,
 /// `bool`, `char`, or a string. Anything else (an enum or a struct) is not, and a reference to it
 /// must not format as an integer.
+/// Whether an array's C element type (`long long` for the default integer) is the element type
+/// `elem` of a slice parameter (a Rust name such as `i64`, or the C name itself).
+fn same_c_elem(ct: &str, elem: &str) -> bool {
+    ct == elem || (ct == "long long" && matches!(elem, "i64" | "int64_t" | "isize"))
+}
+
 fn is_formattable_scalar(t: &str) -> bool {
     matches!(
         t,
@@ -2477,8 +2483,13 @@ impl Lower {
                     // `let v: Vec<T> = Vec::new()` / `Vec::with_capacity(n)`: the
                     // declared type names the element type of the constructor.
                     // `let m: HashMap<K, V> = HashMap::new()`: the declared type names the map.
+                    // An unannotated `let v = Vec::new();` takes the checker's type for the
+                    // initializer (its element type comes from later uses).
+                    let ctor_ty: Option<String> = ty
+                        .clone()
+                        .or_else(|| self.hint_of_expr(init));
                     if let (Some((k, v)), true) =
-                        (ty.as_deref().and_then(map_args), is_hashmap_ctor(init))
+                        (ctor_ty.as_deref().and_then(map_args), is_hashmap_ctor(init))
                     {
                         let t = self.fresh_temp(format!("Map<{k},{v}>"));
                         self.emit(
@@ -2492,7 +2503,7 @@ impl Lower {
                         return Ok(());
                     }
                     if let (Some(elem), Some(vec_ty)) =
-                        (ty.as_deref().and_then(mir::vec_elem), vec_constructor(init))
+                        (ctor_ty.as_deref().and_then(mir::vec_elem), vec_constructor(init))
                     {
                         let t = self.fresh_temp(mir::vec_type(elem));
                         self.emit(
@@ -4611,6 +4622,62 @@ impl Lower {
     /// other receiver or method (nothing is lowered then).
     /// Pass an argument as the parameter's C type `pt` (a value where a pointer is
     /// expected takes its address; a pointer where a value is expected is read through).
+    /// The slice `&arr` (or `&[a, b, ..]`) denotes, for a slice parameter `pt` of the array's
+    /// element type: the array's first element and its length. `None` when `inner` is not an
+    /// array of that element type, so the generic argument path applies.
+    fn array_arg_as_slice(&mut self, inner: &Expr, pt: &str) -> Result<Option<mir::Operand>> {
+        let Some(elem) = mir::slice_elem(pt).map(|s| s.to_string()) else {
+            return Ok(None);
+        };
+        let (data, len) = match &inner.kind {
+            ExprKind::Path(p) if p.segments.len() == 1 => {
+                let name = self.var_name(&p.segments[0].node);
+                let (Some(&n), Some(ct)) = (self.array_lens.get(&p.segments[0].node), self.array_elems.get(&p.segments[0].node).cloned()) else {
+                    return Ok(None);
+                };
+                if !same_c_elem(&ct, &elem) {
+                    return Ok(None);
+                }
+                let d = self.fresh_temp(format!("{ct}*"));
+                self.emit(d.clone(), mir::Rvalue::Use(mir::Operand::var(name)));
+                (d, n)
+            }
+            ExprKind::Array(elems) => {
+                let elem_ct = self.array_elem_ct(elems);
+                if !same_c_elem(&elem_ct, &elem) {
+                    return Ok(None);
+                }
+                let mut operands = Vec::with_capacity(elems.len());
+                for e in elems {
+                    operands.push(self.lower_expr(e)?);
+                }
+                // An array literal is declared inline under this name (see the C backend), so
+                // the name is not registered as a temporary (which would declare it again).
+                let arr = format!("__arr{}", self.temp_counter);
+                self.temp_counter += 1;
+                self.emit(arr.clone(), mir::Rvalue::Array(elem_ct.clone(), operands));
+                let d = self.fresh_temp(format!("{elem_ct}*"));
+                self.emit(d.clone(), mir::Rvalue::Use(mir::Operand::var(arr)));
+                (d, elems.len())
+            }
+            _ => return Ok(None),
+        };
+        let len_t = self.fresh_temp("long long");
+        self.emit(len_t.clone(), mir::Rvalue::Use(mir::Operand::Const(len as i128)));
+        let s = self.fresh_temp(pt);
+        self.emit(
+            s.clone(),
+            mir::Rvalue::StructLit(
+                mir::slice_c_name(&elem),
+                vec![
+                    ("data".to_string(), mir::Operand::var(data)),
+                    ("len".to_string(), mir::Operand::var(len_t)),
+                ],
+            ),
+        );
+        Ok(Some(mir::Operand::var(s)))
+    }
+
     fn adapt_arg(&mut self, v: mir::Operand, pt: &str) -> mir::Operand {
         let at = match &v {
             mir::Operand::Var(n) => self.temp_type_of(n),
@@ -7363,11 +7430,14 @@ impl Lower {
         if !matches!(place.kind, ExprKind::Path(_) | ExprKind::Field(..)) {
             return Ok(None);
         }
-        let Some(hint) = self.hint_of_expr(place) else {
-            return Ok(None);
-        };
-        let Some(elem) = mir::vec_elem(&hint).map(|s| s.to_string()) else {
-            return Ok(None);
+        // The place's type from the checker, or, for a vector local whose element type was
+        // only fixed by a later `push`, the local's own lowered type.
+        let elem = match self.hint_of_expr(place).as_deref().and_then(mir::vec_elem) {
+            Some(e) => e.to_string(),
+            None => match self.vec_local(place) {
+                Some((_, elem, _)) => elem,
+                None => return Ok(None),
+            },
         };
         // Everything that can fail has run above, so no statement is emitted twice.
         let old_src = self.lower_expr(place)?;
@@ -9216,6 +9286,13 @@ impl Lower {
                                 self.closure_param_hint =
                                     Some(closure_params.iter().map(|s| s.to_string()).collect());
                             }
+                        }
+                    }
+                    // `&arr` / `&[..]` passed where a slice is expected: the slice of the array.
+                    if let (Some(pt), ExprKind::Ref(inner, _)) = (&pt_hint, &a.kind) {
+                        if let Some(v) = self.array_arg_as_slice(inner, pt)? {
+                            operands.push(v);
+                            continue;
                         }
                     }
                     let v = self.lower_expr(a)?;

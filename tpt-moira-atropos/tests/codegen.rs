@@ -1400,3 +1400,58 @@ fn unclosed_impl_is_a_parse_error_not_a_hang() {
     let r = tpt_moira_clotho::compile_source("struct K {}\nimpl K {\nfn main() {\n    let p = 1;\n}\n");
     assert!(r.is_err(), "an impl missing its closing brace must be rejected");
 }
+
+#[test]
+fn array_argument_coerces_to_slice_and_runs() {
+    let out = match run_src(
+        "fn total(xs: &[i64]) -> i64 {
+            let mut t = 0;
+            for x in xs {
+                t += *x;
+            }
+            t
+        }
+        fn main() {
+            let a = [1i64, 2, 3];
+            print_i32(total(&a));
+            print_i32(total(&[4i64, 5]));
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping array-to-slice run");
+            return;
+        }
+    };
+    assert_eq!(out, "6\n9", "`&arr` and `&[..]` pass as slices");
+}
+
+#[test]
+fn unannotated_nested_vec_and_mem_take_run() {
+    let out = match run_src(
+        "fn split(xs: &[i64]) -> Vec<Vec<i64>> {
+            let mut res = Vec::new();
+            let mut cur = Vec::new();
+            for x in xs {
+                if *x == 0 {
+                    res.push(std::mem::take(&mut cur));
+                } else {
+                    cur.push(*x);
+                }
+            }
+            res.push(cur);
+            res
+        }
+        fn main() {
+            let v = split(&[1i64, 0, 2]);
+            print_i32(v.len() as i64);
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping nested Vec run");
+            return;
+        }
+    };
+    assert_eq!(out, "2", "`Vec::new()` takes its element type from later pushes");
+}
