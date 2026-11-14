@@ -8562,6 +8562,7 @@ impl Lower {
     }
 
     fn lower_expr_inner(&mut self, e: &Expr) -> Result<mir::Operand> {
+        let outer_hint = self.hint_of_expr(e);
         match &e.kind {
             // Parsed (so crates using `[v; N]` reach the checker), but not yet
             // lowered: the codegen subset has no repeat-array construction.
@@ -9274,6 +9275,19 @@ impl Lower {
                         mir::Operand::var(t)
                     }
                 };
+                // The checker types the reference (`&-1` against an `Option<&i64>`'s payload
+                // is `i64*`): an untyped integer place takes the referent's type.
+                if let (mir::Operand::Var(n), Some(referent)) =
+                    (&o, outer_hint.as_deref().and_then(|h| h.strip_suffix('*')))
+                {
+                    let local = self.func.locals.iter().any(|(l, _)| l == n);
+                    if !local
+                        && self.temp_type_of(n) == "long long"
+                        && matches!(referent, "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64")
+                    {
+                        self.types.insert(n.clone(), c_scalar_name(referent));
+                    }
+                }
                 let inner = self.temp_type_of(&name_of(&o));
                 // A slice and a string are already pointers: a reference to one is that pointer.
                 if mir::slice_elem(&inner).is_some() || inner == "char*" || inner == "str" {
