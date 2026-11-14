@@ -569,9 +569,20 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
                call is hoisted at the token level (`hoist_macro_tokens`), so
                `println!("{}", apply(make(4), 1))` works too. Locked in by
                `returned_capturing_closure_inside_println_runs`.
-               **Still open:** (a) impure arguments (`make(f())`) are not hoisted, to keep
-               evaluation order; (b) calls inside other macros (`assert!`, `vec!`, user
-               `macro_rules!`) are not hoisted; (c) closures returned from impl methods,
+               **Impure arguments (2026-11-14):** `apply(make(side()), 1)` is hoisted when
+               the statement is `f(.., g(impure..), ..)` with a single impure operand, i.e.
+               nothing else in the statement can run before the hoisted call and evaluation
+               order is preserved (`impure_hoist_ok`). Locked in by
+               `atropos/tests/codegen.rs::returned_capturing_closure_with_impure_argument_runs`.
+               Impure arguments with other effectful operands in the same statement are still
+               not hoisted, to keep evaluation order.
+               **Eagerly evaluated built-in macros (2026-11-14):** calls inside `assert!`,
+               `assert_eq!`/`assert_ne!` (and `debug_` variants) and `vec!` are hoisted from the
+               token stream like the format macros. Locked in by
+               `atropos/tests/codegen.rs::returned_capturing_closure_inside_assert_runs`.
+               User `macro_rules!` and `matches!` are still not hoisted (lazy or repeated
+               evaluation is not known statically).
+               **Still open:** (c) closures returned from impl methods,
                from functions with statements or generics, or through a struct field or
                `Vec` are not inlined, and a remaining capturing `make` call in those
                positions still emits uncompilable C.
@@ -627,6 +638,94 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
             is refreshed with these numbers each probe run. Run with
             `python x.py self-host` (use the `python` launcher; `python3` is the
             Windows Store alias and is unavailable).
+          - **Re-run (2026-11-14, later): still `1/5`; type-check errors fell in every crate.**
+            clotho `33 -> 18`, atropos `169 -> 152`, lachesis `121 -> 114`, driver `3`.
+            Fixes that landed: prelude signatures for `Vec`/`Option`/`bool`/`char`/`String`
+            methods the compiler source calls; a struct literal of a generic struct keeps its
+            solved type arguments (`Spanned<i64>`, not bare `Spanned`); solver impl heads
+            match instantiated generic structs (`Apply`), and impl bounds on builtin traits
+            (`T: PartialEq`) resolve to the built-in solver facts; a trait method's bare
+            `-> Self` resolves to the receiver (`clone` on a `T` field returned the impl's
+            bare struct, which monomorphized to `Spanned__Spanned`); `#[derive]` on a generic
+            struct bounds each parameter by the derived trait, as rustc does; bare
+            generic-struct operands and bounds are lenient, like `Ty::Unknown`.
+            Still blocking, with root causes recorded:
+            (1) **Option of reference: done (2026-11-14).** Backend support for `Option<&T>`
+            landed: `println!` of a reference to a scalar derefs it; `Vec::first`/`last` (and
+            slice `first`/`last`) are typed and lowered as `Option<&T>` with a pointer
+            payload, like `get`; `copied()`/`cloned()` on a pointer payload dereference only
+            on the `Some` path; `&base.field` borrows the field in place for any pointer-typed
+            base (a call, say); a closure parameter of reference type is a pointer in the
+            lifted function (checker records parameter types under their pattern spans, kept
+            apart from expression hints). Regression tests: `typed_lowering.rs::
+            references_to_scalars_print_and_option_refs_run` and
+            `closure_borrowing_a_field_through_option_ref_runs`.
+            **Latent escapes exposed and fixed in clotho:** the borrow check never ran on the
+            clotho crate while `Lexer::finish_utf8` failed to lower (the lowering error aborted
+            the crate first), which hid real dangling references. Fixed: `frag_stoppers`
+            returns an owned `Vec` (it returned `&[..]` of a temporary array), and a
+            `matches!` on `slice.last().map(|t| &t.kind)` was rewritten as a `match`. The
+            lexer's `finish_utf8` no longer uses `iter_mut().take().skip()`: it reads the
+            continuation bytes with a `match` on the length and decodes the code point from
+            them (the input is a `&str`, so the bytes are valid UTF-8).
+            Known gap, not fixed: a user program that returns a reference to an array literal,
+            `fn f() -> &'static [i64] { &[1, 2, 3] }`, is rejected by the escape check (the
+            array is a local temporary). HEAD rejects it too. Static storage for literal
+            arrays is needed to accept it.
+            (1b) **Module-scoped std `Path` (done, 2026-11-14).** `tpt-moira-clotho/src/std_imports.rs`
+            resolves the name per file, before flattening: a file that imports
+            `std::path::Path` (and defines no `Path` of its own) has its type positions
+            rewritten to `PathBuf`, which is a `str` in the checker and in the backend. The AST's
+            own `Path` is untouched. No public API changed. Unit tests in that module.
+            Also done for clotho's C: `PathBuf` is `char*`; the `str` prelude has path methods;
+            `&Fn` is not a pointer to a pointer; map instances behind a pointer are emitted;
+            `HashMap::default()` lowers to an empty map; hints that name an unsolved generic
+            struct are dropped (the backend cannot name an uninstantiated struct).
+            **Where clotho's C stands:** `gcc -fsyntax-only build/clotho.c` gives 642 errors
+            (`python x.py self-host` shows only the first). They are mostly untyped `long long`
+            temporaries assigned to pointer and struct values (about 300), unmodeled methods
+            (`HashMap::entry`, the `Option` combinators `ok_or_else`/`unwrap_or_default`/`take`,
+            `Vec::{pop,push,truncate,to_vec}`, `str::{parse,..}`, `Iterator::{zip,position,next}`),
+            and clotho's own functions called before they are declared. The std surface still
+            needed: `mem::take`/`replace`, `fs::read_to_string`, `fs::File`, `io::Read`/`Error`,
+            `fmt::Formatter::write_str`, `sync::atomic::AtomicUsize`, `str::from_utf8`.
+            **Probe reports error counts (2026-11-14):** clotho 592, atropos 1310, lachesis
+            1779, driver 270 `gcc -fsyntax-only` errors on the emitted C (the driver's
+            large-stack thread, below, adds 7 that the backend cannot lower yet). Fixed: diverging match
+            arms (`=> return x`) no longer assign a placeholder to the result; a function-typed
+            reference to a user struct hints its pointer.
+            **The atropos stack overflow was stack depth, not recursion (located 2026-11-14).**
+            LLDB showed `lower_expr`/`lower_expr_inner` nesting with large frames (`__chkstk`
+            in every frame), so the default 1 MiB main stack ran out. The driver now runs the
+            compiler on a 256 MiB thread (`src/main.rs`). Atropos checks and lowers again.
+            Pointer hints in `hint_applies` (`apply_hint`) were measured with that fixed: they
+            left clotho at 632 and made the driver worse, so they stay out.
+            **Method calls on reference parameters (2026-11-14).** A method on a variable whose
+            checker type is a reference to a struct (`|c| c.bump()`, `|p| p.parse_expr()`) got
+            no hint, so the call was emitted as a bare `bump(c)`. `lower_user_method` now falls
+            back to the variable's pointer type. Clotho 632 -> 608, atropos 1318 -> 1312,
+            lachesis 1789 -> 1784. Test: `typed_lowering.rs::method_call_on_closure_reference_parameter_runs`.
+            Tried and reverted: taking a plain variable's C type as the hint for Option/Result
+            methods (atropos +4, clotho unchanged).
+            **Method-call fallbacks, counted (2026-11-14).** Clotho's bare-call fallbacks (a method
+            with no lowering, emitted as `name(recv, args)`): 160 calls, of which 71 have no
+            checker hint on the receiver and 89 have one but no lowering for the method.
+            Hinted but unlowered, by count: `contains` 11, `to_vec` 10, `is_some_and` 6, `last_mut`
+            5, `join` 5 (done now), `entry` 5, `ok` 4, `map_err` 4, `iter` 4, `to_path_buf` 3
+            (done), `parent` 3, `ok_or_else` 3, `is_empty` 3 (done for Vec), `display` 3 (done),
+            `unwrap_or_default` 2, `truncate` 2 (done), `pop` 2 (done), `into_iter` 2, `insert` 2.
+            Unhinted, by count: `map` 16 (iterator adapters, whose checker type is `Unknown`),
+            `push` 11, `as_ref` 6, `unwrap` 4, `or_default` 4, `len` 3, `contains` 3.
+            Done this round: `join`, `to_path_buf`, `display` on paths (`moira_path_join` C helper);
+            `Vec::{is_empty, truncate, pop}` lowered in place (`lower_vec_mut_method`), `Vec::pop`
+            typed as `Option<T>` in the checker. Clotho 608 -> 592, atropos 1312 -> 1310,
+            lachesis 1784 -> 1779, driver 272 -> 270. Test: `typed_lowering.rs::vec_pop_truncate_and_is_empty_run`.
+            Next: the checker types for iterator adapters (`map`, `iter`, `collect`) so their
+            results have hints, then the hinted-but-unlowered list above, most frequent first.
+            (2) atropos and lachesis: the 152 and 114 remaining checker errors are the
+            std-library surface (`PathBuf`/`Path` methods, `AtomicUsize`, `Formatter`,
+            `str::from_utf8`, `String::replace`, `read_to_string`) and `Item`/`&Item`
+            mismatches; each needs a prelude entry plus a backend lowering.
           - Re-run (2026-08-22, post solver-wiring): still `0/5` self-hostable;
             all five crates parse; type-check/codegen gaps unchanged. The new
             trait-bound method resolution does not yet flip a crate — the

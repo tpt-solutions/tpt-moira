@@ -218,7 +218,9 @@ def probe_crate(moira: Path, crate: dict) -> ProbeResult:
             err = (res_cc.stderr or res_cc.stdout).strip().splitlines()
             errors = [l for l in err if "error:" in l]
             snippet = errors[0] if errors else "(no diagnostic)"
-            result.notes.append(f"emitted C does not compile: {snippet}")
+            result.notes.append(
+                f"emitted C does not compile ({len(errors)} error(s)): {snippet}"
+            )
 
     return result
 

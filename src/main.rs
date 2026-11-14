@@ -13,6 +13,20 @@ use tpt_moira_lachesis::propose::{make_record, LlmProposer, TriageQueue};
 use tpt_moira_lachesis::PipelineCacheExt;
 
 fn main() -> ExitCode {
+    // The front end, checker and lowering recurse once per nesting level of the program, and
+    // their frames are large, so a deeply nested program overflows the default 1 MiB main
+    // stack. Run the compiler on a thread with a large stack (as rustc does).
+    const STACK_BYTES: usize = 256 * 1024 * 1024;
+    match std::thread::Builder::new()
+        .stack_size(STACK_BYTES)
+        .spawn(real_main)
+    {
+        Ok(handle) => handle.join().unwrap_or(ExitCode::FAILURE),
+        Err(_) => real_main(),
+    }
+}
+
+fn real_main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     // Subcommand scheme:
