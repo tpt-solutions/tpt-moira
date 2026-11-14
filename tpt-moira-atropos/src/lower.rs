@@ -614,6 +614,15 @@ struct IterChain<'a> {
     stages: Vec<(String, Option<&'a Expr>)>,
 }
 
+/// The other sequence of a `zip` stage: its cursor, length, data pointer and element type.
+#[derive(Clone)]
+struct ZipSeq {
+    idx: String,
+    len: String,
+    data: String,
+    elem: String,
+}
+
 /// The iterator terminals lowered over an iterator chain.
 fn is_iter_terminal(name: &str) -> bool {
     matches!(
@@ -1975,18 +1984,28 @@ impl Lower {
                     .cloned(),
                 _ => None,
             };
-            let ty = match (names_of_p.len(), param_tys.get(k)) {
-                (1, _) if annotated => type_to_c(&p.ty, &self.aliases),
-                (1, _) if pointer_hint.is_some() => pointer_hint.unwrap_or_default(),
-                (1, Some(t)) => t.clone(),
-                _ => "long long".to_string(),
+            // A `(a, b)` pattern takes its two components from a `Tuple<..>` hint (a `zip`
+            // pair); otherwise its names are untyped `long long`s, as an `(i, x)` pair is.
+            let tys: Vec<String> = match (names_of_p.len(), param_tys.get(k)) {
+                (1, _) if annotated => vec![type_to_c(&p.ty, &self.aliases)],
+                (1, _) if pointer_hint.is_some() => vec![pointer_hint.unwrap_or_default()],
+                (1, Some(t)) => vec![t.clone()],
+                (2, Some(t)) => match mir::split_generic(t) {
+                    Some(("Tuple", a)) if a.len() == 2 => a.iter().map(|s| s.to_string()).collect(),
+                    _ => vec!["long long".to_string(), "long long".to_string()],
+                },
+                _ => names_of_p.iter().map(|_| "long long".to_string()).collect(),
             };
-            for n in names_of_p {
+            let mut j = 0;
+            while j < names_of_p.len() {
+                let n = names_of_p[j].clone();
+                let ty = tys[j].clone();
                 sub.func.params.push(n.clone());
                 sub.func.locals.push((n.clone(), Some(ty.clone())));
                 if ty != "long long" {
-                    sub.types.insert(n, ty.clone());
+                    sub.types.insert(n, ty);
                 }
+                j += 1;
             }
         }
         sub.new_block();
@@ -2855,6 +2874,17 @@ impl Lower {
                 "cloned" | "copied" | "enumerate" if args.is_empty() => {
                     stages.push((name.to_string(), None))
                 }
+                // `zip(y)` / `zip(y.iter())`: the other sequence, paired with each item.
+                "zip" if args.len() == 1 => {
+                    let other: &'a Expr = match &args[0].kind {
+                        ExprKind::MethodCall(r, m, a) if m.node == "iter" && a.is_empty() => r,
+                        _ => &args[0],
+                    };
+                    if !self.is_sequence(other) {
+                        return None;
+                    }
+                    stages.push((name.to_string(), Some(other)));
+                }
                 // `s.chars()` / `s.bytes()` on a string: a source of characters.
                 "chars" | "bytes"
                     if args.is_empty() && self.hint_of_expr(r).as_deref() == Some("str") =>
@@ -2877,6 +2907,10 @@ impl Lower {
     /// element, a range, or characters). `max`, `min` and `last` compare the items, so they
     /// are lowered only for scalars; other chains keep their previous lowering.
     fn chain_source_is_scalar(&self, chain: &IterChain<'_>) -> bool {
+        // A `zip` pairs each item, so the items are tuples, not scalars.
+        if chain.stages.iter().any(|(n, _)| n == "zip") {
+            return false;
+        }
         if let Some(seq) = chain.seq {
             return self
                 .vec_local(seq)
@@ -3030,7 +3064,36 @@ impl Lower {
         // previous stage produced (a `map`'s result type; an `enumerate` pair is untyped).
         let mut cur = elem.clone();
         let mut stage_callees: Vec<Option<(String, Vec<mir::Operand>)>> = Vec::new();
+        // Per stage: the other sequence of a `zip`, with its cursor, length and data.
+        let mut zips: Vec<Option<ZipSeq>> = Vec::new();
         for (name, arg) in &chain.stages {
+            if name == "zip" {
+                let seq = arg.expect("zip has a sequence");
+                let (zn, zelem, zptr) = self.chain_sequence(seq)?;
+                let zlen = self.fresh_temp("long long");
+                self.emit(
+                    zlen.clone(),
+                    mir::Rvalue::Field(mir::Operand::var(zn.clone()), "len".into(), zptr),
+                );
+                let zdata = self.fresh_temp(format!("{zelem}*"));
+                self.emit(
+                    zdata.clone(),
+                    mir::Rvalue::Field(mir::Operand::var(zn.clone()), "data".into(), zptr),
+                );
+                let zidx = self.fresh_temp("long long");
+                self.emit(zidx.clone(), mir::Rvalue::Use(mir::Operand::Const(0)));
+                // The closures after this stage take the pair as the generic `Tuple<..>`.
+                cur = format!("Tuple<{cur},{zelem}>");
+                zips.push(Some(ZipSeq {
+                    idx: zidx,
+                    len: zlen,
+                    data: zdata,
+                    elem: zelem,
+                }));
+                stage_callees.push(None);
+                continue;
+            }
+            zips.push(None);
             let callee = match arg {
                 Some(a) => {
                     self.closure_param_hint = Some(vec![cur.clone()]);
@@ -3219,8 +3282,61 @@ impl Lower {
         }
         // The position of the current item, once `enumerate` has passed it.
         let mut pos: Option<String> = None;
-        for ((name, arg), callee) in chain.stages.iter().zip(stage_callees) {
+        let mut si = 0;
+        while si < chain.stages.len() {
+            let name = chain.stages[si].0.clone();
+            let arg = chain.stages[si].1;
+            let callee = stage_callees[si].clone();
+            let zip_seq = zips[si].clone();
             match name.as_str() {
+                "zip" => {
+                    let z = zip_seq.expect("zip has a sequence");
+                    if pos.is_some() {
+                        return Err(LowerError(
+                            "`zip` after `enumerate` is not in the codegen subset".into(),
+                        ));
+                    }
+                    // The other sequence ends the loop, as the source does.
+                    let more = self.fresh_temp("long long");
+                    self.emit(
+                        more.clone(),
+                        mir::Rvalue::Binary(
+                            mir::BinOp::Lt,
+                            mir::Operand::var(z.idx.clone()),
+                            mir::Operand::var(z.len.clone()),
+                        ),
+                    );
+                    let ok = self.new_block();
+                    self.set_term(mir::Terminator::If(mir::Operand::var(more), ok, exit));
+                    self.current = ok;
+                    let other = self.fresh_temp(z.elem.clone());
+                    self.emit(
+                        other.clone(),
+                        mir::Rvalue::Index(
+                            mir::Operand::var(z.data.clone()),
+                            mir::Operand::var(z.idx.clone()),
+                        ),
+                    );
+                    self.emit(
+                        z.idx.clone(),
+                        mir::Rvalue::Binary(
+                            mir::BinOp::Add,
+                            mir::Operand::var(z.idx.clone()),
+                            mir::Operand::Const(1),
+                        ),
+                    );
+                    let item_ty = self.temp_type_of(&item);
+                    let pair_ty = self.tuple_type(vec![item_ty, z.elem.clone()]);
+                    let pair = self.fresh_temp(pair_ty.clone());
+                    self.emit(
+                        pair.clone(),
+                        mir::Rvalue::Tuple(
+                            pair_ty,
+                            vec![mir::Operand::var(item.clone()), mir::Operand::var(other)],
+                        ),
+                    );
+                    item = pair;
+                }
                 "map" => {
                     let (f, caps) = callee.expect("map has a closure");
                     let args =
@@ -3271,6 +3387,7 @@ impl Lower {
                 // `cloned` / `copied` are the identity on the scalar items modelled here.
                 _ => {}
             }
+            si += 1;
         }
 
         // A position alive at the terminal needs a pair closure; `collect`, `find`
@@ -4234,9 +4351,16 @@ impl Lower {
             }
             (true, None) => {
                 let item_ty = self.temp_type_of(item);
+                // A tuple item is typed either as the generic `Tuple<..>` or as its struct
+                // name (a `zip` pair); the struct's fields give the components then.
                 let parts: Vec<String> = match mir::split_generic(&item_ty) {
                     Some(("Tuple", a)) if a.len() == 2 => a.iter().map(|s| s.to_string()).collect(),
-                    _ => vec!["long long".to_string(), "long long".to_string()],
+                    _ => match self.tuple_structs.get(&item_ty) {
+                        Some(def) if def.fields.len() == 2 => {
+                            def.fields.iter().map(|(_, t)| t.clone()).collect()
+                        }
+                        _ => vec!["long long".to_string(), "long long".to_string()],
+                    },
                 };
                 for (i, pty) in parts.into_iter().enumerate() {
                     let t = self.fresh_temp(pty);

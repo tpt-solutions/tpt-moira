@@ -810,10 +810,19 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
             **Pattern-binding methods (1d802d2).** Done: a method on a variable with a known C type
             (a match-arm binding, say) resolves to the struct's method. Own C: clotho 406,
             atropos 1359, lachesis 1367, driver 218.
-            Still open for clotho: iterator chains with a `zip` stage (needs a second index and
-            a second sequence inside the chain loop; `lower_iter_chain` has one index today) and
-            `map` with a function item argument (`map(map)`-style, which `closure_callee` does
-            not accept); `collect` into a map from such a chain.
+            **Zip stage (2026-11-14).** Done: `iter().zip(y)` / `zip(y.iter())` in an iterator
+            chain. `iter_chain_of` accepts the other sequence; the chain loop reads it through its
+            own cursor, stops at the shorter sequence (the cursor's bound is an early exit from the
+            loop), and pairs each item as a two-field tuple. Pair closures after the stage take
+            their components from a `Tuple<..>` hint (a `(a, b)` pattern of two names was always
+            untyped before). `max`/`min`/`last` over a zip stay bare (`chain_source_is_scalar`
+            is false for them). `lower_iter_chain` is an index `while` loop now: a `for` over
+            `.zip(..)` is outside the codegen subset. Regression test:
+            `iterator_zip_pairs_items_and_stops_at_shorter_run`. Own C: clotho 399, atropos 1297,
+            lachesis 1288, driver 211; checker counts unchanged (atropos 137).
+            Still open for clotho: `map` with a function item argument (`map(map)`-style, which
+            `closure_callee` does not accept); `collect` into a map from a zip chain; a zip
+            followed by `max`/`min`/`last`.
  each crate uses the std
             surface and the typed-temporary lowering broadly, and each new feature also adds
             its own source to the probe. The route that worked for the four checker-side

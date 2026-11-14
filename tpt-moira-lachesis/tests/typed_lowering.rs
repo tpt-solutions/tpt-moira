@@ -1034,3 +1034,22 @@ fn main() {
         assert_eq!(out.trim(), "1");
     }
 }
+
+/// `zip` in an iterator chain pairs the items of two sequences; the chain stops at the
+/// shorter one, and a pair closure, `sum` and `count` see the pairs.
+#[test]
+fn iterator_zip_pairs_items_and_stops_at_shorter_run() {
+    let src = r#"
+fn main() {
+    let a: Vec<i64> = vec![1, 2, 3];
+    let b: Vec<i64> = vec![4, 5];
+    let total: i64 = a.iter().zip(b.iter()).map(|(x, y)| *x * *y).sum();
+    print_i64(total);
+    print_i64(a.iter().zip(b.iter()).count() as i64);
+}
+"#;
+    if let Some(out) = check_and_run("iter_zip", src) {
+        let lines: Vec<&str> = out.lines().filter(|l| !l.is_empty()).collect();
+        assert_eq!(lines, vec!["14", "2"]);
+    }
+}
