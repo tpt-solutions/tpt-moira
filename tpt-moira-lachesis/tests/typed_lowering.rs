@@ -932,3 +932,25 @@ fn main() {
         assert_eq!(lines, vec!["2", "6", "0", "7", "12"]);
     }
 }
+
+/// `m.entry(k).or_default().push(x)`: a vector value is created empty on first use, and the
+/// push updates the vector in the map.
+#[test]
+fn map_entry_or_default_then_push_runs() {
+    let src = r#"
+use std::collections::HashMap;
+
+fn main() {
+    let mut m: HashMap<i64, Vec<i64>> = HashMap::new();
+    m.entry(1).or_default().push(5);
+    m.entry(1).or_default().push(6);
+    m.entry(2).or_default().push(7);
+    print_i64(m.len() as i64);
+    print_i64(m.get(1).unwrap().len() as i64);
+}
+"#;
+    if let Some(out) = check_and_run("entry_or_default_push", src) {
+        let lines: Vec<&str> = out.lines().filter(|l| !l.is_empty()).collect();
+        assert_eq!(lines, vec!["2", "2"]);
+    }
+}

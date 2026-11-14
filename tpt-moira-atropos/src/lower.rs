@@ -3853,6 +3853,32 @@ impl Lower {
         Ok(Some(mir::Operand::var(t)))
     }
 
+    /// `m.entry(k).or_default().push(x)` (or `or_insert(v).push(x)`): the slot of the entry is
+    /// a pointer to a vector, which the push helper takes directly. `None` for other shapes.
+    fn lower_entry_vec_push(&mut self, slot: &Expr, arg: &Expr) -> Result<Option<mir::Operand>> {
+        let slot_hint = self.hint_of_expr(slot);
+        let Some(vec_hint) = slot_hint.as_deref().map(|h| h.trim_end_matches('*')) else {
+            return Ok(None);
+        };
+        let Some(elem) = mir::vec_elem(vec_hint).map(|e| e.to_string()) else {
+            return Ok(None);
+        };
+        let ptr = self.lower_expr(slot)?;
+        self.expect_ty = Some(elem.clone());
+        let value = self.lower_expr(arg);
+        self.expect_ty = None;
+        let value = value?;
+        let pushed = self.fresh_temp("long long");
+        self.emit(
+            pushed,
+            mir::Rvalue::Call(
+                mir::Operand::Func(mir::vec_fn_name(&elem, "push")),
+                vec![ptr, value],
+            ),
+        );
+        Ok(Some(mir::Operand::Unit))
+    }
+
     /// `m.entry(k).or_insert_with(f)`: the closure runs only when `k` is absent. Its value
     /// (or a zero placeholder, when present) goes to the slot helper, which inserts only an
     /// absent key, so the result is the same as the Rust's.
@@ -3956,6 +3982,19 @@ impl Lower {
             ("or_default", 0) => match v.as_str() {
                 "str" | "char*" => Some(mir::Operand::CStr(String::new())),
                 t if is_scalar_c_type(t) => Some(mir::Operand::Const(0)),
+                // An empty vector: the vector type's `new` helper.
+                t if mir::vec_elem(t).is_some() => {
+                    let elem = mir::vec_elem(t).unwrap_or_default().to_string();
+                    let empty = self.fresh_temp(mir::vec_type(&elem));
+                    self.emit(
+                        empty.clone(),
+                        mir::Rvalue::Call(
+                            mir::Operand::Func(mir::vec_fn_name(&elem, "new")),
+                            Vec::new(),
+                        ),
+                    );
+                    Some(mir::Operand::var(empty))
+                }
                 _ => return Ok(None),
             },
             _ => return Ok(None),
@@ -9330,6 +9369,15 @@ impl Lower {
                     self.set_term(mir::Terminator::Goto(join));
                     self.current = join;
                     return Ok(mir::Operand::var(r));
+                }
+                if method.node == "push" && args.len() == 1 {
+                    if let ExprKind::MethodCall(_, slot_method, _) = &recv.kind {
+                        if matches!(slot_method.node.as_str(), "or_insert" | "or_default" | "or_insert_with") {
+                            if let Some(v) = self.lower_entry_vec_push(recv, &args[0])? {
+                                return Ok(v);
+                            }
+                        }
+                    }
                 }
                 if matches!(method.node.as_str(), "or_insert" | "or_default" | "or_insert_with") {
                     if let Some(v) = self.lower_map_entry(recv, &method.node, args)? {
