@@ -764,6 +764,15 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
             Measurement note: new lowering and checker code is compiled by the probe as part of
             its crate, so each addition costs a few own errors (atropos +4 for this step).
             Own errors now: clotho 510, atropos 1353, lachesis 1377, driver 223.
+            **HashMap entry API and compound assignment (2026-11-14, latest; commit 2bbdd00).**
+            `entry(k).or_insert(v)`, `.or_default()` (scalar and string values) and
+            `.or_insert_with(f)` are typed and lowered; each map instance gets an
+            `entry_or_insert` helper. `place op= rhs` on a field, element or dereference is
+            lowered as `place = place op rhs` (before it was lost: it wrote a temporary).
+            Own errors: clotho 511, atropos 1376, lachesis 1378, driver 223. The rise in
+            atropos (+23) is the new lowering code, compiled as part of atropos.
+            Open: `entry` for non-scalar values (`or_default` on a `Vec` value), `entry` with
+            `and_modify`, `values_mut`, `last_mut`, and `Option::take` on a non-place receiver.
             Remaining families: string methods (`split`, `split_at`, `starts_with`,
             `strip_suffix`, `trim_end_matches`); slice and iterator methods (`zip`, `split_last`,
             `to_vec`, `values`, `with_capacity`); `saturating_*`; and receivers that have no
