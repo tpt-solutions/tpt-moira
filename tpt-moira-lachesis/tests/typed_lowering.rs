@@ -997,3 +997,40 @@ fn main() {
         assert_eq!(lines, vec!["6", "100"]);
     }
 }
+
+/// A method called on a binding of a `match` arm resolves to the struct's method.
+#[test]
+fn method_call_on_pattern_binding_runs() {
+    let src = r#"
+struct Item {
+    n: i64,
+}
+
+impl Item {
+    fn is_big(&self) -> bool {
+        self.n > 10
+    }
+}
+
+enum E {
+    A(Item),
+    B,
+}
+
+fn check(e: &E) -> bool {
+    match e {
+        E::A(item) => item.is_big(),
+        E::B => false,
+    }
+}
+
+fn main() {
+    let e = E::A(Item { n: 12 });
+    let b = check(&e);
+    print_i64(b as i64);
+}
+"#;
+    if let Some(out) = check_and_run("pattern_binding_method", src) {
+        assert_eq!(out.trim(), "1");
+    }
+}

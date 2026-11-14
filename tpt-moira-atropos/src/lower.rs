@@ -6993,7 +6993,7 @@ impl Lower {
             },
             // A reference-typed variable (a closure parameter `|c| c.m()`, say) has no hint
             // for its reference, but its C type is a pointer to the struct.
-            None => match self.pointer_local_type(recv) {
+            None => match self.variable_type(recv) {
                 Some(p) => p,
                 None => return Ok(None),
             },
@@ -8279,6 +8279,11 @@ impl Lower {
     /// The type hint of `e`, if Lachesis recorded one.
     /// The pointer type of the variable a single-name expression names, if it is a pointer.
     fn pointer_local_type(&self, e: &Expr) -> Option<String> {
+        self.variable_type(e).filter(|t| t.ends_with('*'))
+    }
+
+    /// The C type of the variable a single-name expression names, pointer or not.
+    fn variable_type(&self, e: &Expr) -> Option<String> {
         let ExprKind::Path(p) = &e.kind else {
             return None;
         };
@@ -8286,17 +8291,13 @@ impl Lower {
             return None;
         }
         let n = self.var_name(&p.segments[0].node);
-        self.types
-            .get(&n)
-            .cloned()
-            .or_else(|| {
-                self.func
-                    .locals
-                    .iter()
-                    .find(|(l, _)| *l == n)
-                    .and_then(|(_, t)| t.clone())
-            })
-            .filter(|t| t.ends_with('*'))
+        self.types.get(&n).cloned().or_else(|| {
+            self.func
+                .locals
+                .iter()
+                .find(|(l, _)| *l == n)
+                .and_then(|(_, t)| t.clone())
+        })
     }
 
     fn hint_of_expr(&self, e: &Expr) -> Option<String> {
