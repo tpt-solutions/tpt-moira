@@ -3853,6 +3853,144 @@ impl Lower {
         Ok(Some(mir::Operand::var(t)))
     }
 
+    /// `m.entry(k).or_insert_with(f)`: the closure runs only when `k` is absent. Its value
+    /// (or a zero placeholder, when present) goes to the slot helper, which inserts only an
+    /// absent key, so the result is the same as the Rust's.
+    fn lower_map_entry_with(
+        &mut self,
+        mname: &str,
+        k: &str,
+        v: &str,
+        is_ptr: bool,
+        entry_args: &[Expr],
+        closure: &Expr,
+    ) -> Result<mir::Operand> {
+        let recv_ptr = if is_ptr {
+            mir::Operand::var(mname.to_string())
+        } else {
+            let p = self.fresh_temp(format!("Map<{k},{v}>*"));
+            self.emit(
+                p.clone(),
+                mir::Rvalue::Ref(mir::Operand::var(mname.to_string()), true),
+            );
+            mir::Operand::var(p)
+        };
+        let key = self.lower_key_arg(&entry_args[0], k)?;
+        let found = self.fresh_temp("long long");
+        self.emit(
+            found.clone(),
+            mir::Rvalue::Call(
+                mir::Operand::Func(mir::map_fn_name(k, v, "find")),
+                vec![recv_ptr.clone(), key.clone()],
+            ),
+        );
+        let absent = self.fresh_temp("long long");
+        self.emit(
+            absent.clone(),
+            mir::Rvalue::Binary(
+                mir::BinOp::Lt,
+                mir::Operand::var(found),
+                mir::Operand::Const(0),
+            ),
+        );
+        let value = self.fresh_temp(v.to_string());
+        let make = self.new_block();
+        let keep = self.new_block();
+        let join = self.new_block();
+        self.set_term(mir::Terminator::If(mir::Operand::var(absent), make, keep));
+        self.current = make;
+        self.closure_param_hint = Some(Vec::new());
+        let callee = self.closure_callee(closure);
+        self.closure_param_hint = None;
+        let (f, caps) = callee?;
+        self.emit(
+            value.clone(),
+            mir::Rvalue::Call(mir::Operand::Func(f), caps),
+        );
+        self.set_term(mir::Terminator::Goto(join));
+        self.current = keep;
+        self.emit(value.clone(), mir::Rvalue::Use(mir::Operand::Const(0)));
+        self.set_term(mir::Terminator::Goto(join));
+        self.current = join;
+        let slot = self.fresh_temp(format!("{v}*"));
+        self.emit(
+            slot.clone(),
+            mir::Rvalue::Call(
+                mir::Operand::Func(mir::map_fn_name(k, v, "entry_or_insert")),
+                vec![recv_ptr, key, mir::Operand::var(value)],
+            ),
+        );
+        Ok(mir::Operand::var(slot))
+    }
+
+    /// `m.entry(k).or_insert(v)` and `m.entry(k).or_default()` on a named map: a pointer to
+    /// the value of `k`, inserting the value first when the key is absent. `or_default` gives
+    /// the zero value of the map's value type (`0`, or the empty string). `None` for other
+    /// shapes and value types.
+    fn lower_map_entry(
+        &mut self,
+        recv: &Expr,
+        method: &str,
+        args: &[Expr],
+    ) -> Result<Option<mir::Operand>> {
+        let ExprKind::MethodCall(map_expr, entry, entry_args) = &recv.kind else {
+            return Ok(None);
+        };
+        if entry.node != "entry" || entry_args.len() != 1 {
+            return Ok(None);
+        }
+        let (mname, k, v, is_ptr) = match self.field_map_pointer(map_expr, "insert")? {
+            Some(m) => m,
+            None => match self.map_local(map_expr) {
+                Some(m) => m,
+                None => return Ok(None),
+            },
+        };
+        if method == "or_insert_with" && args.len() == 1 {
+            return self
+                .lower_map_entry_with(&mname, &k, &v, is_ptr, entry_args, &args[0])
+                .map(Some);
+        }
+        let default = match (method, args.len()) {
+            ("or_insert", 1) => None,
+            ("or_default", 0) => match v.as_str() {
+                "str" | "char*" => Some(mir::Operand::CStr(String::new())),
+                t if is_scalar_c_type(t) => Some(mir::Operand::Const(0)),
+                _ => return Ok(None),
+            },
+            _ => return Ok(None),
+        };
+        let recv_ptr = if is_ptr {
+            mir::Operand::var(mname.clone())
+        } else {
+            let p = self.fresh_temp(format!("Map<{k},{v}>*"));
+            self.emit(
+                p.clone(),
+                mir::Rvalue::Ref(mir::Operand::var(mname.clone()), true),
+            );
+            mir::Operand::var(p)
+        };
+        let key = self.lower_key_arg(&entry_args[0], &k)?;
+        let value = match default {
+            Some(d) => d,
+            None => {
+                self.expect_ty = Some(v.clone());
+                let value = self.lower_expr(&args[0]);
+                self.expect_ty = None;
+                value?
+            }
+        };
+        let slot = self.fresh_temp(format!("{v}*"));
+        self.emit(
+            slot.clone(),
+            mir::Rvalue::Call(
+                mir::Operand::Func(mir::map_fn_name(&k, &v, "entry_or_insert")),
+                vec![recv_ptr, key, value],
+            ),
+        );
+        Ok(Some(mir::Operand::var(slot)))
+    }
+
     /// `for (k, v) in &m` (or `m.iter()`): an index loop over the map's keys and values.
     #[allow(clippy::too_many_arguments)]
     fn lower_map_for(
@@ -8119,6 +8257,27 @@ impl Lower {
             ExprKind::Binary(l, abop, r) => {
                 // Assignment / compound assignment mutate the left-hand place.
                 if let Some(arith) = compound_op(*abop) {
+                    // `place op= rhs` on a field, an element or a dereference is `place = place op
+                    // rhs`, stored through the plain assignment's place handling.
+                    if let Some(plain) = plain_binop(*abop) {
+                        if matches!(
+                            l.kind,
+                            ExprKind::Field(..)
+                                | ExprKind::Index(..)
+                                | ExprKind::Deref(..)
+                                | ExprKind::Unary(AUnOp::Deref, _)
+                        ) {
+                            let value = ast::Expr {
+                                kind: ExprKind::Binary(l.clone(), plain, r.clone()),
+                                span: e.span,
+                            };
+                            let store = ast::Expr {
+                                kind: ExprKind::Binary(l.clone(), ABinOp::Assign, Box::new(value)),
+                                span: e.span,
+                            };
+                            return self.lower_expr(&store);
+                        }
+                    }
                     let lhs = self.lower_expr(l)?;
                     let rhs = self.lower_expr(r)?;
                     let place = match &lhs {
@@ -9171,6 +9330,11 @@ impl Lower {
                     self.set_term(mir::Terminator::Goto(join));
                     self.current = join;
                     return Ok(mir::Operand::var(r));
+                }
+                if matches!(method.node.as_str(), "or_insert" | "or_default" | "or_insert_with") {
+                    if let Some(v) = self.lower_map_entry(recv, &method.node, args)? {
+                        return Ok(v);
+                    }
                 }
                 if method.node == "retain" && args.len() == 1 {
                     if let Some(v) = self.lower_vec_retain(recv, &args[0])? {
@@ -11225,6 +11389,23 @@ fn name_of(o: &mir::Operand) -> String {
         mir::Operand::Var(n) => n.clone(),
         _ => String::new(),
     }
+}
+
+/// The plain binary operator of a compound assignment (`+=` is `+`).
+fn plain_binop(op: ABinOp) -> Option<ABinOp> {
+    Some(match op {
+        ABinOp::AddAssign => ABinOp::Add,
+        ABinOp::SubAssign => ABinOp::Sub,
+        ABinOp::MulAssign => ABinOp::Mul,
+        ABinOp::DivAssign => ABinOp::Div,
+        ABinOp::RemAssign => ABinOp::Rem,
+        ABinOp::BitAndAssign => ABinOp::BitAnd,
+        ABinOp::BitOrAssign => ABinOp::BitOr,
+        ABinOp::BitXorAssign => ABinOp::BitXor,
+        ABinOp::ShlAssign => ABinOp::Shl,
+        ABinOp::ShrAssign => ABinOp::Shr,
+        _ => return None,
+    })
 }
 
 fn compound_op(op: ABinOp) -> Option<mir::BinOp> {

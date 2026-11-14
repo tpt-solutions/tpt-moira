@@ -3029,6 +3029,24 @@ impl TypeChecker {
             let v = self.infer_expr(&args[0]);
             return Ty::Apply("Option".into(), vec![v]);
         }
+        // `map.entry(k).or_insert(v)` / `.or_default()` is a mutable reference to the value.
+        if let Ty::Apply(n, targs) = self.strip_refs(&recv_ty) {
+            if n == "Entry" && targs.len() == 2 {
+                let v = targs[1].clone();
+                match (method.node.as_str(), args.len()) {
+                    ("or_insert", 1) => {
+                        self.infer_expr(&args[0]);
+                        return Ty::RefMut(Box::new(v));
+                    }
+                    ("or_default", 0) => return Ty::RefMut(Box::new(v)),
+                    ("or_insert_with", 1) => {
+                        self.closure_result(&args[0], &Ty::Unit);
+                        return Ty::RefMut(Box::new(v));
+                    }
+                    _ => {}
+                }
+            }
+        }
         // `Option<&T>::cloned()` / `copied()` is `Option<T>` (the referent's type).
         if let Ty::Apply(n, targs) = self.strip_refs(&recv_ty) {
             if n == "Option"
@@ -3117,6 +3135,10 @@ impl TypeChecker {
                 let result = match (method.node.as_str(), args.len()) {
                     ("get" | "remove", 1) => Some(Ty::Apply("Option".to_string(), vec![v])),
                     ("insert", 2) => Some(Ty::Apply("Option".to_string(), vec![v])),
+                    ("entry", 1) => Some(Ty::Apply(
+                        "Entry".to_string(),
+                        vec![targs[0].clone(), targs[1].clone()],
+                    )),
                     ("contains_key", 1) => Some(Ty::Bool),
                     ("len", 0) => Some(Ty::Usize),
                     ("is_empty", 0) => Some(Ty::Bool),

@@ -897,3 +897,38 @@ fn main() {
         assert_eq!(lines, vec!["9", "2", "2", "-1", "90"]);
     }
 }
+
+/// `map.entry(k).or_insert(v)` and `or_default()` give the value's slot, so `*slot += x`
+/// updates the map; a compound assignment to a field and an element stores its result.
+#[test]
+fn map_entry_and_compound_assignment_to_places_run() {
+    let src = r#"
+use std::collections::HashMap;
+
+struct Acc {
+    total: i64,
+}
+
+fn main() {
+    let mut m: HashMap<i64, i64> = HashMap::new();
+    *m.entry(3).or_insert(0) += 1;
+    *m.entry(3).or_insert(10) += 5;
+    let d = *m.entry(4).or_default();
+    print_i64(m.len() as i64);
+    print_i64(m.get(3).unwrap_or(-1));
+    print_i64(d);
+    let mut a = Acc { total: 4 };
+    a.total += 3;
+    print_i64(a.total);
+    let mut v: Vec<i64> = Vec::new();
+    v.push(1);
+    v.push(2);
+    v[1] += 10;
+    print_i64(v[1]);
+}
+"#;
+    if let Some(out) = check_and_run("map_entry_compound", src) {
+        let lines: Vec<&str> = out.lines().filter(|l| !l.is_empty()).collect();
+        assert_eq!(lines, vec!["2", "6", "0", "7", "12"]);
+    }
+}

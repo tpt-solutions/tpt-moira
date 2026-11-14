@@ -1213,6 +1213,11 @@ fn map_helpers(
     s.push_str(&format!(
         "static long long {contains}({name}* m, {kc} k) {{ return {find}(m, k) >= 0; }}\n"
     ));
+    // `entry(k).or_insert(v)`: a pointer to the value of `k`, inserting `v` first if absent.
+    let entry = mir::map_fn_name(k, v, "entry_or_insert");
+    s.push_str(&format!(
+        "static {vc}* {entry}({name}* m, {kc} k, {vc} v) {{\n    long long i = {find}(m, k);\n    if (i < 0) {{ {insert}(m, k, v); i = m->len - 1; }}\n    return &m->vals[i];\n}}\n"
+    ));
     s.push_str(&format!(
         "static long long {len}({name}* m) {{ return m->len; }}\n"
     ));
