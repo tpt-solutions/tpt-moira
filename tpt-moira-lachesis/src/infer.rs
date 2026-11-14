@@ -2993,6 +2993,14 @@ impl TypeChecker {
                 return Ty::Unknown;
             }
         }
+        // `cond.then_some(v)` on a bool is `Option<T>` of the argument's type.
+        if method.node == "then_some"
+            && args.len() == 1
+            && matches!(self.strip_refs(&recv_ty), Ty::Bool)
+        {
+            let v = self.infer_expr(&args[0]);
+            return Ty::Apply("Option".into(), vec![v]);
+        }
         // `Option<&T>::cloned()` / `copied()` is `Option<T>` (the referent's type).
         if let Ty::Apply(n, targs) = self.strip_refs(&recv_ty) {
             if n == "Option"

@@ -6551,6 +6551,7 @@ impl Lower {
                 | "unwrap_or_default"
                 | "ok"
                 | "ok_or_else"
+                | "take"
         );
         if !known {
             return Ok(None);
@@ -6643,6 +6644,45 @@ impl Lower {
                 self.set_term(mir::Terminator::Goto(join));
                 self.current = join;
                 Ok(Some(mir::Operand::var(r)))
+            }
+            "take" if args.is_empty() => {
+                // `opt.take()`: the value, and `None` left in the place it was read from.
+                // The place is a local (reassigned) or a field of a struct (stored into it).
+                let taken = self.fresh_temp(hint.clone());
+                self.emit(taken.clone(), mir::Rvalue::Use(op.clone()));
+                let none = self.fresh_temp(hint.clone());
+                self.emit(
+                    none.clone(),
+                    mir::Rvalue::StructLit(
+                        "Option".to_string(),
+                        vec![("tag".to_string(), mir::Operand::Const(1))],
+                    ),
+                );
+                match &recv.kind {
+                    ExprKind::Path(p) if p.segments.len() == 1 => {
+                        let name = self.var_name(&p.segments[0].node);
+                        self.emit(name, mir::Rvalue::Use(mir::Operand::var(none)));
+                    }
+                    ExprKind::Field(base, field) => {
+                        let b = self.lower_expr(base)?;
+                        let bptr = self.scrutinee_is_pointer(&b);
+                        self.emit(
+                            "__scratch".to_string(),
+                            mir::Rvalue::StoreField(
+                                b,
+                                field.node.clone(),
+                                mir::Operand::var(none),
+                                bptr,
+                            ),
+                        );
+                    }
+                    _ => {
+                        return Err(LowerError(
+                            "`take` needs a local or a field as its receiver".into(),
+                        ))
+                    }
+                }
+                Ok(Some(mir::Operand::var(taken)))
             }
             "ok" if targs.len() == 2 => {
                 // `Result<T, E>::ok()`: `Some(v)` for `Ok(v)`, else `None`.
@@ -8722,6 +8762,46 @@ impl Lower {
                         self.emit(t.clone(), mir::Rvalue::Binary(op, a, b));
                         return Ok(mir::Operand::var(t));
                     }
+                }
+                // `cond.then_some(v)` on a bool: `Some(v)` when `cond`, else `None`.
+                if method.node == "then_some"
+                    && args.len() == 1
+                    && self.hint_of_expr(recv).as_deref() == Some("bool")
+                {
+                    let cond = self.lower_expr(recv)?;
+                    let v = self.lower_expr(&args[0])?;
+                    let vty = match &v {
+                        mir::Operand::Var(n) => self.temp_type_of(n),
+                        _ => "long long".to_string(),
+                    };
+                    let r = self.fresh_temp(format!("Option<{vty}>"));
+                    let then_blk = self.new_block();
+                    let else_blk = self.new_block();
+                    let join = self.new_block();
+                    self.set_term(mir::Terminator::If(cond, then_blk, else_blk));
+                    self.current = then_blk;
+                    self.emit(
+                        r.clone(),
+                        mir::Rvalue::StructLit(
+                            "Option".to_string(),
+                            vec![
+                                ("tag".to_string(), mir::Operand::Const(0)),
+                                ("f0".to_string(), v),
+                            ],
+                        ),
+                    );
+                    self.set_term(mir::Terminator::Goto(join));
+                    self.current = else_blk;
+                    self.emit(
+                        r.clone(),
+                        mir::Rvalue::StructLit(
+                            "Option".to_string(),
+                            vec![("tag".to_string(), mir::Operand::Const(1))],
+                        ),
+                    );
+                    self.set_term(mir::Terminator::Goto(join));
+                    self.current = join;
+                    return Ok(mir::Operand::var(r));
                 }
                 if method.node == "retain" && args.len() == 1 {
                     if let Some(v) = self.lower_vec_retain(recv, &args[0])? {

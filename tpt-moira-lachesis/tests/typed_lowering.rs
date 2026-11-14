@@ -778,3 +778,33 @@ fn main() {
         assert_eq!(lines, vec!["0", "9", "-1", "5", "9", "-2"]);
     }
 }
+
+/// `Option::take` returns the value and leaves `None` in the local or field it came from;
+/// `bool::then_some` is `Some` when the receiver is true.
+#[test]
+fn option_take_and_bool_then_some_run() {
+    let src = r#"
+struct Slot {
+    v: Option<i64>,
+}
+
+fn main() {
+    let mut x: Option<i64> = Some(4);
+    let t = x.take();
+    print_i64(t.unwrap_or(-1));
+    print_i64(x.unwrap_or(-1));
+    let mut s = Slot { v: Some(8) };
+    let u = s.v.take();
+    print_i64(u.unwrap_or(-1));
+    print_i64(s.v.unwrap_or(-1));
+    let c: bool = 3 > 2;
+    let d: bool = 1 > 2;
+    print_i64(c.then_some(6).unwrap_or(-1));
+    print_i64(d.then_some(6).unwrap_or(-1));
+}
+"#;
+    if let Some(out) = check_and_run("take_then_some", src) {
+        let lines: Vec<&str> = out.lines().filter(|l| !l.is_empty()).collect();
+        assert_eq!(lines, vec!["4", "-1", "8", "-1", "6", "-1"]);
+    }
+}
