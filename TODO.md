@@ -704,9 +704,20 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
             with `Spanned__String`, `Pat`, `AliasTable`, `clotho_Block` and others: the AST types
             of clotho, which the per-crate probe never defines, because `--extern` is for
             checking only. `--bundle` defines them, but it emits the extern crates too, so
-            atropos with its externs is 5683 errors: a different measurement. Decision needed:
-            keep the per-crate metric and report the extern-type errors separately, or make the
-            probe bundle and count only the root crate's functions.
+            atropos with its externs is 5683 errors: a different measurement.
+            **Decision made: option 2 (2026-11-14).** The probe bundles each crate with its
+            Cargo path dependencies only (`crate_dependencies` in `x.py`), and attributes each
+            gcc error to the crate or to an extern crate: an error inside a function named
+            `<crate>__...` is the extern crate's; a top-level error on a line that names one of
+            the extern crate's items is theirs; everything else is the crate's own. A crate's
+            `codegen_ok` depends only on its own errors. The report gives both counts.
+            Current (own / extern): clotho 525 / 0; atropos 2434 / 499; lachesis 2586 / 3016;
+            driver 246 / 5457; moira-alloc has no dependencies and is self-hostable.
+            These numbers are not comparable with the earlier per-crate ones: the bundled unit
+            now type-checks the extern types, so errors that were hidden behind `unknown type
+            name 'Expr'` appear. The largest own group is `request for member ... not a
+            structure` (851): the root's code reads fields of extern structs, and the lowering
+            does not know those fields' C types across crates. That is the next target.
             Previously: clotho 592, atropos 1310, lachesis 1779, driver 270 `gcc -fsyntax-only` errors on the emitted C (the driver's
             large-stack thread, below, adds 7 that the backend cannot lower yet). Fixed: diverging match
             arms (`=> return x`) no longer assign a placeholder to the result; a function-typed
