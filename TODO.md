@@ -713,6 +713,15 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
             `codegen_ok` depends only on its own errors. The report gives both counts.
             Current (own / extern): clotho 525 / 0; atropos 2434 / 499; lachesis 2586 / 3016;
             driver 246 / 5457; moira-alloc has no dependencies and is self-hostable.
+            **Progress (2026-11-14, later).** `Result::map_err` is typed and lowered (commit
+            89cc005). The lowering now knows extern structs' field types, and the borrow check
+            lowers with its extern crates (commit 4af9b77). Current (own / extern): clotho 518 / 0;
+            atropos 1408 / 492 (check: 158 errors, of which the first three real borrow findings
+            are now visible: `cannot borrow out as mutable more than once` in `emit_asm`, and two
+            "reference to local escapes" in lifted closures of `Lower::lower_stmt` and
+            `Lower::lower_tuple_destructure`); lachesis 1399 / 2050; driver 225 / 3235.
+            The largest own group is now `request for member 'tag'` on values the lowering types
+            as `long long` (scrutinees of matches on extern-crate values, most likely).
             These numbers are not comparable with the earlier per-crate ones: the bundled unit
             now type-checks the extern types, so errors that were hidden behind `unknown type
             name 'Expr'` appear. The largest own group is `request for member ... not a
