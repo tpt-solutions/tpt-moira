@@ -876,39 +876,38 @@ fn rename_op(op: &mut mir::Operand, map: &HashMap<String, String>) {
 }
 
 fn rename_rvalue(rv: &mut mir::Rvalue, map: &HashMap<String, String>) {
-    use mir::Rvalue as R;
     match rv {
-        R::Use(a)
-        | R::Unary(_, a)
-        | R::Field(a, _, _)
-        | R::FieldAddr(a, _, _)
-        | R::Ref(a, _)
-        | R::Cast(a, _) => rename_op(a, map),
-        R::Binary(_, a, b) | R::Index(a, b) | R::IndexRef(a, b) => {
+        mir::Rvalue::Use(a)
+        | mir::Rvalue::Unary(_, a)
+        | mir::Rvalue::Field(a, _, _)
+        | mir::Rvalue::FieldAddr(a, _, _)
+        | mir::Rvalue::Ref(a, _)
+        | mir::Rvalue::Cast(a, _) => rename_op(a, map),
+        mir::Rvalue::Binary(_, a, b) | mir::Rvalue::Index(a, b) | mir::Rvalue::IndexRef(a, b) => {
             rename_op(a, map);
             rename_op(b, map);
         }
-        R::Call(c, args) => {
+        mir::Rvalue::Call(c, args) => {
             rename_op(c, map);
             for a in args.iter_mut() {
                 rename_op(a, map);
             }
         }
-        R::StructLit(_, fields) => {
+        mir::Rvalue::StructLit(_, fields) => {
             for (_, a) in fields.iter_mut() {
                 rename_op(a, map);
             }
         }
-        R::StoreIndex(a, b, c) => {
+        mir::Rvalue::StoreIndex(a, b, c) => {
             rename_op(a, map);
             rename_op(b, map);
             rename_op(c, map);
         }
-        R::StoreField(a, _, b, _) => {
+        mir::Rvalue::StoreField(a, _, b, _) => {
             rename_op(a, map);
             rename_op(b, map);
         }
-        R::Array(_, ops) | R::Tuple(_, ops) => {
+        mir::Rvalue::Array(_, ops) | mir::Rvalue::Tuple(_, ops) => {
             for a in ops.iter_mut() {
                 rename_op(a, map);
             }

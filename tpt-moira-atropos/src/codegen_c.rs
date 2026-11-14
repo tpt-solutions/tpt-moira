@@ -192,39 +192,38 @@ fn escape_op(op: &mut mir::Operand) {
 // Index loops, not `iter_mut()`: the Stage-1 subset lowers `for` only over ranges and arrays.
 #[allow(clippy::needless_range_loop)]
 fn escape_rvalue(rv: &mut mir::Rvalue) {
-    use mir::Rvalue as R;
     match rv {
-        R::Use(a)
-        | R::Unary(_, a)
-        | R::Field(a, _, _)
-        | R::FieldAddr(a, _, _)
-        | R::Ref(a, _)
-        | R::Cast(a, _) => escape_op(a),
-        R::Binary(_, a, b) | R::Index(a, b) | R::IndexRef(a, b) => {
+        mir::Rvalue::Use(a)
+        | mir::Rvalue::Unary(_, a)
+        | mir::Rvalue::Field(a, _, _)
+        | mir::Rvalue::FieldAddr(a, _, _)
+        | mir::Rvalue::Ref(a, _)
+        | mir::Rvalue::Cast(a, _) => escape_op(a),
+        mir::Rvalue::Binary(_, a, b) | mir::Rvalue::Index(a, b) | mir::Rvalue::IndexRef(a, b) => {
             escape_op(a);
             escape_op(b);
         }
-        R::Call(c, args) => {
+        mir::Rvalue::Call(c, args) => {
             escape_op(c);
             for i in 0..args.len() {
                 escape_op(&mut args[i]);
             }
         }
-        R::StructLit(_, fields) => {
+        mir::Rvalue::StructLit(_, fields) => {
             for i in 0..fields.len() {
                 escape_op(&mut fields[i].1);
             }
         }
-        R::StoreIndex(a, b, c) => {
+        mir::Rvalue::StoreIndex(a, b, c) => {
             escape_op(a);
             escape_op(b);
             escape_op(c);
         }
-        R::StoreField(a, _, b, _) => {
+        mir::Rvalue::StoreField(a, _, b, _) => {
             escape_op(a);
             escape_op(b);
         }
-        R::Array(_, ops) | R::Tuple(_, ops) => {
+        mir::Rvalue::Array(_, ops) | mir::Rvalue::Tuple(_, ops) => {
             for i in 0..ops.len() {
                 escape_op(&mut ops[i]);
             }
