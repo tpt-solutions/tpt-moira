@@ -3269,7 +3269,12 @@ impl TypeChecker {
                     || (args.len() == 1 && (m == "unwrap_or" || m == "unwrap_or_else")))
             {
                 for a in args {
-                    self.infer_expr(a);
+                    let at = self.infer_expr(a);
+                    // `unwrap_or(default)` takes the payload type, so an unsuffixed literal
+                    // in `default` (`&-1` for an `Option<&i64>`) takes that type too.
+                    if m == "unwrap_or" {
+                        self.expect(&at, &targs[0], a.span);
+                    }
                 }
                 return targs[0].clone();
             }
