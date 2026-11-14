@@ -934,6 +934,69 @@ fn returned_capturing_closure_passed_as_argument_runs() {
 }
 
 #[test]
+fn returned_capturing_closure_inside_assert_runs() {
+    // `assert_eq!(apply(make(4), 1), 5)`: the call sits in an eagerly evaluated macro
+    // argument, so it is hoisted out of the tokens into a `let` before the statement.
+    let out = match run_src(
+        "fn make(k: i64) -> impl Fn(i64) -> i64 {
+            move |x: i64| x + k
+        }
+        fn apply(f: fn(i64) -> i64, x: i64) -> i64 {
+            f(x)
+        }
+        fn main() {
+            assert_eq!(apply(make(4), 1), 5);
+            print_i64(9);
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping assert closure run");
+            return;
+        }
+    };
+    assert_eq!(
+        out, "9",
+        "the hoisted closure call should satisfy the assertion"
+    );
+}
+
+#[test]
+fn returned_capturing_closure_with_impure_argument_runs() {
+    // `apply(make(side()), 1)`: the impure argument of the candidate call is evaluated
+    // by the hoisted `let`, which runs before the statement. `side` prints first, so
+    // the output also checks that the impure argument is evaluated exactly once.
+    let out = match run_src(
+        "fn make(k: i64) -> impl Fn(i64) -> i64 {
+            move |x: i64| x + k
+        }
+        fn side() -> i64 {
+            print_i64(7);
+            4
+        }
+        fn apply(f: fn(i64) -> i64, x: i64) -> i64 {
+            f(x)
+        }
+        fn main() {
+            let r = apply(make(side()), 1);
+            print_i64(r);
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping impure-argument closure run");
+            return;
+        }
+    };
+    assert_eq!(
+        out,
+        "7
+5",
+        "the impure argument should run once, before the statement"
+    );
+}
+
+#[test]
 fn returned_capturing_closure_inside_println_runs() {
     // The call sits in a `println!` argument, which is a token stream until lowering;
     // the pass hoists it out of the tokens into a `let` before the statement.

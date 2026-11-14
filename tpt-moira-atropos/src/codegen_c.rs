@@ -12,6 +12,16 @@ use crate::mir;
 const STR_RUNTIME: &str = r#"#include <ctype.h>
 static char* moira_str_dup_n(const char* s, size_t n) { char* r = (char*)malloc(n + 1); memcpy(r, s, n); r[n] = 0; return r; }
 char* moira_str_dup(char* s) { return moira_str_dup_n(s, strlen(s)); }
+// `Path::join` / `PathBuf::push`-style joining: `a/b`, with no doubled separator.
+char* moira_path_join(char* a, char* b) {
+    size_t n = strlen(a), m = strlen(b);
+    int sep = n > 0 && a[n - 1] != '/' && a[n - 1] != '\\';
+    char* r = (char*)malloc(n + m + (sep ? 1 : 0) + 1);
+    memcpy(r, a, n);
+    if (sep) r[n++] = '/';
+    memcpy(r + n, b, m + 1);
+    return r;
+}
 char* moira_str_to_string(char* s) { return moira_str_dup(s); }
 char* moira_int_to_string(long long x) { char b[32]; sprintf(b, "%lld", x); return moira_str_dup(b); }
 char* moira_str_to_owned(char* s) { return moira_str_dup(s); }
@@ -854,7 +864,9 @@ fn scan_generics(
     insts: &mut std::collections::BTreeSet<String>,
     maps: &mut std::collections::BTreeSet<(String, String)>,
 ) {
-    let (base, args) = match mir::split_generic(ty) {
+    // A pointer to an instance (`Map<str,Expr>*`, a `&HashMap` parameter) names the same
+    // instance: scan the pointee.
+    let (base, args) = match mir::split_generic(ty.trim_end_matches('*')) {
         Some(p) => p,
         None => return,
     };
