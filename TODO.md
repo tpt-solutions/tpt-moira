@@ -807,6 +807,13 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
             tuple and map temporaries (`t = 0` for a `Tuple`); (4) closure arguments whose type
             differs from the parameter's (`expand_depth(depth, self, t)`). Next: (1) and (2) are
             lowering coverage; (4) is a closure-type mismatch in the caller's hint.
+            **Pattern-binding methods (1d802d2).** Done: a method on a variable with a known C type
+            (a match-arm binding, say) resolves to the struct's method. Own C: clotho 406,
+            atropos 1359, lachesis 1367, driver 218.
+            Still open for clotho: iterator chains with a `zip` stage (needs a second index and
+            a second sequence inside the chain loop; `lower_iter_chain` has one index today) and
+            `map` with a function item argument (`map(map)`-style, which `closure_callee` does
+            not accept); `collect` into a map from such a chain.
  each crate uses the std
             surface and the typed-temporary lowering broadly, and each new feature also adds
             its own source to the probe. The route that worked for the four checker-side
