@@ -7582,10 +7582,6 @@ impl Lower {
         if !known {
             return Ok(None);
         }
-        eprintln!(
-            "DBG enum method {method} hint={:?}",
-            self.hint_of_expr(recv)
-        );
         let hint = match self.hint_of_expr(recv) {
             Some(h) => h,
             None => return Ok(None),

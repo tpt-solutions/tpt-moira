@@ -297,8 +297,14 @@ def probe_crate(moira: Path, crate: dict) -> ProbeResult:
     result.codegen_ok = res_c.returncode == 0
     if res_c.returncode != 0:
         err = (res_c.stderr or res_c.stdout).strip().splitlines()
-        snippet = err[-1] if err else "(no diagnostic)"
-        result.notes.append(f"codegen failed: {snippet}")
+        # Lowering names one blocker per function (`in fn ...`); list each of them.
+        blockers = [l.strip() for l in err if "in fn `" in l or "in crate `" in l]
+        if blockers:
+            result.notes.append(f"codegen blocked in {len(blockers)} function(s):")
+            result.notes.extend(f"  - {b}" for b in blockers)
+        else:
+            snippet = err[-1] if err else "(no diagnostic)"
+            result.notes.append(f"codegen failed: {snippet}")
 
     # The emitted C must also compile: a probe that only checks emission would pass
     # lowering that produces ill-typed C. Skipped (not failed) without a C compiler.

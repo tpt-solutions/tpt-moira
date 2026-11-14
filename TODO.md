@@ -682,8 +682,27 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
             from a fallback `0` where a struct is expected (e.g. `entry(..).or_insert_with`
             on a map whose value is a tuple struct), raw method calls on receivers with no
             known type (`next`, `iter`, `map`, `filter`, `take`), and Option/struct field
-            access on fallback temporaries. Atropos and lachesis still fail the checker. Tests: `codegen.rs` (`user_display_impl_formats_through_format_and_write_runs`,
-            `unclosed_impl_is_a_parse_error_not_a_hang`). Workspace `cargo test` is green.
+            access on fallback temporaries. Atropos and lachesis still fail the checker.
+          - Status (2026-11-15, option 3): lowering now names each blocker instead of
+            emitting C that cannot compile. A call to a name that is not a function,
+            builtin or local, and a method with no function of that name, are errors
+            (`lower_program_with_enums` collects one per function). The borrow check
+            lowers leniently (`lower_program_for_borrow_check`), so `moira --check`
+            behaves as before. `x.py self-host` lists every blocked function per crate.
+            Counts (approximate; extern-crate functions are repeated under atropos and
+            lachesis): clotho 41 functions, atropos 122, lachesis 79, driver 9. Most are
+            "method on a receiver whose type is unknown" (157) and "call to a path whose
+            type is unknown" (89): the checker records no usable type for those
+            expressions, so improving checker expression coverage is the main lever.
+          - Test-harness correction (2026-11-15): `run_src` used to return `None` when the
+            emitted C failed to compile, and the run tests then passed silently. A compile
+            failure now fails the test. The run tests moved to
+            `tpt-moira-lachesis/tests/codegen.rs` and use the checker's hints, as `moira`
+            does (`lower_program` without hints is not the compiler's path). Still failing
+            on known gaps and marked `#[ignore]`: `generic_struct_literal_inside_vec_macro_runs`
+            (generic struct instance used as a Vec element is not monomorphized).
+            Fixed in the same pass: `*box` typing in the checker, `enum` test with an invalid
+            bare `Option` parameter, tuple element types of array literals.
           - Status (2026-08-22): the `x.py self-host` probe now measures parse
             independently of type-check (`moira --emit ast` sets `parse_ok`;
             `moira --check` sets `check_ok`; `moira --emit c` sets `codegen_ok`), so
