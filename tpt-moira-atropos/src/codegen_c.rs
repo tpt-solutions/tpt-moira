@@ -827,6 +827,14 @@ fn vec_helpers(elem: &str, struct_names: &std::collections::HashSet<&str>) -> St
     s.push_str(&format!(
         "static long long {is_empty}({name}* v) {{ return v->len == 0; }}\n"
     ));
+    // `to_vec` of a slice or vector: a new vector of the first `n` elements. String elements are
+    // duplicated; other elements are copied by value.
+    let copy_n = mir::vec_fn_name(elem, "copy_n");
+    let elem_copy = if ec == "char*" { "moira_str_dup(data[i])" } else { "data[i]" };
+    s.push_str(&format!(
+        "static {name} {copy_n}({ec}* data, long long n) {{ {name} v = {new}(); for (long long i = 0; i < n; i++) {push}(&v, {elem_copy}); return v; }}
+"
+    ));
     // `contains` compares strings by content; other element types have no `==` helper yet.
     if ec == "char*" {
         let contains = mir::vec_fn_name(elem, "contains");
@@ -892,7 +900,10 @@ fn c_type(ty: &str, struct_names: &std::collections::HashSet<&str>) -> String {
         "i8" => "int8_t",
         "i16" => "int16_t",
         "i32" => "int32_t",
-        "i64" => "int64_t",
+        // `i64` is spelled `long long`, the same type as the default integer and the runtime
+        // helpers. `int64_t` is `long` on LP64 hosts, so mixing the two made pointers such as
+        // `int64_t*` and `long long*` incompatible there (a hard error on GCC 14+).
+        "i64" => "long long",
         "i128" => "long long",
         "isize" => "long long",
         "u8" => "uint8_t",

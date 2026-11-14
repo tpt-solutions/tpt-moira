@@ -10153,6 +10153,40 @@ impl Lower {
                 for a in args {
                     operands.push(self.lower_expr(a)?);
                 }
+                // `to_vec()` of a vector or a slice: a copy of its elements as a new vector.
+                if method.node == "to_vec" && args.is_empty() {
+                    let op = self.lower_expr(recv)?;
+                    let mir::Operand::Var(vn) = &op else {
+                        return Err(LowerError("`to_vec` needs a named receiver".into()));
+                    };
+                    let ty = self.temp_type_of(vn);
+                    let deref = ty.ends_with('*');
+                    let base = ty.trim_end_matches('*').to_string();
+                    let Some(elem) = mir::slice_elem(&base)
+                        .or_else(|| mir::vec_elem(&base))
+                        .map(|e| e.to_string())
+                    else {
+                        return Err(LowerError(format!(
+                            "`to_vec` of a value of type `{base}` is not in the codegen subset"
+                        )));
+                    };
+                    let data = self.fresh_temp(format!("{elem}*"));
+                    self.emit(
+                        data.clone(),
+                        mir::Rvalue::Field(op.clone(), "data".into(), deref),
+                    );
+                    let len = self.fresh_temp("long long");
+                    self.emit(len.clone(), mir::Rvalue::Field(op, "len".into(), deref));
+                    let t = self.fresh_temp(mir::vec_type(&elem));
+                    self.emit(
+                        t.clone(),
+                        mir::Rvalue::Call(
+                            mir::Operand::Func(mir::vec_fn_name(&elem, "copy_n")),
+                            vec![mir::Operand::var(data), mir::Operand::var(len)],
+                        ),
+                    );
+                    return Ok(mir::Operand::var(t));
+                }
                 // The fallback calls a function named after the method: only valid when such a
                 // function exists. Otherwise the receiver's type is one the lowering does not
                 // know, and the call would name an undeclared C function.

@@ -1524,3 +1524,23 @@ fn hashmap_new_in_struct_field_runs() {
     };
     assert_eq!(out, "0", "`HashMap::new()` in a struct field takes its types from the field");
 }
+
+#[test]
+fn to_vec_of_vec_and_slice_runs() {
+    let out = match run_src(
+        "fn main() {
+            let v: Vec<i64> = vec![4, 5, 6];
+            let c = v.to_vec();
+            let s = &v[1..];
+            let d = s.to_vec();
+            print_i64(c.len() as i64 + d[0]);
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping to_vec run");
+            return;
+        }
+    };
+    assert_eq!(out, "8", "`to_vec` copies a vector and a slice");
+}
