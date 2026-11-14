@@ -1267,3 +1267,28 @@ fn main() {
         assert_eq!(out.trim(), "3");
     }
 }
+
+/// An `if` whose branch is a bare `None` takes the other branch's option type.
+#[test]
+fn if_branch_none_takes_other_branch_type_runs() {
+    let src = r#"
+fn pick(c: bool) -> Option<i64> {
+    let r = if c { None } else { Some(5i64) };
+    r
+}
+fn main() {
+    match pick(true) {
+        Some(x) => print_i64(x),
+        None => print_i64(-1),
+    }
+    match pick(false) {
+        Some(x) => print_i64(x),
+        None => print_i64(-1),
+    }
+}
+"#;
+    if let Some(out) = check_and_run("if_none_branch", src) {
+        let lines: Vec<&str> = out.lines().filter(|l| !l.is_empty()).collect();
+        assert_eq!(lines, vec!["-1", "5"]);
+    }
+}

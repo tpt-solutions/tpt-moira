@@ -899,6 +899,12 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
             (they are named differently at a constructor, `Spanned__String`, so they stay open).
             Test: `variant_payload_constructor_takes_declared_type_runs`. Own C: clotho 322 -> 305;
             lachesis checker 89 (unchanged).
+            **`if` branches (2026-11-14).** A bare `None` in one branch of an `if`/`else` takes the
+            other branch's type, and its tail records it (`record_tail_type`), as `match` arms do.
+            Test: `if_branch_none_takes_other_branch_type_runs`. Own C: clotho 305 -> 274.
+            **Open:** an unsuffixed literal payload (`Some(5)`) in an `if` initialiser gets the
+            default `i32`: an `if` does not pass an annotation's expectation to its branches, and
+            an unannotated `let` is not unified with the return type later.
             **Note:** `tpt-moira-lachesis/src/infer.rs` was edited by another process during this
             session (a `is_int_ty` helper and a body-tail change appeared and were removed
             again). The committed change is only the hunks listed above; that edit was not kept.

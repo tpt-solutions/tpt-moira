@@ -1216,6 +1216,14 @@ impl TypeChecker {
         self.generic_scope.pop();
     }
 
+    /// Record `ty` as the type of a branch's tail expression (which was typed as unknown).
+    fn record_tail_type(&mut self, tail: Option<&Expr>, ty: &Ty) {
+        if let Some(t) = tail {
+            self.expr_types
+                .insert((t.span.start, t.span.end), ty.clone());
+        }
+    }
+
     fn infer_block(&mut self, block: &Block) -> Ty {
         let tail_expected = self.block_tail_expected.take();
         self.env.push(HashMap::new());
@@ -1954,8 +1962,23 @@ impl TypeChecker {
                         } else {
                             self.infer_expr(eb)
                         };
+                        // A branch typed by nothing else (a bare `None`) takes the other
+                        // branch's type, and its tail records it.
+                        let else_tail: Option<&Expr> = match &eb.kind {
+                            ExprKind::Block(b) => b.tail.as_deref(),
+                            _ => Some(&**eb),
+                        };
+                        let result = if has_unknown(&tt) && !has_unknown(&et) {
+                            self.record_tail_type(then_b.tail.as_deref(), &et);
+                            et.clone()
+                        } else if has_unknown(&et) && !has_unknown(&tt) {
+                            self.record_tail_type(else_tail, &tt);
+                            tt.clone()
+                        } else {
+                            tt.clone()
+                        };
                         self.expect(&tt, &et, span);
-                        tt
+                        result
                     }
                     None => Ty::Unit,
                 }
