@@ -871,6 +871,12 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
             left untyped (`None`, an unsuffixed literal) takes the payload type of the expected
             `Option`/`Result`. Test: `return_ok_none_takes_declared_payload_runs`. Own C:
             clotho 368 -> 360.
+            **Closure literals behind `&mut` (2026-11-14).** `&mut |x| ..` lowered to a
+            temporary typed `long long` holding a function pointer, and a pointer to it. A closure
+            literal is now passed as its function pointer. Test:
+            `closure_literal_passed_by_mut_reference_runs`. Own C: clotho 360 -> 339. Next kind:
+            `visit_expr` argument types (6+6+6), which are the closure parameter types of its
+            callers, and `struct Option` initialisers (9).
             **Note:** `tpt-moira-lachesis/src/infer.rs` was edited by another process during this
             session (a `is_int_ty` helper and a body-tail change appeared and were removed
             again). The committed change is only the hunks listed above; that edit was not kept.

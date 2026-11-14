@@ -9146,6 +9146,11 @@ impl Lower {
                     Some(v) => v,
                     None => self.lower_expr(e)?,
                 };
+                // A closure literal is already its function pointer: `&mut |x| ..` passes that
+                // pointer (a reference to it would be a pointer to a function pointer).
+                if matches!((&o, &e.kind), (mir::Operand::Func(_), ExprKind::Closure { .. })) {
+                    return Ok(o);
+                }
                 // A reference needs a place: a constant is first copied into a temporary.
                 let o = match o {
                     mir::Operand::Var(_) => o,

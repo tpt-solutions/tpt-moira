@@ -1173,3 +1173,19 @@ fn main() {
         assert_eq!(lines, vec!["0", "3"]);
     }
 }
+
+/// A closure literal passed by `&mut` is the function itself: the callee calls it.
+#[test]
+fn closure_literal_passed_by_mut_reference_runs() {
+    let src = r#"
+fn apply(f: &mut impl Fn(i64) -> i64, v: i64) -> i64 {
+    f(v)
+}
+fn main() {
+    print_i64(apply(&mut |x| x + 1, 4));
+}
+"#;
+    if let Some(out) = check_and_run("closure_mut_ref", src) {
+        assert_eq!(out.trim(), "5");
+    }
+}
