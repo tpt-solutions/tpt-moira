@@ -117,6 +117,29 @@ fn strip_generic_items(program: &Program) -> Program {
     Program { items }
 }
 
+thread_local! {
+    /// Set while the borrow checker lowers a program: an unknown callee is then emitted as
+    /// before (the type checker has already judged the program), instead of being an error.
+    static LENIENT_CALLS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn lenient_calls() -> bool {
+    LENIENT_CALLS.with(|c| c.get())
+}
+
+/// [`lower_program_with_enums`] for the borrow checker: a call that codegen cannot lower is not
+/// an error here, so the borrow check still runs on programs whose codegen is a gap.
+pub fn lower_program_for_borrow_check(
+    program: &Program,
+    hints: &TypeHints,
+    extra: &[&Program],
+) -> Result<mir::MirProgram> {
+    LENIENT_CALLS.with(|c| c.set(true));
+    let r = lower_program_with_enums(program, hints, extra);
+    LENIENT_CALLS.with(|c| c.set(false));
+    r
+}
+
 /// Lower `prog`, which may match on the enums of `extra` programs (other crates of a
 /// bundle). Those enums' variants are registered, but their structs are not emitted:
 /// the program that defines them emits them.
@@ -166,6 +189,7 @@ pub fn lower_program_with_enums(
     let all_fn_names: std::collections::HashSet<String> = prog
         .items
         .iter()
+        .chain(extra.iter().flat_map(|p| p.items.iter()))
         .filter_map(|it| match &it.kind {
             ItemKind::Function(f) => Some(f.name.node.clone()),
             _ => None,
@@ -383,6 +407,9 @@ pub fn lower_program_with_enums(
             }
         }
     }
+    // Each function that cannot be lowered is recorded and skipped, so one run names every
+    // blocker (one per function) instead of only the first.
+    let mut errors: Vec<String> = Vec::new();
     for item in &prog.items {
         // `#[cfg(test)]` items (e.g. `mod tests`) are not part of the
         // compiled artifact; test-only code uses macros and library surface
@@ -444,7 +471,10 @@ pub fn lower_program_with_enums(
                         // A trait method outside the codegen subset (e.g. one that uses
                         // `write!`) is not emitted; the inherent methods must lower.
                         Err(_) if !imp.trait_name.node.is_empty() => continue,
-                        Err(e) => return Err(in_fn(&g.name.node, e)),
+                        Err(e) => {
+                            errors.push(in_fn(&g.name.node, e).0);
+                            continue;
+                        }
                     };
                     let tuple_structs: Vec<mir::StructDef> =
                         l.tuple_structs.values().cloned().collect();
@@ -467,9 +497,13 @@ pub fn lower_program_with_enums(
                     l.all_fn_names = all_fn_names.clone();
                     l.const_values = const_values.clone();
                     l.aliases = aliases.clone();
-                    let ad = l
-                        .lower_async_function(f)
-                        .map_err(|e| in_fn(&f.name.node, e))?;
+                    let ad = match l.lower_async_function(f) {
+                        Ok(ad) => ad,
+                        Err(e) => {
+                            errors.push(in_fn(&f.name.node, e).0);
+                            continue;
+                        }
+                    };
                     out.structs.push(mir::StructDef {
                         name: ad.def.fut_name.clone(),
                         fields: ad.def.fut_fields.clone(),
@@ -493,7 +527,13 @@ pub fn lower_program_with_enums(
                     l.fn_param_tys = fn_param_tys.clone();
                     l.fn_asts = fn_asts.clone();
                     l.aliases = aliases.clone();
-                    let func = l.lower_function(f).map_err(|e| in_fn(&f.name.node, e))?;
+                    let func = match l.lower_function(f) {
+                        Ok(func) => func,
+                        Err(e) => {
+                            errors.push(in_fn(&f.name.node, e).0);
+                            continue;
+                        }
+                    };
                     let tuple_structs: Vec<mir::StructDef> =
                         l.tuple_structs.values().cloned().collect();
                     out.functions.push(func);
@@ -508,6 +548,10 @@ pub fn lower_program_with_enums(
             // before lowering (see `AliasTable`).
             ItemKind::TypeAlias(_) => {}
         }
+    }
+    if !errors.is_empty() {
+        return Err(LowerError(errors.join("
+")));
     }
     Ok(out)
 }
@@ -932,7 +976,8 @@ fn add_impl_methods(
                         // `impl Display` supplies the text `{}` formats (kept apart from other
                         // traits' `fmt`).
                         if f.name.node == "fmt" && imp.trait_name.node.ends_with("Display") {
-                            methods.insert((ty.clone(), DISPLAY_FMT_KEY.to_string()), entry.clone());
+                            methods
+                                .insert((ty.clone(), DISPLAY_FMT_KEY.to_string()), entry.clone());
                         }
                         methods.insert((ty.clone(), f.name.node.clone()), entry);
                     }
@@ -953,9 +998,34 @@ fn signature_is_modeled(
     struct_names: &std::collections::HashSet<String>,
 ) -> bool {
     const KNOWN: &[&str] = &[
-        "bool", "char", "str", "String", "i8", "i16", "i32", "i64", "i128", "isize", "u8", "u16",
-        "u32", "u64", "u128", "usize", "f32", "f64", "Self", "Option", "Result", "Vec", "HashMap",
-        "HashSet", "BTreeMap", "BTreeSet", "Box", "Formatter",
+        "bool",
+        "char",
+        "str",
+        "String",
+        "i8",
+        "i16",
+        "i32",
+        "i64",
+        "i128",
+        "isize",
+        "u8",
+        "u16",
+        "u32",
+        "u64",
+        "u128",
+        "usize",
+        "f32",
+        "f64",
+        "Self",
+        "Option",
+        "Result",
+        "Vec",
+        "HashMap",
+        "HashSet",
+        "BTreeMap",
+        "BTreeSet",
+        "Box",
+        "Formatter",
     ];
     fn known(
         t: &ast::Type,
@@ -2485,9 +2555,7 @@ impl Lower {
                     // `let m: HashMap<K, V> = HashMap::new()`: the declared type names the map.
                     // An unannotated `let v = Vec::new();` takes the checker's type for the
                     // initializer (its element type comes from later uses).
-                    let ctor_ty: Option<String> = ty
-                        .clone()
-                        .or_else(|| self.hint_of_expr(init));
+                    let ctor_ty: Option<String> = ty.clone().or_else(|| self.hint_of_expr(init));
                     if let (Some((k, v)), true) =
                         (ctor_ty.as_deref().and_then(map_args), is_hashmap_ctor(init))
                     {
@@ -2502,9 +2570,10 @@ impl Lower {
                         self.emit(name.clone(), mir::Rvalue::Use(mir::Operand::var(t)));
                         return Ok(());
                     }
-                    if let (Some(elem), Some(vec_ty)) =
-                        (ctor_ty.as_deref().and_then(mir::vec_elem), vec_constructor(init))
-                    {
+                    if let (Some(elem), Some(vec_ty)) = (
+                        ctor_ty.as_deref().and_then(mir::vec_elem),
+                        vec_constructor(init),
+                    ) {
                         let t = self.fresh_temp(mir::vec_type(elem));
                         self.emit(
                             t.clone(),
@@ -4636,7 +4705,10 @@ impl Lower {
         let (data, len) = match &inner.kind {
             ExprKind::Path(p) if p.segments.len() == 1 => {
                 let name = self.var_name(&p.segments[0].node);
-                let (Some(&n), Some(ct)) = (self.array_lens.get(&p.segments[0].node), self.array_elems.get(&p.segments[0].node).cloned()) else {
+                let (Some(&n), Some(ct)) = (
+                    self.array_lens.get(&p.segments[0].node),
+                    self.array_elems.get(&p.segments[0].node).cloned(),
+                ) else {
                     return Ok(None);
                 };
                 if !same_c_elem(&ct, &elem) {
@@ -4667,7 +4739,10 @@ impl Lower {
             _ => return Ok(None),
         };
         let len_t = self.fresh_temp("long long");
-        self.emit(len_t.clone(), mir::Rvalue::Use(mir::Operand::Const(len as i128)));
+        self.emit(
+            len_t.clone(),
+            mir::Rvalue::Use(mir::Operand::Const(len as i128)),
+        );
         let s = self.fresh_temp(pt);
         self.emit(
             s.clone(),
@@ -7507,6 +7582,10 @@ impl Lower {
         if !known {
             return Ok(None);
         }
+        eprintln!(
+            "DBG enum method {method} hint={:?}",
+            self.hint_of_expr(recv)
+        );
         let hint = match self.hint_of_expr(recv) {
             Some(h) => h,
             None => return Ok(None),
@@ -9263,6 +9342,17 @@ impl Lower {
                             // direct lifted-fn call so captures can be passed.
                             mir::Operand::Func(lifted)
                         } else {
+                            // Not a function, a builtin, or a closure local: the callee is an
+                            // undeclared C name. Name the construct instead of emitting it.
+                            let var = self.var_name(&name);
+                            if !lenient_calls()
+                                && !self.types.contains_key(&var)
+                                && !self.func.locals.iter().any(|(l, _)| *l == var)
+                            {
+                                return Err(LowerError(format!(
+                                    "call to `{name}`: no function, builtin or local of that name is in the codegen subset (a path call whose type is not known, such as `Vec::new()` in an untyped position)"
+                                )));
+                            }
                             mir::Operand::Var(name)
                         };
                         (op, result_ty)
@@ -10054,6 +10144,15 @@ impl Lower {
                 for a in args {
                     operands.push(self.lower_expr(a)?);
                 }
+                // The fallback calls a function named after the method: only valid when such a
+                // function exists. Otherwise the receiver's type is one the lowering does not
+                // know, and the call would name an undeclared C function.
+                if !lenient_calls() && !self.all_fn_names.contains(&method.node) {
+                    return Err(LowerError(format!(
+                        "method `{}` on a receiver whose type the codegen subset does not know yet",
+                        method.node
+                    )));
+                }
                 let t = self.fresh_temp("long long");
                 self.emit(
                     t.clone(),
@@ -10763,6 +10862,14 @@ impl Lower {
         if let Some(ExprKind::Lit(ast::Lit::Str(_))) = elems.first().map(|e| &e.kind) {
             return "char*".to_string();
         }
+        // A tuple element is the tuple struct the checker typed it as (its temporaries use it).
+        if let Some(first) = elems.first() {
+            if let Some(h) = self.hint_of_expr(first) {
+                if h.starts_with("Tuple<") || h.starts_with("Tuple_") {
+                    return h;
+                }
+            }
+        }
         let path = match elems.first().map(|e| &e.kind) {
             Some(ExprKind::Path(p)) => p,
             Some(ExprKind::Call(callee, _)) => match &callee.kind {
@@ -11036,10 +11143,10 @@ impl Lower {
                 let op = self.deref_scalar_for_print(op);
                 // The checker's type for the argument decides (a `true` is a constant).
                 // A pointer hint is a reference: its value's type is the temporary's.
-let user_piece = self.user_display_piece(&op)?;
-if let Some(piece) = user_piece {
-    self.push_to_string(&out_name, piece);
-} else {
+                let user_piece = self.user_display_piece(&op)?;
+                if let Some(piece) = user_piece {
+                    self.push_to_string(&out_name, piece);
+                } else {
                     let ty = match self.hint_of_expr(a) {
                         Some(h) if !h.ends_with('*') => h,
                         _ => match &op {
@@ -11095,7 +11202,7 @@ if let Some(piece) = user_piece {
                         mir::Operand::var(t)
                     };
                     self.push_to_string(&out_name, piece);
-}
+                }
             }
             if !seg.is_empty() {
                 self.push_to_string(&out_name, mir::Operand::CStr(seg.clone()));
@@ -11265,8 +11372,14 @@ if let Some(piece) = user_piece {
                     _ => return Err(LowerError("`write!` into a string".into())),
                 };
                 if name == "writeln" {
-                    self.push_to_string(&text_name, mir::Operand::CStr("
-".to_string()));
+                    self.push_to_string(
+                        &text_name,
+                        mir::Operand::CStr(
+                            "
+"
+                            .to_string(),
+                        ),
+                    );
                 }
                 let done = self.fresh_temp("long long");
                 self.emit(

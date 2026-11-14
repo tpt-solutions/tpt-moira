@@ -288,7 +288,9 @@ pub fn emit_c(prog: &mir::MirProgram) -> String {
     out.push_str("void print_i64(long long x) { printf(\"%lld\\n\", x); }\n");
     out.push_str("void print_usize(unsigned long long x) { printf(\"%llu\\n\", x); }\n");
     out.push_str(F64_RUNTIME);
-    out.push_str("void print_f64(double x) { char b[400]; moira_f64_format(b, x); printf(\"%s\\n\", b); }\n");
+    out.push_str(
+        "void print_f64(double x) { char b[400]; moira_f64_format(b, x); printf(\"%s\\n\", b); }\n",
+    );
     out.push_str("void print_bool(long long x) { printf(\"%s\\n\", x ? \"true\" : \"false\"); }\n");
     out.push_str("void print_str(char* x) { printf(\"%s\\n\", x); }\n");
     // Raw writers (no newline): `print!`/`println!` write their pieces with these and

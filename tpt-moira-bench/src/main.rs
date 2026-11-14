@@ -448,7 +448,10 @@ fn run_benchmark(
             dir.display(),
             programs.len()
         ),
-        None => println!("  programs: built-in Phase-1 battery ({} programs).", programs.len()),
+        None => println!(
+            "  programs: built-in Phase-1 battery ({} programs).",
+            programs.len()
+        ),
     }
     println!(
         "  {} iterations per program (median reported). Moira = {}, cold (MOIRA_NO_CACHE=1).",
@@ -650,9 +653,7 @@ fn run_benchmark(
             .filter_map(|e| e.rustc_ms.map(|r| r / floor))
             .collect();
         println!();
-        println!(
-            "  process-start floor (moira on an empty source, `--emit ssa`): {floor:.2} ms"
-        );
+        println!("  process-start floor (moira on an empty source, `--emit ssa`): {floor:.2} ms");
         if let Some(c) = geomean(&ceilings) {
             println!(
                 "  wall-clock ceiling: even with zero compile time, the speedup over {} cannot exceed {:.2}x on this host",
@@ -723,7 +724,10 @@ fn print_crates_trend(path: &Path) {
     };
     println!();
     println!("crates.io probe trend  (file: {})", path.display());
-    println!("  {:<22} {:<10} {:>8} {:>8} {:>8}", "timestamp", "commit", "crates", "parse", "check");
+    println!(
+        "  {:<22} {:<10} {:>8} {:>8} {:>8}",
+        "timestamp", "commit", "crates", "parse", "check"
+    );
     for line in text.lines().filter(|l| !l.trim().is_empty()) {
         let field = |key: &str| -> String {
             let needle = format!("\"{key}\": ");

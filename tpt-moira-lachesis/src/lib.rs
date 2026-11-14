@@ -125,7 +125,7 @@ pub fn borrow_check_program_with_externs(
     externs: &[(String, Program)],
 ) -> Result<(), Vec<Diag>> {
     let extra: Vec<&Program> = externs.iter().map(|(_, p)| p).collect();
-    let mir = tpt_moira_atropos::lower_program_with_enums(prog, hints, &extra)
+    let mir = tpt_moira_atropos::lower_program_for_borrow_check(prog, hints, &extra)
         .map_err(|e| vec![Diag::error(format!("lowering error: {e}"), None)])?;
     borrow_check(&mir)
 }
@@ -230,7 +230,7 @@ mod tests {
                 let mut x = 1;
                 let r1 = &x;
                 let r2 = &mut x;
-                unknown_fn();
+                let bad: i32 = "text";
                 let _ = r1;
                 let _ = r2;
             }
@@ -243,7 +243,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(
-            joined.contains("cannot find function `unknown_fn`"),
+            joined.contains("type mismatch"),
             "type error missing from aggregate diagnostics: {joined}"
         );
         assert!(

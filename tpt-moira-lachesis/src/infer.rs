@@ -2472,7 +2472,9 @@ impl TypeChecker {
                     // Deref through `Unknown` (an earlier error already
                     // fired) is absorbed silently.
                     Ty::Unknown => Ty::Unknown,
-                    // `Box<T>` is modelled as `T`: dereferencing a struct value is the value.
+                    // `*b` on a `Box<T>` is the `T` it holds.
+                    Ty::Apply(n, a) if n == "Box" && a.len() == 1 => a[0].clone(),
+                    // Dereferencing a struct value is the value itself.
                     Ty::Struct(_) | Ty::Apply(..) => t.clone(),
                     _ => {
                         self.err(span, "cannot dereference a non-reference".to_string());
@@ -4319,8 +4321,10 @@ impl TypeChecker {
             .insert(("env".into(), "temp_dir".into()), sig(vec![], Str));
         // The driver's `MOIRA_TIMINGS` phase timer: an environment lookup and a monotonic
         // clock. Their values are opaque to the checker (`Unknown`, absorbing uses).
-        self.assoc_fns
-            .insert(("env".into(), "var_os".into()), sig(vec![Ref(Box::new(Str))], Unknown));
+        self.assoc_fns.insert(
+            ("env".into(), "var_os".into()),
+            sig(vec![Ref(Box::new(Str))], Unknown),
+        );
         self.assoc_fns
             .insert(("Instant".into(), "now".into()), sig(vec![], Unknown));
         self.methods

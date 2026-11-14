@@ -18,7 +18,11 @@ fn find_cc() -> Option<&'static str> {
 fn run(name: &str, src: &str) -> Option<String> {
     let prog = tpt_moira_clotho::compile_source(src).expect("program should parse");
     let (res, hints) = tpt_moira_lachesis::type_check_typed(&prog, &[]);
-    assert!(res.is_ok(), "{name}: program should type-check: {:?}", res.err());
+    assert!(
+        res.is_ok(),
+        "{name}: program should type-check: {:?}",
+        res.err()
+    );
     let mir = tpt_moira_atropos::lower_program_typed(&prog, &hints).expect("should lower");
     let c = tpt_moira_atropos::codegen_c::emit_c(&mir);
     let cc = find_cc()?;
@@ -63,7 +67,13 @@ fn main() {
     }
 }
 ";
-    let Some(out) = run("derive_box", src) else { return };
-    assert_eq!(out, "7
-", "output: {out:?}");
+    let Some(out) = run("derive_box", src) else {
+        return;
+    };
+    assert_eq!(
+        out,
+        "7
+",
+        "output: {out:?}"
+    );
 }

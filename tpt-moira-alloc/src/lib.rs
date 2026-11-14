@@ -143,7 +143,11 @@ mod tests {
         // Growth went past the first chunk, so several chunks exist...
         assert!(arena.chunk_count() > 1, "expected the region to grow");
         // ...and chunk doubling keeps the count logarithmic in `n`.
-        assert!(arena.chunk_count() <= 12, "chunk count {}", arena.chunk_count());
+        assert!(
+            arena.chunk_count() <= 12,
+            "chunk count {}",
+            arena.chunk_count()
+        );
         // Every reference, handed out before later chunks existed, still reads back.
         for (i, r) in refs.iter().enumerate() {
             assert_eq!(**r, i as u64 * 3);
