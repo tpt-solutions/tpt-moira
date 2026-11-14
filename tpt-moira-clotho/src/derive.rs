@@ -198,6 +198,14 @@ enum Shape {
     Struct,
 }
 
+/// Whether a field type is `Box<..>` (by its last path segment).
+fn is_box_type(ty: &Type) -> bool {
+    match &ty.kind {
+        TypeKind::Path(p, _) => p.segments.last().is_some_and(|s| s.node == "Box"),
+        _ => false,
+    }
+}
+
 fn variant_shape(v: &Variant) -> Shape {
     match &v.fields {
         None => Shape::Unit,
@@ -233,8 +241,19 @@ fn derive_enum(trait_name: &str, e: &EnumDef) -> Option<String> {
                 .map(|v| match variant_shape(v) {
                     Shape::Tuple(n) => {
                         let binds: Vec<String> = (0..n).map(|i| format!("a{i}")).collect();
-                        let clones: Vec<String> =
-                            binds.iter().map(|b| format!("{b}.clone()")).collect();
+                        // A `Box<T>` payload is cloned by boxing a clone of the `T`:
+                        // `(**a).clone()` is the `T`, so `Box::new` gives a new box. The
+                        // lowering reads a box and a reference to a value alike, so a plain
+                        // `a.clone()` on a box would copy the value out of its box.
+                        let fields = v.fields.as_deref().unwrap_or(&[]);
+                        let clones: Vec<String> = binds
+                            .iter()
+                            .enumerate()
+                            .map(|(i, b)| match fields.get(i).map(|f| is_box_type(&f.ty)) {
+                                Some(true) => format!("Box::new((**{b}).clone())"),
+                                _ => format!("{b}.clone()"),
+                            })
+                            .collect();
                         format!(
                             "Self::{v}({bs}) => Self::{v}({cs}),",
                             v = v.name.node,
