@@ -785,7 +785,7 @@ fn closure_param_names(p: &Pat) -> Result<Vec<String>> {
             }
             Ok(names)
         }
-        Pat::Ref(inner) => closure_param_names(inner),
+        Pat::Ref(inner) | Pat::RefIdent(inner) => closure_param_names(inner),
         _ => Ok(vec![pat_name(p)?]),
     }
 }
@@ -1621,7 +1621,7 @@ fn bind_pat_names_in(pat: &Pat, out: &mut std::collections::HashSet<String>) {
                 bind_pat_names_in(p, out);
             }
         }
-        Pat::Ref(p) => bind_pat_names_in(p, out),
+        Pat::Ref(p) | Pat::RefIdent(p) => bind_pat_names_in(p, out),
         Pat::Or(a, b) => {
             bind_pat_names_in(a, out);
             bind_pat_names_in(b, out);
@@ -11745,6 +11745,22 @@ impl Lower {
             }
             ast::Pat::Wild => Ok((None, Vec::new())),
             ast::Pat::Ref(inner) => self.pattern_guard(scrut, inner),
+            // `ref x` binds the address of the matched value (the checker types `x` as a
+            // reference): the scrutinee itself when it already is a pointer, else `&scrutinee`.
+            ast::Pat::RefIdent(inner) => {
+                if let (ast::Pat::Ident(n), mir::Operand::Var(v)) = (&**inner, scrut) {
+                    let addr = if scrut_ptr {
+                        scrut.clone()
+                    } else {
+                        let ty = self.temp_type_of(v);
+                        let p = self.fresh_temp(format!("{ty}*"));
+                        self.emit(p.clone(), mir::Rvalue::Ref(scrut.clone(), true));
+                        mir::Operand::var(p)
+                    };
+                    return Ok((None, vec![(n.node.clone(), addr)]));
+                }
+                self.pattern_guard(scrut, inner)
+            }
             ast::Pat::Or(a, b) => {
                 // `a | b`: take arm if either sub-pattern matches. We lower this to
                 // `(a matches) || (b matches)` by computing each guard; bindings
@@ -11909,6 +11925,25 @@ impl Lower {
                 let mut cond: Option<mir::Operand> = None;
                 let mut binds = Vec::new();
                 for (fname, sub) in fields {
+                    // `S { ref f }`: `f` is the address of the field itself, not of a copy.
+                    if let ast::Pat::RefIdent(inner) = sub {
+                        if let ast::Pat::Ident(n) = &**inner {
+                            let fty = self
+                                .structs
+                                .iter()
+                                .find(|d| d.name == *name)
+                                .and_then(|d| d.fields.iter().find(|(f, _)| f == fname))
+                                .map(|(_, t)| t.clone())
+                                .unwrap_or_else(|| "long long".to_string());
+                            let addr = self.fresh_temp(format!("{fty}*"));
+                            self.emit(
+                                addr.clone(),
+                                mir::Rvalue::FieldAddr(scrut.clone(), fname.clone(), ptr),
+                            );
+                            binds.push((n.node.clone(), mir::Operand::var(addr)));
+                            continue;
+                        }
+                    }
                     let fv = self.fresh_temp("long long");
                     self.emit(
                         fv.clone(),
@@ -12244,7 +12279,7 @@ fn pat_name(p: &Pat) -> Result<String> {
             .map(|s| s.node.clone())
             .unwrap_or_else(|| "_".to_string())),
         // `&x` binds the referenced value; the lowering copies it, as for `x`.
-        Pat::Ref(inner) => pat_name(inner),
+        Pat::Ref(inner) | Pat::RefIdent(inner) => pat_name(inner),
         _ => Err(LowerError("only identifier patterns are supported".into())),
     }
 }

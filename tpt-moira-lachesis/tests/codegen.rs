@@ -1564,3 +1564,26 @@ fn local_closure_shadows_same_named_function_and_runs() {
     };
     assert_eq!(out, "40", "a local binding shadows a function of the same name");
 }
+
+#[test]
+fn ref_bindings_bind_the_place_and_run() {
+    let out = match run_src(
+        "struct P { x: i64 }
+        fn main() {
+            let o: Option<i64> = Some(7);
+            if let Some(ref v) = o {
+                print_i64(*v + 1);
+            }
+            let p = P { x: 4 };
+            let P { ref x } = p;
+            print_i64(*x);
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping ref-binding run");
+            return;
+        }
+    };
+    assert_eq!(out, "8\n4", "`ref` binds a reference to the matched place");
+}

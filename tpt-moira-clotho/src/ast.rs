@@ -298,6 +298,8 @@ pub enum Pat {
     Variant(Path, Vec<Pat>),
     /// A reference pattern `&pat` (binds by reference).
     Ref(Box<Pat>),
+    /// A `ref x` / `ref mut x` binding: the name is bound to a reference to the matched value.
+    RefIdent(Box<Pat>),
     /// An or-pattern `pat | pat` (multiple patterns for one match arm).
     Or(Box<Pat>, Box<Pat>),
     Struct(String, Vec<(String, Pat)>),

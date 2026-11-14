@@ -1496,12 +1496,12 @@ impl Parser {
             }
             TokenKind::Ident(_) => {
                 let name = self.expect_ident()?;
-                // `ref x` / `ref mut x` binding-by-reference pattern. The `ref`
-                // keyword is lexed as an identifier; model it as `&x` so the rest
-                // of the pattern (and `bind_pattern`) handle it uniformly.
+                // `ref x` / `ref mut x` binds by reference (the `ref` keyword is lexed as an
+                // identifier). Distinct from `&x`, which matches through a reference.
                 if name.node == "ref" {
+                    self.eat(&TokenKind::Mut);
                     let inner = self.parse_pat_single()?;
-                    return Ok(Pat::Ref(Box::new(inner)));
+                    return Ok(Pat::RefIdent(Box::new(inner)));
                 }
                 let mut segments = vec![name.clone()];
                 if self.eat(&TokenKind::ColonColon) {
@@ -1543,15 +1543,18 @@ impl Parser {
                             self.eat(&TokenKind::Comma);
                             continue;
                         }
-                        // `ref` / `ref mut` / `mut` before a shorthand field name: the
-                        // binding mode is not modeled, only the name.
-                        if matches!(self.peek_kind(), TokenKind::Ident(n) if n == "ref") {
+                        // `ref` / `ref mut` / `mut` before a shorthand field name: `ref` binds the
+                        // field by reference; `mut` only changes the binding's mutability.
+                        let by_ref = matches!(self.peek_kind(), TokenKind::Ident(n) if n == "ref");
+                        if by_ref {
                             self.bump();
                         }
                         self.eat(&TokenKind::Mut);
                         let fname = self.expect_ident()?;
                         let sub = if self.eat(&TokenKind::Colon) {
                             self.parse_pat()?
+                        } else if by_ref {
+                            Pat::RefIdent(Box::new(Pat::Ident(fname.clone())))
                         } else {
                             Pat::Ident(fname.clone())
                         };

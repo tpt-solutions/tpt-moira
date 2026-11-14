@@ -1400,7 +1400,7 @@ impl TypeChecker {
     /// returning an error message for unsupported patterns.
     fn check_pattern(&self, pat: &Pat) -> Result<(), String> {
         match pat {
-            Pat::Ident(_) | Pat::Wild | Pat::Lit(_) | Pat::Path(_) | Pat::Ref(_) => Ok(()),
+            Pat::Ident(_) | Pat::Wild | Pat::Lit(_) | Pat::Path(_) | Pat::Ref(_) | Pat::RefIdent(_) => Ok(()),
             Pat::Or(a, b) => {
                 self.check_pattern(a)?;
                 self.check_pattern(b)
@@ -1444,6 +1444,11 @@ impl TypeChecker {
             }
             Pat::Wild => {}
             // `&pat` matches through one reference: the inner pattern binds the referent.
+            // `ref x` binds a reference to the matched value.
+            Pat::RefIdent(inner) => {
+                let r = Ty::Ref(Box::new(scrut_ty.clone()));
+                self.bind_pattern(inner, &r);
+            }
             // `&pat` matches through one reference: the inner pattern binds the referent. On a value
             // (`Some(&j)` of a map lookup, which the checker types by value) it binds the value.
             Pat::Ref(inner) => match scrut_ty {
@@ -5545,7 +5550,7 @@ fn bind_pat_names(pat: &Pat, bound: &mut HashSet<String>) {
                 bind_pat_names(p, bound);
             }
         }
-        Pat::Ref(p) => bind_pat_names(p, bound),
+        Pat::Ref(p) | Pat::RefIdent(p) => bind_pat_names(p, bound),
         Pat::Or(a, b) => {
             bind_pat_names(a, bound);
             bind_pat_names(b, bound);

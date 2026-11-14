@@ -719,6 +719,8 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
             lowering agrees. Open items: `thread::scope`, `Command` output types, a
             `TypeHints::new()` alias path, `str::to_string` as a function value, and a name
             clash between a clotho `Stmt` and a `clotho_Stmt` type in the checker.
+          - Status (2026-11-15, checker round 4): `ref` bindings (above). Note the open item
+            below about `ref x` is now done.
           - Status (2026-11-15, checker round 3): lachesis checker errors 71 → 32; atropos
             stays at 20. Done: crate-qualified type aliases (`crate::X`, `tpt_moira_*::X`);
             integer `wrapping_*`/`saturating_*`; str/set/map/Vec/Iter/fs std signatures;
@@ -727,8 +729,9 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
             kills on redefinition. The old block-number comparison reported valid code
             (`parts.push(f()?)` in a loop, then another mutable use) as conflicting. Two
             tests cover the accepted loop and a rejected overlap. Open: `ref x` is modeled as
-            `&x` by the parser, so `if let Enum::V(ref x)` on a value binds the value (2 errors
-            in lachesis); a distinct pattern variant fixes it. `HashMap::get` still returns
+            `&x` by the parser. Resolved (checker round 4): `ref x` is `Pat::RefIdent`; the checker
+            types it as a reference and the lowering binds the address of the matched place
+            (test `ref_bindings_bind_the_place_and_run`). Lachesis is at 30 checker errors. `HashMap::get` still returns
             `Option<V>` (Rust: `Option<&V>`) until the lowering agrees. Generic structs from an
             extern crate (`Spanned<String>` vs `Spanned__String`) are not rewritten in the
             root program (about 8 errors); the monomorphizer needs the extern's generic

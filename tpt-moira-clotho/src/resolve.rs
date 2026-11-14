@@ -386,7 +386,7 @@ impl Resolver {
                     self.pat(u, q);
                 }
             }
-            Pat::Ref(q) | Pat::Bind(_, q) => self.pat(u, q),
+            Pat::Ref(q) | Pat::RefIdent(q) | Pat::Bind(_, q) => self.pat(u, q),
             Pat::Or(a, b) => {
                 self.pat(u, a);
                 self.pat(u, b);
