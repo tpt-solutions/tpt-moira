@@ -808,3 +808,20 @@ fn main() {
         assert_eq!(lines, vec!["4", "-1", "8", "-1", "6", "-1"]);
     }
 }
+
+/// `Option::as_ref` gives a reference to the payload, so `unwrap_or` takes a reference too.
+#[test]
+fn option_as_ref_chain_runs() {
+    let src = r#"
+fn main() {
+    let a: Option<i64> = Some(6);
+    let b: Option<i64> = None;
+    print_i64(a.as_ref().unwrap_or(&-1).clone());
+    print_i64(b.as_ref().unwrap_or(&-1).clone());
+}
+"#;
+    if let Some(out) = check_and_run("option_as_ref", src) {
+        let lines: Vec<&str> = out.lines().filter(|l| !l.is_empty()).collect();
+        assert_eq!(lines, vec!["6", "-1"]);
+    }
+}

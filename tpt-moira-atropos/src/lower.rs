@@ -5467,7 +5467,7 @@ impl Lower {
                 mir::Operand::Const(0),
             ),
         );
-        let result = self.fresh_temp(out_ty);
+        let result = self.fresh_temp(out_ty.clone());
         let some_blk = self.new_block();
         let none_blk = self.new_block();
         let join = self.new_block();
@@ -5489,11 +5489,19 @@ impl Lower {
         );
         let mut args = caps;
         args.push(mir::Operand::var(payload_val));
-        let ret = self
-            .closure_rets
-            .get(&f)
-            .cloned()
-            .unwrap_or_else(|| "long long".to_string());
+        // The closure's result: its recorded C type, or, when that is only the default, the
+        // payload the checker gave the `map` expression (a reference is a pointer).
+        let recorded = self.closure_rets.get(&f).cloned();
+        let out_payload = match mir::split_generic(&out_ty) {
+            Some(("Option", targs)) if targs.len() == 1 => Some(targs[0].to_string()),
+            _ => None,
+        };
+        let ret = match (recorded, out_payload) {
+            (Some(r), Some(p)) if r == "long long" && p != "long long" => p,
+            (Some(r), _) => r,
+            (None, Some(p)) => p,
+            (None, None) => "long long".to_string(),
+        };
         let mapped = self.fresh_temp(ret);
         self.emit(
             mapped.clone(),
@@ -6599,6 +6607,32 @@ impl Lower {
         };
         match method {
             // A borrowed view of an option is the option itself (its C value is the same).
+            // `opt.as_ref()` of an option of a value: when the checker types the payload as a
+            // reference, the payload is the address of the value inside the option.
+            "as_ref" if payload_ty != "long long" && !payload_ty.ends_with('*') => {
+                let r = self.fresh_temp(format!("Option<{payload_ty}*>"));
+                let tag = self.fresh_temp("long long");
+                self.emit(
+                    tag.clone(),
+                    mir::Rvalue::Field(op.clone(), "tag".into(), ptr),
+                );
+                let addr = self.fresh_temp(format!("{payload_ty}*"));
+                self.emit(
+                    addr.clone(),
+                    mir::Rvalue::FieldAddr(op, payload_field("Option", 0, 0), ptr),
+                );
+                self.emit(
+                    r.clone(),
+                    mir::Rvalue::StructLit(
+                        "Option".to_string(),
+                        vec![
+                            ("tag".to_string(), mir::Operand::var(tag)),
+                            (payload_field("Option", 0, 0), mir::Operand::var(addr)),
+                        ],
+                    ),
+                );
+                Ok(Some(mir::Operand::var(r)))
+            }
             "as_deref" | "as_ref" | "copied" | "cloned" => Ok(Some(op)),
             "is_some" | "is_ok" => Ok(Some(test(self, ok_tag))),
             "is_none" | "is_err" => Ok(Some(test(self, 1 - ok_tag))),

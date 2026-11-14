@@ -3010,6 +3010,36 @@ impl TypeChecker {
             {
                 return Ty::Apply("Option".into(), vec![deref_item(targs[0].clone())]);
             }
+            // `Option<T>` combinators whose type follows from the receiver: a borrow of the
+            // payload, a fallback of the same type, a filter of the same type, and `and_then`,
+            // whose closure returns the option of the result.
+            if n == "Option" && targs.len() == 1 {
+                let payload = targs[0].clone();
+                match (method.node.as_str(), args.len()) {
+                    ("as_ref", 0) => {
+                        return Ty::Apply("Option".into(), vec![ref_item(payload)]);
+                    }
+                    ("as_deref", 0) => {
+                        return Ty::Apply("Option".into(), vec![payload]);
+                    }
+                    ("or_else", 1) => {
+                        self.closure_result(&args[0], &Ty::Unit);
+                        return Ty::Apply("Option".into(), vec![payload]);
+                    }
+                    ("filter", 1) => {
+                        self.closure_result(&args[0], &ref_item(payload.clone()));
+                        return Ty::Apply("Option".into(), vec![payload]);
+                    }
+                    ("and_then", 1) => {
+                        let result = self.closure_result(&args[0], &payload);
+                        return match result {
+                            Ty::Apply(ref name, _) if name == "Option" => result,
+                            _ => Ty::Unknown,
+                        };
+                    }
+                    _ => {}
+                }
+            }
             // `Result<T, E>::map_err(|e| body)` keeps the success type and maps the error.
             if n == "Result" && targs.len() == 2 && args.len() == 1 && method.node == "map_err" {
                 let err = targs[1].clone();
