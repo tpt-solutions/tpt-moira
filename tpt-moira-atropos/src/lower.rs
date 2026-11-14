@@ -882,7 +882,9 @@ fn map_args(ty: &str) -> Option<(String, String)> {
 fn is_hashmap_ctor(e: &Expr) -> bool {
     if let ExprKind::Call(callee, _) = &e.kind {
         if let ExprKind::Path(p) = &callee.kind {
-            let segs: Vec<&str> = p.segments.iter().map(|s| s.node.as_str()).collect();
+            // The last two segments name the type and the constructor (`std::collections::HashMap::new`).
+            let all: Vec<&str> = p.segments.iter().map(|s| s.node.as_str()).collect();
+            let segs: Vec<&str> = all[all.len().saturating_sub(2)..].to_vec();
             return segs.len() == 2
                 && (segs[0] == "HashMap"
                     || segs[0] == "HashSet"
@@ -1178,12 +1180,14 @@ fn vec_constructor(e: &Expr) -> Option<&'static str> {
         ExprKind::Path(p) => p,
         _ => return None,
     };
-    if p.segments.len() != 2 || p.segments[0].node != "Vec" {
+    // `Vec::new` or `std::vec::Vec::new`: the last two segments are the type and the constructor.
+    let n = p.segments.len();
+    if n < 2 || p.segments[n - 2].node != "Vec" {
         return None;
     }
     // `with_capacity` is accepted as a plain constructor: the capacity hint is
     // not used by the runtime yet.
-    if p.segments[1].node == "new" || p.segments[1].node == "with_capacity" {
+    if p.segments[n - 1].node == "new" || p.segments[n - 1].node == "with_capacity" {
         Some("new")
     } else {
         None

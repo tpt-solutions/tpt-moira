@@ -2499,6 +2499,43 @@ impl TypeChecker {
         self.infer_expr(a)
     }
 
+    /// `f(&mut v)` (or `f(&v)`) for a parameter `Vec<T>` with a concrete `T`: an unannotated
+    /// `let v = Vec::new();` whose element type is still open takes `T`.
+    fn resolve_pending_vec_arg(&mut self, arg: &Expr, param: &Ty) {
+        let ExprKind::Ref(inner, _) = &arg.kind else {
+            return;
+        };
+        let ExprKind::Path(p) = &inner.kind else {
+            return;
+        };
+        if p.segments.len() != 1 {
+            return;
+        }
+        let name = p.segments[0].node.clone();
+        let inner_param = match param {
+            Ty::Ref(t) | Ty::RefMut(t) => &**t,
+            other => other,
+        };
+        let Ty::Apply(v, targs) = inner_param else {
+            return;
+        };
+        if v != "Vec" || targs.len() != 1 || has_unknown(&targs[0]) || has_generic(&targs[0]) {
+            return;
+        }
+        let Some(init_span) = self.pending_vec.get(&name).copied() else {
+            return;
+        };
+        let vt = Ty::Apply("Vec".to_string(), vec![targs[0].clone()]);
+        for scope in self.env.iter_mut().rev() {
+            if let Some(slot) = scope.get_mut(&name) {
+                *slot = vt.clone();
+                break;
+            }
+        }
+        self.expr_types.insert((init_span.start, init_span.end), vt);
+        self.pending_vec.remove(&name);
+    }
+
     fn check_call(&mut self, span: Span, callee: &Expr, args: &[Expr]) -> Ty {
         // The expected type is for this call only; nested calls must not see it.
         let expected = self.expected_call_ty.take();
@@ -2652,6 +2689,7 @@ impl TypeChecker {
                 if matches!(a.kind, ExprKind::Call(..)) && !has_generic(pt) {
                     self.expected_call_ty = Some(pt.clone());
                 }
+                self.resolve_pending_vec_arg(a, pt);
                 let at = self.infer_expr(a);
                 self.expected_call_ty = None;
                 self.closure_expected = None;
@@ -2814,6 +2852,7 @@ impl TypeChecker {
             self.apply_sub(&sig.ret, &sub)
         } else {
             for (a, pt) in args.iter().zip(sig.params.iter()) {
+                self.resolve_pending_vec_arg(a, pt);
                 let at = self.infer_expr(a);
                 self.expect(&at, pt, a.span);
             }
