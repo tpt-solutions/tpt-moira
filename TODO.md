@@ -846,6 +846,15 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
             the local `kind` is declared `long long` although it holds a `RepKind` (a `match`
             binding that got the default type). That is a lowering typing gap for pattern
             locals, the next thing to fix there.
+            **`let x = None` takes the payload type (2026-11-14).** The checker's hint for a
+            `None` initialiser stayed the bare `Option` (its payload was only known from a later
+            `x = Some(..)`), so the local was declared `struct Option`. `pending_option` now
+            refines the local and its initialiser on that assignment, as `pending_vec` does for
+            `push`. Test: `let_none_takes_payload_type_from_later_assignment_runs`. Own C:
+            clotho 412 -> 399. Also: `check_program_cx` built `TypeChecker` with `..Default::default()`,
+            which the checker rejects as `..base` and reports as a missing field for every
+            field (about 30 errors); it now uses `default()` and assigns the one field.
+            Lachesis checker: 118 -> 89. Clotho's check still passes.
  each crate uses the std
             surface and the typed-temporary lowering broadly, and each new feature also adds
             its own source to the probe. The route that worked for the four checker-side

@@ -115,6 +115,10 @@ pub struct TypeChecker {
     /// Locals bound (without an annotation) to `Vec::new()`, by name, with the span of the
     /// initializer: the first `push` onto one gives the vector its element type.
     pending_vec: HashMap<String, Span>,
+    /// Locals bound (without an annotation) to a `None` of unknown payload, by name, with the
+    /// span of the initializer: the first assignment of a `Some(..)` to one gives the
+    /// payload type, which the initializer's hint then carries (`let mut sep = None;`).
+    pending_option: HashMap<String, Span>,
     /// Stack of the generic parameter lists of the functions currently being
     /// checked. The top entry scopes the generic type parameters so that a bare
     /// type-name in a signature/body resolves to [`Ty::Generic`] and so that
@@ -551,6 +555,7 @@ impl Default for TypeChecker {
             own_enums: std::collections::HashSet::new(),
             env: Vec::new(),
             pending_vec: HashMap::new(),
+            pending_option: HashMap::new(),
             generic_scope: Vec::new(),
             ret: Ty::Unit,
             ret_span: Span::default(),
@@ -699,15 +704,16 @@ impl TypeChecker {
         (res, hints)
     }
 
+    // The struct is built with `default()` and one field assigned: a struct update (`..base`)
+    // is outside the Moira subset this crate must also compile under.
+    #[allow(clippy::field_reassign_with_default)]
     fn check_program_cx(
         prog: &tpt_moira_clotho::ast::Program,
         externs: &[(&str, &tpt_moira_clotho::ast::Program)],
     ) -> TypeChecker {
         // The crate's own aliases take precedence over an extern's of the same name.
-        let mut cx = TypeChecker {
-            aliases: tpt_moira_clotho::alias::AliasTable::from_program(prog),
-            ..Default::default()
-        };
+        let mut cx = TypeChecker::default();
+        cx.aliases = tpt_moira_clotho::alias::AliasTable::from_program(prog);
         for (crate_name, ext) in externs {
             cx.aliases
                 .extend_from(&tpt_moira_clotho::alias::AliasTable::from_exports(ext));
@@ -1200,6 +1206,12 @@ impl TypeChecker {
                                 self.pending_vec.insert(n.node.clone(), init.span);
                             } else {
                                 self.pending_vec.remove(&n.node);
+                            }
+                            if matches!(&it, Ty::Apply(v, a) if v == "Option" && matches!(a.as_slice(), [Ty::Unknown]))
+                            {
+                                self.pending_option.insert(n.node.clone(), init.span);
+                            } else {
+                                self.pending_option.remove(&n.node);
                             }
                         }
                         it
@@ -2193,6 +2205,34 @@ impl TypeChecker {
         }
     }
 
+    /// Assigning a `Some(..)` to a local bound to a `None` of unknown payload: the local and the
+    /// initializer take the assigned option's type.
+    fn refine_pending_option(&mut self, target: &Expr, target_ty: &Ty, value_ty: &Ty) {
+        let name = match &target.kind {
+            ExprKind::Path(p) if p.segments.len() == 1 => p.segments[0].node.clone(),
+            _ => return,
+        };
+        let init_span = match self.pending_option.get(&name).copied() {
+            Some(sp) => sp,
+            None => return,
+        };
+        let open = matches!(target_ty, Ty::Apply(v, a) if v == "Option" && matches!(a.as_slice(), [Ty::Unknown]));
+        let known =
+            matches!(value_ty, Ty::Apply(v, a) if v == "Option" && !a.iter().any(has_unknown));
+        if !open || !known {
+            return;
+        }
+        for scope in self.env.iter_mut().rev() {
+            if let Some(slot) = scope.get_mut(&name) {
+                *slot = value_ty.clone();
+                break;
+            }
+        }
+        self.expr_types
+            .insert((init_span.start, init_span.end), value_ty.clone());
+        self.pending_option.remove(&name);
+    }
+
     fn check_binary(&mut self, span: Span, l: &Expr, op: BinOp, r: &Expr) -> Ty {
         if matches!(op, BinOp::Assign) {
             let lt = self.infer_expr(l);
@@ -2202,6 +2242,7 @@ impl TypeChecker {
             }
             let rt = self.infer_expr(r);
             self.expected_call_ty = None;
+            self.refine_pending_option(l, &lt, &rt);
             self.expect(&rt, &lt, span);
             // Assignment is an expression of type `()` in Rust; typing it as
             // the assigned value made `match x.as_str() { _ => flag = true }`

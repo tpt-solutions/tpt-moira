@@ -1089,3 +1089,30 @@ fn main() {
         assert_eq!(lines, vec!["2", "20"]);
     }
 }
+
+/// `let mut x = None;` takes its payload type from the later `x = Some(..)`, so the
+/// option is a typed local that a tuple returned with it can carry.
+#[test]
+fn let_none_takes_payload_type_from_later_assignment_runs() {
+    let src = r#"
+fn split(n: i64) -> (i64, Option<i64>) {
+    let mut sep = None;
+    if n > 3 {
+        sep = Some(n * 2);
+    }
+    (n + 1, sep)
+}
+fn main() {
+    let (a, b) = split(4);
+    print_i64(a);
+    print_i64(b.unwrap_or(-1));
+    let (c, d) = split(1);
+    print_i64(c);
+    print_i64(d.unwrap_or(-1));
+}
+"#;
+    if let Some(out) = check_and_run("let_none_payload", src) {
+        let lines: Vec<&str> = out.lines().filter(|l| !l.is_empty()).collect();
+        assert_eq!(lines, vec!["5", "8", "2", "-1"]);
+    }
+}
