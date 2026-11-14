@@ -826,6 +826,36 @@ fn main() {
     }
 }
 
+/// The `&-1` default of `unwrap_or` is an `i64` (the payload's type), so its temporary and
+/// the pointer to it are `int64_t`, not `long long`: the two differ on platforms where
+/// `int64_t` is `long`, and the C compiler rejects the mismatched pointer assignment there.
+/// Checked on the emitted C, so it holds on every platform, with or without a C compiler.
+#[test]
+fn option_as_ref_default_temporaries_are_int64() {
+    let src = r#"
+fn main() {
+    let b: Option<i64> = None;
+    print_i64(b.as_ref().unwrap_or(&-1).clone());
+}
+"#;
+    let prog = tpt_moira_clotho::parse_source(src).expect("program should parse");
+    let (res, hints) = tpt_moira_lachesis::type_check_typed(&prog, &[]);
+    assert!(res.is_ok(), "program should type-check: {:?}", res.err());
+    let mir = tpt_moira_atropos::lower_program_typed(&prog, &hints)
+        .expect("program should lower with hints");
+    let c = tpt_moira_atropos::codegen_c::emit_c(&mir);
+    for wrong in ["long long*", "int32_t*"] {
+        assert!(
+            !c.contains(wrong),
+            "the default's pointer must be int64_t* (found {wrong}):\n{c}"
+        );
+    }
+    assert!(
+        c.contains("int64_t* t"),
+        "the reference must point to an int64_t:\n{c}"
+    );
+}
+
 /// `Option::and_then` and `Option::filter` take a closure over the payload, and `or_else`
 /// takes a closure that returns an option of the same type.
 #[test]
