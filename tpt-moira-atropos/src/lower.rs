@@ -550,8 +550,7 @@ pub fn lower_program_with_enums(
         }
     }
     if !errors.is_empty() {
-        return Err(LowerError(errors.join("
-")));
+        return Err(LowerError(errors.join("\n")));
     }
     Ok(out)
 }
