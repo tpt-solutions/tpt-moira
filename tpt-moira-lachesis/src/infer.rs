@@ -2098,6 +2098,8 @@ impl TypeChecker {
                     && !idx_ty.is_integer()
                     && !matches!(idx_ty, Ty::Unknown)
                     && !matches!(&base_ty, Ty::Apply(n, _) if n == "HashMap" || n == "BTreeMap")
+                    // A map (its type not recorded, `HashMap::new()`) is indexed by key.
+                    && !matches!(&base_ty, Ty::Struct(n) if n == "HashMap" || n == "BTreeMap")
                 {
                     self.err(span, "array index must be an integer".to_string());
                 }
@@ -2281,6 +2283,8 @@ impl TypeChecker {
             }
             // A `Vec` whose element type was not recorded (`Vec::new()`).
             Ty::Struct(name) if name == "Vec" => Ty::Unknown,
+            // A map whose key and value types were not recorded (`HashMap::new()`).
+            Ty::Struct(name) if name == "HashMap" || name == "BTreeMap" => Ty::Unknown,
             Ty::Apply(name, args) if name == "HashMap" || name == "BTreeMap" => {
                 args.get(1).cloned().unwrap_or(Ty::Unknown)
             }

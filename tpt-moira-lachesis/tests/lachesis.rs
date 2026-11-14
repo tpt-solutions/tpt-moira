@@ -784,3 +784,38 @@ fn pattern_bindings_through_a_reference_are_references() {
     ))
     .is_ok());
 }
+
+#[test]
+fn loop_with_try_push_then_push_is_accepted() {
+    // Each iteration's `&mut parts` ends with its `push`; the later push is a new borrow. Liveness
+    // follows the control flow (the loop's back edge), not the order the blocks were numbered.
+    assert!(check(&parse(
+        "fn one(x: i64) -> Option<String> {
+            if x > 0 { Some(String::from(\"a\")) } else { None }
+        }
+        fn build(xs: &Vec<i64>) -> Option<String> {
+            let mut parts: Vec<String> = Vec::new();
+            for x in xs {
+                parts.push(one(*x)?);
+            }
+            parts.push(one(0)?);
+            Some(parts.join(\",\"))
+        }
+        fn main() { let v: Vec<i64> = vec![1]; let _ = build(&v); }"
+    ))
+    .is_ok());
+}
+
+#[test]
+fn overlapping_mutable_borrows_are_still_rejected() {
+    assert!(check(&parse(
+        "fn main() {
+            let mut v: Vec<i64> = Vec::new();
+            let a = &mut v;
+            let b = &mut v;
+            a.push(1);
+            b.push(2);
+        }"
+    ))
+    .is_err());
+}

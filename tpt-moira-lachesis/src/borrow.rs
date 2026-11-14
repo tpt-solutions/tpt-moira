@@ -58,9 +58,12 @@ struct BorrowInfo {
     /// Whether every reachable statement after creation is live (the borrow is
     /// never read but still occupies the place until the end of scope).
     never_read: bool,
-    use_locs: Vec<(usize, usize)>,
     escapes: bool,
     reach: HashSet<usize>,
+    /// `live[block][index]`: whether the borrow (or an alias) is read later on some path from
+    /// that point, before the borrow's temporary is redefined. Index `stmts.len()` is the
+    /// terminator. Liveness follows control flow, not block numbering.
+    live: Vec<Vec<bool>>,
 }
 
 /// Whether `borrow` is live at the statement/terminator position `(bi, si)`
@@ -69,7 +72,8 @@ fn is_live_at(info: &BorrowInfo, bi: usize, si: usize) -> bool {
     if !info.reach.contains(&bi) {
         return false;
     }
-    if !loc_le((info.borrow.block, info.borrow.stmt), (bi, si)) {
+    // Within the creation block only the statements after the creation are covered.
+    if bi == info.borrow.block && si < info.borrow.stmt {
         return false;
     }
     if info.escapes || info.never_read {
@@ -77,7 +81,55 @@ fn is_live_at(info: &BorrowInfo, bi: usize, si: usize) -> bool {
         // whole reachable remainder of the function.
         return true;
     }
-    info.use_locs.iter().any(|&u| loc_le((bi, si), u))
+    info.live[bi].get(si).copied().unwrap_or(false)
+}
+
+/// Backward liveness of a borrow over the control-flow graph, at statement granularity. A point
+/// is live when a name holding the borrow is read on some path from it before the borrow's
+/// temporary is written again (the write of the temporary kills it).
+fn compute_live(
+    f: &tpt_moira_atropos::mir::Function,
+    names: &HashSet<String>,
+    temp: &str,
+    succs: &[Vec<usize>],
+) -> Vec<Vec<bool>> {
+    let n = f.blocks.len();
+    let mut live: Vec<Vec<bool>> = f
+        .blocks
+        .iter()
+        .map(|b| vec![false; b.stmts.len() + 1])
+        .collect();
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for bi in (0..n).rev() {
+            let b = &f.blocks[bi];
+            let len = b.stmts.len();
+            // The terminator: read by a branch, and live when a successor's start is live.
+            let term_use = match &b.term {
+                Terminator::If(Operand::Var(v), _, _) => names.contains(v),
+                Terminator::Return(Some(Operand::Var(v))) => names.contains(v),
+                _ => false,
+            };
+            let after_term = succs[bi].iter().any(|&sb| live[sb][0]);
+            let mut now = term_use || after_term;
+            if now != live[bi][len] {
+                live[bi][len] = now;
+                changed = true;
+            }
+            for si in (0..len).rev() {
+                let st = &b.stmts[si];
+                let uses = operands_of(&st.rvalue).iter().any(|nm| names.contains(nm));
+                let defines = st.place == temp;
+                now = uses || (now && !defines);
+                if now != live[bi][si] {
+                    live[bi][si] = now;
+                    changed = true;
+                }
+            }
+        }
+    }
+    live
 }
 
 fn check_function(f: &tpt_moira_atropos::mir::Function, errors: &mut Vec<Diag>) {
@@ -191,12 +243,13 @@ fn check_function(f: &tpt_moira_atropos::mir::Function, errors: &mut Vec<Diag>) 
         }
 
         let reach = reachable_from(br.block, &succs);
+        let live = compute_live(f, &live_names, &br.temp, &succs);
         infos.push(BorrowInfo {
             borrow: br.clone(),
             never_read: use_locs.is_empty(),
-            use_locs,
             escapes,
             reach,
+            live,
         });
     }
 
@@ -210,8 +263,7 @@ fn check_function(f: &tpt_moira_atropos::mir::Function, errors: &mut Vec<Diag>) 
                 if s.place != br.place {
                     continue;
                 }
-                let m = (mb, si);
-                if !info.reach.contains(&mb) || !loc_le(creation, m) {
+                if !info.reach.contains(&mb) || (mb == creation.0 && si < creation.1) {
                     continue;
                 }
                 if is_live_at(info, mb, si) {
@@ -280,10 +332,6 @@ fn check_function(f: &tpt_moira_atropos::mir::Function, errors: &mut Vec<Diag>) 
             }
         }
     }
-}
-
-fn loc_le(a: (usize, usize), b: (usize, usize)) -> bool {
-    a.0 < b.0 || (a.0 == b.0 && a.1 <= b.1)
 }
 
 fn successors(term: &Terminator) -> Vec<usize> {
