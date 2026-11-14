@@ -962,6 +962,27 @@ fn returned_capturing_closure_inside_assert_runs() {
 }
 
 #[test]
+fn c_reserved_names_are_escaped_and_run() {
+    // Functions and locals named like C keywords and libc names must still compile.
+    let out = match run_src(
+        "fn double(x: i64) -> i64 { x * 2 }
+        fn exit(x: i64) -> i64 { x + 1 }
+        fn main() {
+            let int = double(4);
+            print_i64(int);
+            print_i64(exit(int));
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping reserved-name run");
+            return;
+        }
+    };
+    assert_eq!(out, "8\n9");
+}
+
+#[test]
 fn returned_capturing_closure_with_impure_argument_runs() {
     // `apply(make(side()), 1)`: the impure argument of the candidate call is evaluated
     // by the hoisted `let`, which runs before the statement. `side` prints first, so
