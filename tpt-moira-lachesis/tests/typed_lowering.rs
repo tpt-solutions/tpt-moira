@@ -515,8 +515,8 @@ fn main() {
     let f = v.first();
     let l = v.last();
     println!("{}", f.unwrap());
-    println!("{}", l.unwrap_or(0));
-    println!("{}", e.first().unwrap_or(-1));
+    println!("{}", l.copied().unwrap_or(0));
+    println!("{}", e.first().copied().unwrap_or(-1));
     println!("{}", b.items.len());
 }
 "#;
@@ -550,4 +550,124 @@ fn main() {
         "3
 20"
     );
+}
+
+/// `println!` of a `&i64` prints the referent; `first()`/`last()`/`get()` give
+/// `Option<&T>` whose `copied()` reads the referent only on the `Some` path.
+#[test]
+fn references_to_scalars_print_and_option_refs_run() {
+    let src = r#"
+fn show(r: &i64) -> i64 {
+    *r + 1
+}
+
+fn main() {
+    let x: i64 = 5;
+    let r = &x;
+    println!("{}", r);
+    print_i64(show(&x));
+    let mut v: Vec<i64> = Vec::new();
+    v.push(4);
+    v.push(9);
+    let f = v.first();
+    println!("{}", f.unwrap());
+    println!("{}", v.last().copied().unwrap_or(0));
+    let e: Vec<i64> = Vec::new();
+    println!("{}", e.first().copied().unwrap_or(-1));
+}
+"#;
+    if let Some(out) = check_and_run("refs_option", src) {
+        let lines: Vec<&str> = out.lines().filter(|l| !l.is_empty()).collect();
+        assert_eq!(lines, vec!["5", "6", "4", "9", "-1"]);
+    }
+}
+
+/// `slice.first().map(|t| &t.kind)`: the closure's parameter is a pointer, so the
+/// borrowed field is the element's own storage and no copy escapes the function.
+#[test]
+fn closure_borrowing_a_field_through_option_ref_runs() {
+    let src = r#"
+struct Tok {
+    kind: i64,
+}
+
+fn pick(args: &[Tok]) -> i64 {
+    let inner = match args.first().map(|t| &t.kind) {
+        Some(k) => *k,
+        None => 0,
+    };
+    inner + 1
+}
+
+fn main() {
+    let mut v: Vec<Tok> = Vec::new();
+    v.push(Tok { kind: 3 });
+    print_i64(pick(&v));
+}
+"#;
+    if let Some(out) = check_and_run("closure_field_borrow", src) {
+        assert_eq!(out.trim(), "4");
+    }
+}
+
+/// A method called on a closure parameter that is a reference to a struct (`|c| c.bump()`)
+/// resolves to the struct's method: the parameter is a pointer, and the call passes it.
+#[test]
+fn method_call_on_closure_reference_parameter_runs() {
+    let src = r#"
+struct Counter {
+    n: i64,
+}
+
+impl Counter {
+    fn bump(&mut self) -> i64 {
+        self.n = self.n + 1;
+        self.n
+    }
+
+    fn run(&mut self, f: impl FnMut(&mut Counter) -> i64) -> i64 {
+        let mut g = f;
+        g(self)
+    }
+
+    fn go(&mut self) -> i64 {
+        self.run(|c| c.bump())
+    }
+}
+
+fn main() {
+    let mut c = Counter { n: 4 };
+    print_i64(c.go());
+}
+"#;
+    if let Some(out) = check_and_run("closure_method_receiver", src) {
+        assert_eq!(out.trim(), "5");
+    }
+}
+
+/// `pop`, `truncate` and `is_empty` on a vector update its length in place, and `pop` on an
+/// empty vector is `None`.
+#[test]
+fn vec_pop_truncate_and_is_empty_run() {
+    let src = r#"
+fn main() {
+    let mut v: Vec<i64> = Vec::new();
+    println!("{}", v.is_empty());
+    v.push(4);
+    v.push(9);
+    v.push(7);
+    println!("{}", v.pop().unwrap());
+    println!("{}", v.len());
+    v.truncate(1);
+    println!("{}", v.len());
+    println!("{}", v.is_empty());
+    let e: Vec<i64> = Vec::new();
+    let mut f = e;
+    println!("{}", f.pop().unwrap_or(-1));
+}
+"#;
+    if let Some(out) = check_and_run("vec_pop_truncate", src) {
+        let lines: Vec<&str> = out.lines().filter(|l| !l.is_empty()).collect();
+        assert_eq!(lines, vec!["true", "7", "2", "1", "false", "-1"]);
+    }
 }

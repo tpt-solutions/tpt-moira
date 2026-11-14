@@ -260,8 +260,17 @@ impl Solver {
 
     /// Whether `ty` implements the trait `t` (per the solver's program).
     pub fn implements_trait(&self, t: TraitId, ty: &Ty) -> bool {
+        // An instantiated generic struct (`Spanned<i64>`) is queried in the same
+        // `Apply` shape the impl heads use, so `impl<T> Tr for Spanned<T>` matches it.
+        let self_term = match ty {
+            Ty::Apply(n, args) => Term::Apply(
+                n.clone(),
+                args.iter().map(|a| Term::Concr(a.clone())).collect(),
+            ),
+            _ => Term::Concr(ty.clone()),
+        };
         matches!(
-            self.solve(&vec![Term::App(t, Box::new(Term::Concr(ty.clone())))]),
+            self.solve(&vec![Term::App(t, Box::new(self_term))]),
             Answer::Yes
         )
     }
@@ -428,6 +437,12 @@ fn term_has_var(t: &Term) -> bool {
     }
 }
 
+/// The solver trait for a bound name: the operator/comparison traits resolve to the
+/// built-in facts (so `T: PartialEq` holds for `i32`), others are user traits.
+fn bound_trait(name: &str) -> TraitId {
+    builtin_trait_id(name).unwrap_or_else(|| TraitId::User(name.to_string()))
+}
+
 /// Lower a single `impl` block into a solver clause (with generic self-type and
 /// where-clause body) plus its associated-type projection facts.
 fn impl_to_clause(imp: &tpt_moira_clotho::ast::ImplDef) -> (Clause, Vec<(Term, Term)>) {
@@ -446,14 +461,14 @@ fn impl_to_clause(imp: &tpt_moira_clotho::ast::ImplDef) -> (Clause, Vec<(Term, T
         let vi = vars[&p.name.node];
         for bound in &p.bounds {
             let bname = bound_trait_name(bound);
-            body.push(Term::App(TraitId::User(bname), Box::new(Term::Var(vi))));
+            body.push(Term::App(bound_trait(&bname), Box::new(Term::Var(vi))));
         }
     }
     for pred in &imp.generics.where_clause {
         for bound in &pred.bounds {
             let bname = bound_trait_name(bound);
             body.push(Term::App(
-                TraitId::User(bname),
+                bound_trait(&bname),
                 Box::new(ast_type_to_term(&pred.ty, &vars)),
             ));
         }

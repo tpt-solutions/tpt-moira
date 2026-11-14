@@ -126,6 +126,10 @@ pub struct TypeChecker {
     /// The type of every checked expression, keyed by its source span
     /// `(start, end)`. Exported to Atropos as type hints (see [`hint_of_ty`]).
     expr_types: HashMap<(usize, usize), Ty>,
+    /// Types of identifier closure parameters, keyed by their pattern span. Kept apart
+    /// from `expr_types`: only a parameter's pointer-ness is exported (see
+    /// `check_program_typed`), so a reference's hint does not leak into other expressions.
+    param_types: HashMap<(usize, usize), Ty>,
     /// Calls of generic functions, with the type each generic parameter was solved to
     /// (see [`GenericCall`]).
     generic_calls: Vec<GenericCall>,
@@ -240,7 +244,8 @@ fn hint_compound(ty: &Ty) -> Option<String> {
             let payload = match &args[0] {
                 Ty::Ref(inner) | Ty::RefMut(inner) => match &**inner {
                     Ty::Struct(n) if n != "String" && n != "Vec" => Some(format!("{n}*")),
-                    _ => hint_elem_name(&args[0]),
+                    // A reference to a scalar is a pointer to it (`Option<&i64>`).
+                    other => hint_elem_name(other).map(|h| format!("{h}*")),
                 },
                 other => hint_elem_name(other),
             };
@@ -302,6 +307,16 @@ fn hint_compound(ty: &Ty) -> Option<String> {
                     {
                         hint_elem_name(inner).map(|h| format!("{h}*"))
                     }
+                    // A reference to a user struct is a pointer to it (as an `Option` payload).
+                    Ty::Ref(inner) | Ty::RefMut(inner)
+                        if matches!(&**inner, Ty::Struct(n)
+                            if !matches!(n.as_str(), "String" | "Vec" | "PathBuf")) =>
+                    {
+                        match &**inner {
+                            Ty::Struct(n) => Some(format!("{n}*")),
+                            _ => None,
+                        }
+                    }
                     other => hint_elem_name(other),
                 }
             };
@@ -361,7 +376,7 @@ fn hint_elem_name(ty: &Ty) -> Option<String> {
         Ty::Bool => "bool",
         Ty::Char => "char",
         Ty::Str => "str",
-        Ty::Struct(n) if n == "String" => return Some("str".to_string()),
+        Ty::Struct(n) if n == "String" || n == "PathBuf" => return Some("str".to_string()),
         Ty::Struct(n) if n != "Vec" => return Some(n.clone()),
         _ => return None,
     };
@@ -396,7 +411,7 @@ pub fn hint_of_ty(ty: &Ty) -> Option<String> {
         Ty::F32 => Some("f32".to_string()),
         Ty::F64 => Some("f64".to_string()),
         // A `String` is a `str` (its C value is the same `char*`).
-        Ty::Struct(name) if name == "String" => Some("str".to_string()),
+        Ty::Struct(name) if name == "String" || name == "PathBuf" => Some("str".to_string()),
         // A user struct or enum is its own name (the lowering applies the hint only to
         // structs the program defines).
         Ty::Struct(name)
@@ -436,7 +451,7 @@ pub fn hint_of_ty(ty: &Ty) -> Option<String> {
             | Ty::Char => hint_elem_name(inner).map(|h| format!("{h}*")),
             // A reference to a string is the string (its C value is the same `char*`).
             Ty::Str => Some("str".to_string()),
-            Ty::Struct(name) if name == "String" => Some("str".to_string()),
+            Ty::Struct(name) if name == "String" || name == "PathBuf" => Some("str".to_string()),
             Ty::Array(elem, 0) => hint_elem_name(elem).map(|e| format!("Slice<{e}>")),
             Ty::Apply(name, args) if name == "Vec" && args.len() == 1 => {
                 hint_elem_name(&args[0]).map(|e| format!("Vec<{e}>*"))
@@ -541,6 +556,7 @@ impl Default for TypeChecker {
             ret_span: Span::default(),
             errors: Vec::new(),
             expr_types: HashMap::new(),
+            param_types: HashMap::new(),
             generic_calls: Vec::new(),
             expected_call_ty: None,
             glob_enums: Vec::new(),
@@ -631,11 +647,50 @@ impl TypeChecker {
         externs: &[(&str, &tpt_moira_clotho::ast::Program)],
     ) -> crate::TypedCheckOutcome {
         let cx = Self::check_program_cx(prog, externs);
-        let hints: HashMap<(usize, usize), String> = cx
+        let mut hints: HashMap<(usize, usize), String> = cx
             .expr_types
             .iter()
             .filter_map(|(span, ty)| hint_of_ty(ty).map(|h| (*span, h)))
             .collect();
+        // A hint that names a generic struct bare (its type arguments were not solved)
+        // would name a C type that is never instantiated: drop it, so the backend uses
+        // its default for that expression.
+        let generic: Vec<&str> = prog
+            .items
+            .iter()
+            .filter_map(|it| match &it.kind {
+                tpt_moira_clotho::ast::ItemKind::Struct(st) if !st.generics.params.is_empty() => {
+                    Some(st.name.node.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+        if !generic.is_empty() {
+            hints.retain(|_, h| {
+                !h.split(|c: char| !(c.is_alphanumeric() || c == '_'))
+                    .any(|tok| generic.contains(&tok))
+            });
+        }
+        // A closure parameter of reference-to-struct type is a pointer to the struct.
+        for (span, ty) in &cx.param_types {
+            let hint = match ty {
+                Ty::Ref(inner) | Ty::RefMut(inner) => match &**inner {
+                    Ty::Struct(name)
+                        if !matches!(
+                            name.as_str(),
+                            "Vec" | "String" | "Option" | "Result" | "Self"
+                        ) =>
+                    {
+                        Some(format!("{name}*"))
+                    }
+                    _ => None,
+                },
+                other => hint_of_ty(other),
+            };
+            if let Some(h) = hint {
+                hints.insert(*span, h);
+            }
+        }
         let res = if cx.errors.is_empty() {
             Ok(())
         } else {
@@ -730,7 +785,13 @@ impl TypeChecker {
                             // trait-bound method resolution (`T: Show` →
                             // `t.show()`) can find it via the solver.
                             let params2 = f.params.iter().map(|p| cx.type_to_ty(&p.ty)).collect();
-                            let ret2 = f.ret.as_ref().map(|t| cx.type_to_ty(t)).unwrap_or(Ty::Unit);
+                            // A bare `-> Self` in the trait index stands for the receiver
+                            // (`resolve_trait_method` substitutes it), not the impl's type.
+                            let ret2 = match f.ret.as_ref() {
+                                Some(t) if is_bare_self(t) => Ty::Generic("Self".into()),
+                                Some(t) => cx.type_to_ty(t),
+                                None => Ty::Unit,
+                            };
                             cx.trait_methods.insert(
                                 (imp.trait_name.node.clone(), f.name.node.clone()),
                                 FnSig {
@@ -1532,6 +1593,12 @@ impl TypeChecker {
                 }
                 _ => self.type_to_ty(&p.ty),
             };
+            // An identifier parameter's type is also recorded under its pattern span, so the
+            // lowering can type the lifted function's parameter (see `lower_closure`).
+            if let Pat::Ident(sp) = &p.pat {
+                self.param_types
+                    .insert((sp.span.start, sp.span.end), pt.clone());
+            }
             param_tys.push(pt.clone());
             let name = pat_name(&p.pat);
             self.env.last_mut().unwrap().insert(name, pt);
@@ -2440,6 +2507,17 @@ impl TypeChecker {
                 if bn.is_empty() {
                     return;
                 }
+                // A bare generic struct (`Self` inside a generic impl) carries no type
+                // arguments here, so its bounds cannot be checked precisely: lenient.
+                if let Ty::Struct(n) = concrete {
+                    if cx
+                        .structs
+                        .get(n)
+                        .is_some_and(|i| !i.generics.params.is_empty())
+                    {
+                        return;
+                    }
+                }
                 // A user-written or derive-generated `impl Trait for T`
                 // satisfies the bound even when `Trait` is also a builtin name
                 // (e.g. derived `PartialEq`): consult the solver first.
@@ -2708,6 +2786,19 @@ impl TypeChecker {
                         "`..base` in struct literal is not supported".to_string(),
                     );
                 }
+                // A generic struct literal carries the arguments it solved, so the
+                // value keeps its instantiation (`Spanned<i64>`, not a bare `Spanned`).
+                if !info.generics.params.is_empty() {
+                    let args: Vec<Ty> = info
+                        .generics
+                        .params
+                        .iter()
+                        .map(|p| sub.get(&p.name.node).cloned().unwrap_or(Ty::Unknown))
+                        .collect();
+                    if args.iter().all(|a| !matches!(a, Ty::Unknown)) {
+                        return Ty::Apply(name, args);
+                    }
+                }
                 Ty::Struct(name)
             }
             None => {
@@ -2886,6 +2977,12 @@ impl TypeChecker {
         if let Some(t) = self.check_iter_method(&recv_ty, &method.node, args) {
             return t;
         }
+        // `seq.first()` / `seq.last()` on a vector or slice is `Option<&T>` (as in std).
+        if matches!(method.node.as_str(), "first" | "last") && args.is_empty() {
+            if let Some(elem) = seq_elem_ty(&self.strip_refs(&recv_ty)) {
+                return Ty::Apply("Option".into(), vec![ref_item(elem)]);
+            }
+        }
         // `seq.get(i)` on a vector or slice of known element type is `Option<&T>`.
         if method.node == "get" && args.len() == 1 {
             if let Some(elem) = seq_elem_ty(&self.strip_refs(&recv_ty)) {
@@ -2925,9 +3022,13 @@ impl TypeChecker {
                 }
                 return targs[0].clone();
             }
-            // `first()` / `last()` of a `Vec<T>` is an `Option<T>`.
+            // `first()` / `last()` of a `Vec<T>` is an `Option<&T>` (as in std).
             if n == "Vec" && targs.len() == 1 && args.is_empty() && (m == "first" || m == "last") {
-                return Ty::Apply("Option".into(), vec![deref_item(targs[0].clone())]);
+                return Ty::Apply("Option".into(), vec![ref_item(targs[0].clone())]);
+            }
+            // `pop()` removes and returns the last element.
+            if n == "Vec" && targs.len() == 1 && args.is_empty() && m == "pop" {
+                return Ty::Apply("Option".into(), vec![targs[0].clone()]);
             }
         }
         // A `HashMap<K, V>` method gives its value type: `get` and `insert` are `Option<V>`.
@@ -3093,7 +3194,8 @@ impl TypeChecker {
                     .get(&(tr.clone(), method.to_string()))
                     .cloned()
                 {
-                    return Some(self.check_user_method(span, recv_ty, &sig, args, None));
+                    let ty = self.check_user_method(span, recv_ty, &sig, args, None);
+                    return Some(substitute_self(ty, recv_ty));
                 }
             }
             return None;
@@ -3134,7 +3236,8 @@ impl TypeChecker {
         // query type is used for the receiver check so an integer-literal
         // receiver (`Ty::Int`) matches an `&self` of `i32`.
         let (_, sig) = matches.into_iter().next()?;
-        Some(self.check_user_method(span, &query_ty, &sig, args, None))
+        let ty = self.check_user_method(span, &query_ty, &sig, args, None);
+        Some(substitute_self(ty, &query_ty))
     }
 
     /// The user-trait bounds declared on generic parameter `name`, either
@@ -3618,11 +3721,48 @@ impl TypeChecker {
             .insert(("Vec".into(), "len".into()), sig(vec![], Usize));
         self.methods
             .insert(("Vec".into(), "is_empty".into()), sig(vec![], Bool));
+        // Further `Vec<T>` methods (in-place mutators and removals). Element-typed
+        // results are `Unknown`; `or_insert_with` keeps any earlier definition.
+        for (m, params, ret) in [
+            ("sort", vec![], Unit),
+            ("sort_unstable", vec![], Unit),
+            ("dedup", vec![], Unit),
+            ("reverse", vec![], Unit),
+            ("clear", vec![], Unit),
+            ("truncate", vec![Usize], Unit),
+            ("insert", vec![Usize, Unknown], Unit),
+            ("remove", vec![Usize], Unknown),
+            ("pop", vec![], Unknown),
+        ] {
+            self.methods
+                .entry(("Vec".into(), m.into()))
+                .or_insert_with(|| sig(params, ret));
+        }
+        // `bool` combinators (`cond.then_some(v)` / `cond.then(f)`).
+        self.methods
+            .entry(("bool".into(), "then_some".into()))
+            .or_insert_with(|| sig(vec![Unknown], Unknown));
+        self.methods
+            .entry(("bool".into(), "then".into()))
+            .or_insert_with(|| sig(vec![Unknown], Unknown));
+        // `escape_default` on chars and strings (returns an iterator; modelled as a
+        // `String`, which is what the callers here format or collect).
+        for recv in ["char", "String"] {
+            self.methods
+                .entry((recv.into(), "escape_default".into()))
+                .or_insert_with(|| sig(vec![], std("String")));
+        }
         // Methods on `Option<T>`.
         self.methods
             .insert(("Option".into(), "is_some".into()), sig(vec![], Bool));
         self.methods
             .insert(("Option".into(), "is_none".into()), sig(vec![], Bool));
+        self.methods
+            .entry(("Option".into(), "is_some_and".into()))
+            .or_insert_with(|| sig(vec![Unknown], Bool));
+        self.methods
+            .entry(("Option".into(), "is_none_or".into()))
+            .or_insert_with(|| sig(vec![Unknown], Bool));
         self.methods
             .insert(("Option".into(), "unwrap".into()), sig(vec![], Unknown));
         // Methods on `Result<T, E>`.
@@ -3647,6 +3787,34 @@ impl TypeChecker {
             ("str".into(), "to_string".into()),
             sig(vec![], std("String")),
         );
+        // Path methods (a path is a `str` here): `Path`/`PathBuf` share the `str` surface.
+        self.methods
+            .entry(("str".into(), "join".into()))
+            .or_insert_with(|| sig(vec![Unknown], Str));
+        self.methods
+            .entry(("str".into(), "is_file".into()))
+            .or_insert_with(|| sig(vec![], Bool));
+        self.methods
+            .entry(("str".into(), "display".into()))
+            .or_insert_with(|| sig(vec![], Str));
+        self.methods
+            .entry(("str".into(), "to_path_buf".into()))
+            .or_insert_with(|| sig(vec![], Str));
+        self.methods
+            .entry(("str".into(), "parent".into()))
+            .or_insert_with(|| sig(vec![], Apply("Option".into(), vec![Str])));
+        self.assoc_fns
+            .entry(("PathBuf".into(), "from".into()))
+            .or_insert_with(|| sig(vec![Unknown], Str));
+        // `std::thread::Builder::new()`: the driver runs the compiler on a large-stack thread.
+        self.assoc_fns
+            .entry(("Builder".into(), "new".into()))
+            .or_insert_with(|| sig(vec![], Unknown));
+        // `Path::new(s)` in expression position: a path is a string here too.
+        self.assoc_fns
+            .entry(("Path".into(), "new".into()))
+            .or_insert_with(|| sig(vec![Unknown], Str));
+
         // Slice methods (arrays, slices, and `Vec` through auto-deref). Element-typed
         // results are `Unknown`.
         self.methods
@@ -4382,7 +4550,12 @@ impl TypeChecker {
                 })
             }
         };
+        // A bare generic struct (`Self` inside a generic impl, or a monomorphized
+        // instance named by the checker) carries no type arguments: lenient, as above.
+        let bare_generic = matches!(ty, Ty::Struct(n)
+            if self.structs.get(n).is_some_and(|i| !i.generics.params.is_empty()));
         let ok = match ty {
+            _ if bare_generic => true,
             Ty::Generic(n) => {
                 // `Eq`/`Ord` are written as such but surface under their
                 // lang-item names (`PartialEq`/`PartialOrd`) in diagnostics.
@@ -4792,6 +4965,9 @@ fn prim(name: &str) -> Option<Ty> {
         "bool" => Ty::Bool,
         "char" => Ty::Char,
         "str" => Ty::Str,
+        // A `PathBuf` is a string in the C backend (`char*`), like `str`. (`Path` is not
+        // mapped: the AST has its own `Path` type, and the checker has no module scopes.)
+        "PathBuf" => Ty::Str,
         _ => return None,
     })
 }
@@ -5040,6 +5216,20 @@ fn collect_free_vars_block(
     }
 }
 
+/// Whether a written type is the bare path `Self`.
+fn is_bare_self(t: &Type) -> bool {
+    matches!(&t.kind, TypeKind::Path(p, args) if args.is_empty()
+        && p.segments.len() == 1 && p.segments[0].node == "Self")
+}
+
+/// Replace the trait-level `Self` placeholder in a method result by the receiver type.
+fn substitute_self(ty: Ty, recv: &Ty) -> Ty {
+    match ty {
+        Ty::Generic(ref n) if n == "Self" => recv.clone(),
+        other => other,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5134,6 +5324,47 @@ mod tests {
         assert!(check(
             "fn f(s: &str) -> usize { s.len() }\n\
              fn main() { let lit = \"abc\"; let _ = f(lit); }"
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn generic_struct_derives_check_with_bounds_and_instantiation() {
+        // `#[derive(PartialEq, Clone)]` on a generic struct: the impls are bounded by the
+        // derived trait, `==` on instances resolves, and `clone` on the generic field
+        // keeps the field's type (it used to return the bare struct, `Self`).
+        let src = "#[derive(Debug, Clone, PartialEq, Eq)]
+             pub struct Spanned<T> { pub node: T, pub span: i64 }
+             fn main() {
+                 let a = Spanned { node: 1, span: 2 };
+                 let b = Spanned { node: 1, span: 2 };
+                 let c = a.clone();
+                 if a == b && c.span == 2 { print_i64(1); }
+             }";
+        // The checker runs after derive expansion in the real pipeline.
+        let prog = tpt_moira_clotho::parser::Parser::from_source(src)
+            .parse_program()
+            .expect("parse");
+        let prog = tpt_moira_clotho::derive::expand_derives(&prog);
+        assert!(TypeChecker::check_program(&prog).is_ok());
+    }
+
+    #[test]
+    fn std_prelude_methods_added_for_self_host_resolve() {
+        // Methods the compiler's own source calls; each must resolve through the prelude.
+        assert!(check(
+            "fn f(v: &mut Vec<i64>, o: Option<i64>) -> bool {
+                v.sort();
+                v.truncate(2);
+                v.insert(0, 1);
+                let _ = v.pop();
+                o.is_some_and(|x| x > 0)
+             }
+             fn main() { let mut v: Vec<i64> = Vec::new(); let _ = f(&mut v, None); }"
+        )
+        .is_ok());
+        assert!(check(
+            "fn main() { let c = 'a'; let s = c.escape_default(); let _ = s; let b = true; let _ = b.then_some(1); }"
         )
         .is_ok());
     }
