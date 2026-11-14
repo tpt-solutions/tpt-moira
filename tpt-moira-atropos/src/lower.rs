@@ -797,7 +797,8 @@ fn c_scalar_name(name: &str) -> String {
         "i8" => "int8_t",
         "i16" => "int16_t",
         "i32" => "int32_t",
-        "i64" => "int64_t",
+        // Spelled `long long`, like the default integer; see `codegen_c::c_type`.
+        "i64" => "long long",
         "i128" | "isize" => "long long",
         "u8" => "uint8_t",
         "u16" => "uint16_t",
@@ -9209,11 +9210,13 @@ impl Lower {
                 // `HashMap::new()` in an expression position (`Some(HashMap::new())`): the
                 // checker's hint names the map's key and value types.
                 if is_hashmap_ctor(e) {
-                    if let Some((k, v)) = self
-                        .hint_of_expr(e)
-                        .as_deref()
-                        .and_then(map_args)
-                    {
+                    // The checker types the constructor without its arguments (`HashMap`); the
+                    // type the context expects (a struct field) then gives them.
+                    let want = match self.hint_of_expr(e) {
+                        Some(h) if map_args(&h).is_some() => Some(h),
+                        _ => self.expect_ty.clone(),
+                    };
+                    if let Some((k, v)) = want.as_deref().and_then(map_args) {
                         let t = self.fresh_temp(format!("Map<{k},{v}>"));
                         self.emit(
                             t.clone(),
@@ -9578,7 +9581,18 @@ impl Lower {
                 }
                 let mut fvals = Vec::new();
                 for (fname, fval) in fields {
-                    fvals.push((fname.node.clone(), self.lower_expr(fval)?));
+                    // The field's declared type is what the value is expected to have (a
+                    // constructor such as `HashMap::new()` takes its arguments from it).
+                    let declared = self
+                        .structs
+                        .iter()
+                        .find(|d| d.name == name)
+                        .and_then(|d| d.fields.iter().find(|(f, _)| *f == fname.node))
+                        .map(|(_, t)| t.clone());
+                    let saved = std::mem::replace(&mut self.expect_ty, declared);
+                    let v = self.lower_expr(fval);
+                    self.expect_ty = saved;
+                    fvals.push((fname.node.clone(), v?));
                 }
                 let t = self.fresh_temp(name.clone());
                 self.emit(t.clone(), mir::Rvalue::StructLit(name, fvals));

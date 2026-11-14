@@ -176,11 +176,11 @@ fn cast_lowers_to_c_cast() {
     let mir = lower_src("fn f(x: i32) -> i64 { x as i64 }");
     let c = tpt_moira_atropos::codegen_c::emit_c(&mir);
     assert!(
-        c.contains("(int64_t)x"),
-        "expected a C cast `(int64_t)x`:\n{c}"
+        c.contains("(long long)x"),
+        "expected a C cast `(long long)x`:\n{c}"
     );
     // The cast temporary must be declared with the narrowed target type.
-    assert!(c.contains("int64_t"), "cast temp should be i64:\n{c}");
+    assert!(!c.contains("int64_t"), "i64 is spelled long long:\n{c}");
 }
 
 /// Lower + compile + run a Moira source string, returning the program's stdout.
@@ -1501,4 +1501,26 @@ fn entry_or_insert_with_struct_value_keeps_first_insert_and_runs() {
         }
     };
     assert_eq!(out, "9", "a present key keeps its first value");
+}
+
+#[test]
+fn hashmap_new_in_struct_field_runs() {
+    let out = match run_src(
+        "use std::collections::HashMap;
+        struct T { defs: HashMap<String, i64> }
+        fn mk() -> T {
+            T { defs: HashMap::new() }
+        }
+        fn main() {
+            let t = mk();
+            print_i64(t.defs.len() as i64);
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping HashMap field run");
+            return;
+        }
+    };
+    assert_eq!(out, "0", "`HashMap::new()` in a struct field takes its types from the field");
 }
