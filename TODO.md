@@ -784,6 +784,21 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
             in a nearby item); `std_imports.rs` (`expected bool, found &bool`, likely the closure
             over `on`); `resolve.rs` `expr` or-pattern (`cannot dereference a non-reference`).
             Each is a reference/value rule in the checker, not a missing method.
+            **Why only moira-alloc is self-hostable (2026-11-14, measured).** A crate is
+            self-hostable when it parses, checks, and its own C compiles (with its dependencies
+            bundled). Per crate, as of commit a453d14:
+            - clotho: check 4 errors; own C 502 errors (untyped temporaries, unmodeled std APIs:
+              `AtomicUsize`, `read_to_string`, `File`, `mem::take`, `fmt`).
+            - atropos: check 135 errors; own C 1385 (the largest share: its lowering source).
+            - lachesis: check 118 errors; own C 1386.
+            - driver: check 2 errors; own C 220. It uses threads for its large stack (outside the
+              codegen subset); the two checker errors are `&Path` parameters of callees in
+              lachesis modules whose cross-module rewrite has not been located yet.
+            The gap is the codegen subset's breadth, not one bug: each crate uses the std
+            surface and the typed-temporary lowering broadly, and each new feature also adds
+            its own source to the probe. The route that worked for the four checker-side
+            blockers (path types, threads, `use` aliases) is to remove std surface from each
+            crate where the code allows it, then model what remains.
             Remaining families: string methods (`split`, `split_at`, `starts_with`,
             `strip_suffix`, `trim_end_matches`); slice and iterator methods (`zip`, `split_last`,
             `to_vec`, `values`, `with_capacity`); `saturating_*`; and receivers that have no
