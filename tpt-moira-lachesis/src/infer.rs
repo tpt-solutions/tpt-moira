@@ -1444,10 +1444,11 @@ impl TypeChecker {
             }
             Pat::Wild => {}
             // `&pat` matches through one reference: the inner pattern binds the referent.
-            // On a value, `ref x` (which the parser also models as `&x`) binds a reference to it.
+            // `&pat` matches through one reference: the inner pattern binds the referent. On a value
+            // (`Some(&j)` of a map lookup, which the checker types by value) it binds the value.
             Pat::Ref(inner) => match scrut_ty {
                 Ty::Ref(t) | Ty::RefMut(t) => self.bind_pattern(inner, &(**t).clone()),
-                other => self.bind_pattern(inner, &Ty::Ref(Box::new(other.clone()))),
+                other => self.bind_pattern(inner, other),
             },
             Pat::Or(a, b) => {
                 self.bind_pattern(a, scrut_ty);

@@ -4715,11 +4715,12 @@ impl Lower {
         let (data, len) = match &inner.kind {
             ExprKind::Path(p) if p.segments.len() == 1 => {
                 let name = self.var_name(&p.segments[0].node);
-                let (Some(&n), Some(ct)) = (
-                    self.array_lens.get(&p.segments[0].node),
+                let (n, ct) = match (
+                    self.array_lens.get(&p.segments[0].node).copied(),
                     self.array_elems.get(&p.segments[0].node).cloned(),
-                ) else {
-                    return Ok(None);
+                ) {
+                    (Some(n), Some(ct)) => (n, ct),
+                    _ => return Ok(None),
                 };
                 if !same_c_elem(&ct, &elem) {
                     return Ok(None);
