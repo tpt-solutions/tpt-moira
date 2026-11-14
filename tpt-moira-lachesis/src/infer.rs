@@ -3614,6 +3614,11 @@ impl TypeChecker {
                 self.closure_result(&args[0], &item);
                 Some(Ty::Apply("Option".to_string(), vec![item]))
             }
+            // `max` / `min` / `last` give the element by value (the lowering copies it), so the
+            // option is of the element's value type, not a reference to it.
+            ("max" | "min" | "last", 0) => {
+                Some(Ty::Apply("Option".to_string(), vec![deref_item(item)]))
+            }
             ("for_each", 1) => {
                 self.closure_result(&args[0], &item);
                 Some(Ty::Unit)
@@ -3647,7 +3652,6 @@ impl TypeChecker {
                 self.infer_expr(&args[0]);
                 Some(iter_of(item))
             }
-            ("max" | "min", 0) => Some(Ty::Apply("Option".to_string(), vec![item])),
             ("max_by_key" | "min_by_key", 1) => {
                 self.closure_result(&args[0], &item);
                 Some(Ty::Apply("Option".to_string(), vec![item]))

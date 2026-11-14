@@ -873,3 +873,27 @@ fn main() {
         assert_eq!(lines, vec!["-2", "9"]);
     }
 }
+
+/// `max`, `min` and `last` over an iterator of scalars: `None` for an empty iterator, and the
+/// extreme or last element otherwise (also after a `map`).
+#[test]
+fn iterator_max_min_last_run() {
+    let src = r#"
+fn main() {
+    let mut v: Vec<i64> = Vec::new();
+    v.push(4);
+    v.push(9);
+    v.push(2);
+    let e: Vec<i64> = Vec::new();
+    print_i64(v.iter().max().unwrap_or(-1));
+    print_i64(v.iter().min().unwrap_or(-1));
+    print_i64(v.iter().last().unwrap_or(-1));
+    print_i64(e.iter().max().unwrap_or(-1));
+    print_i64(v.iter().map(|x| *x * 10).max().unwrap_or(-1));
+}
+"#;
+    if let Some(out) = check_and_run("iter_max_min", src) {
+        let lines: Vec<&str> = out.lines().filter(|l| !l.is_empty()).collect();
+        assert_eq!(lines, vec!["9", "2", "2", "-1", "90"]);
+    }
+}

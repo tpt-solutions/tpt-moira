@@ -618,7 +618,39 @@ struct IterChain<'a> {
 fn is_iter_terminal(name: &str) -> bool {
     matches!(
         name,
-        "collect" | "any" | "all" | "find" | "count" | "sum" | "for_each"
+        "collect" | "any" | "all" | "find" | "count" | "sum" | "for_each" | "max" | "min" | "last"
+    )
+}
+
+/// Whether a C element type is a scalar whose values compare with `<` and `>`.
+fn is_scalar_c_type(t: &str) -> bool {
+    matches!(
+        t,
+        "long long"
+            | "int64_t"
+            | "int"
+            | "int32_t"
+            | "int8_t"
+            | "uint8_t"
+            | "unsigned long long"
+            | "uint64_t"
+            | "double"
+            | "char"
+            | "bool"
+            | "i8"
+            | "i16"
+            | "i32"
+            | "i64"
+            | "i128"
+            | "isize"
+            | "u8"
+            | "u16"
+            | "u32"
+            | "u64"
+            | "u128"
+            | "usize"
+            | "f32"
+            | "f64"
     )
 }
 
@@ -2841,6 +2873,18 @@ impl Lower {
         }
     }
 
+    /// Whether an iterator chain yields scalars, judged from its source (a sequence's
+    /// element, a range, or characters). `max`, `min` and `last` compare the items, so they
+    /// are lowered only for scalars; other chains keep their previous lowering.
+    fn chain_source_is_scalar(&self, chain: &IterChain<'_>) -> bool {
+        if let Some(seq) = chain.seq {
+            return self
+                .vec_local(seq)
+                .is_some_and(|(_, elem, _)| is_scalar_c_type(&elem));
+        }
+        chain.range.is_some() || chain.chars.is_some()
+    }
+
     /// Whether `seq` is a vector, slice or array value the chain can index.
     fn is_sequence(&self, seq: &Expr) -> bool {
         self.vec_local(seq).is_some()
@@ -3093,6 +3137,26 @@ impl Lower {
                 self.emit(r.clone(), mir::Rvalue::Use(mir::Operand::Const(0)));
                 res = Some(r);
             }
+            // `max` / `min` / `last`: an `Option` of the element, `None` until an item arrives.
+            "max" | "min" | "last" => {
+                if !is_scalar_c_type(&elem) {
+                    return Err(LowerError(format!(
+                        "`{terminal}` on an iterator of `{elem}` is not in the codegen subset"
+                    )));
+                }
+                let r = self.fresh_temp(format!("Option<{elem}>"));
+                self.emit(
+                    r.clone(),
+                    mir::Rvalue::StructLit(
+                        "Option".to_string(),
+                        vec![
+                            ("tag".to_string(), mir::Operand::Const(1)),
+                            ("f0".to_string(), mir::Operand::Const(0)),
+                        ],
+                    ),
+                );
+                res = Some(r);
+            }
             "for_each" => {}
             _ => {
                 return Err(LowerError(format!(
@@ -3273,6 +3337,81 @@ impl Lower {
                     mir::Rvalue::Call(
                         mir::Operand::Func(mir::vec_fn_name(&out_elem, "push")),
                         vec![mir::Operand::var(ptr), mir::Operand::var(item.clone())],
+                    ),
+                );
+                self.set_term(mir::Terminator::Goto(step));
+            }
+            "last" => {
+                let r = res.clone().expect("last has a result");
+                self.emit(
+                    r.clone(),
+                    mir::Rvalue::StructLit(
+                        "Option".to_string(),
+                        vec![
+                            ("tag".to_string(), mir::Operand::Const(0)),
+                            ("f0".to_string(), mir::Operand::var(item.clone())),
+                        ],
+                    ),
+                );
+                self.set_term(mir::Terminator::Goto(step));
+            }
+            "max" | "min" => {
+                // Replace the best so far when this item beats it (or when there is none).
+                // `max` keeps the first of equal items; for scalars that is the same value.
+                let r = res.clone().expect("max/min has a result");
+                let tag = self.fresh_temp("long long");
+                self.emit(
+                    tag.clone(),
+                    mir::Rvalue::Field(mir::Operand::var(r.clone()), "tag".into(), false),
+                );
+                let best = self.fresh_temp(elem.clone());
+                self.emit(
+                    best.clone(),
+                    mir::Rvalue::Field(mir::Operand::var(r.clone()), "f0".into(), false),
+                );
+                let none = self.fresh_temp("long long");
+                self.emit(
+                    none.clone(),
+                    mir::Rvalue::Binary(
+                        mir::BinOp::Eq,
+                        mir::Operand::var(tag),
+                        mir::Operand::Const(1),
+                    ),
+                );
+                let better = self.fresh_temp("long long");
+                let cmp = if terminal == "max" {
+                    mir::BinOp::Gt
+                } else {
+                    mir::BinOp::Lt
+                };
+                self.emit(
+                    better.clone(),
+                    mir::Rvalue::Binary(
+                        cmp,
+                        mir::Operand::var(item.clone()),
+                        mir::Operand::var(best),
+                    ),
+                );
+                let take = self.fresh_temp("long long");
+                self.emit(
+                    take.clone(),
+                    mir::Rvalue::Binary(
+                        mir::BinOp::Or,
+                        mir::Operand::var(none),
+                        mir::Operand::var(better),
+                    ),
+                );
+                let replace = self.new_block();
+                self.set_term(mir::Terminator::If(mir::Operand::var(take), replace, step));
+                self.current = replace;
+                self.emit(
+                    r.clone(),
+                    mir::Rvalue::StructLit(
+                        "Option".to_string(),
+                        vec![
+                            ("tag".to_string(), mir::Operand::Const(0)),
+                            ("f0".to_string(), mir::Operand::var(item.clone())),
+                        ],
                     ),
                 );
                 self.set_term(mir::Terminator::Goto(step));
@@ -8942,7 +9081,13 @@ impl Lower {
             }
             ExprKind::Match(scrutinee, arms) => self.lower_match(scrutinee, arms),
             ExprKind::MethodCall(recv, method, args)
-                if is_iter_terminal(&method.node) && self.iter_chain_of(recv).is_some() =>
+                if is_iter_terminal(&method.node)
+                    && (args.is_empty()
+                        || !matches!(method.node.as_str(), "max" | "min" | "last"))
+                    && self.iter_chain_of(recv).is_some_and(|c| {
+                        !matches!(method.node.as_str(), "max" | "min" | "last")
+                            || self.chain_source_is_scalar(&c)
+                    }) =>
             {
                 let chain = self
                     .iter_chain_of(recv)
