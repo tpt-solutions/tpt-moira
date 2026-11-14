@@ -753,6 +753,17 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
             own source too, so each new helper costs a few C errors in its crate (lachesis +7 for
             `refine_closure_result`, the same effect as the escape pass before); write new code
             in the subset's shape where that matters.
+            **Iterators (2026-11-14, latest).** The bare `map` calls are gone: chains already lower
+            when a `for`, `collect`, `any`/`all`/`find`/`count`/`sum`/`for_each` consumes them.
+            `max`, `min` and `last` are now terminals too, for scalar sources (commit 12205cd).
+            Still bare: chains with `zip`, `filter_map`, `flat_map`, `rev`, `take_while`, and
+            `position`, and any terminal over a non-scalar element. The large unhinted groups
+            are `iter` receivers (`x.iter().something` with a non-chain consumer), `entry`
+            (HashMap entry API: `or_insert`, `or_default`, `or_insert_with`), `last_mut`, and
+            string splitting (`split`, `trim_end_matches`, `parse`).
+            Measurement note: new lowering and checker code is compiled by the probe as part of
+            its crate, so each addition costs a few own errors (atropos +4 for this step).
+            Own errors now: clotho 510, atropos 1353, lachesis 1377, driver 223.
             Remaining families: string methods (`split`, `split_at`, `starts_with`,
             `strip_suffix`, `trim_end_matches`); slice and iterator methods (`zip`, `split_last`,
             `to_vec`, `values`, `with_capacity`); `saturating_*`; and receivers that have no
