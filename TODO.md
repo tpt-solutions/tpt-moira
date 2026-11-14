@@ -828,6 +828,18 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
             Still open for clotho: `map` with an associated function item (`map(T::f)` through
             `closure_callee`'s second branch is untested here), and a zip followed by
             `max`/`min`/`last` (bare call today).
+            **Checker diagnostics name their file (2026-11-14).** `compile_file_mapped` records
+            each loaded file's span base, path and text in a `SourceFile` list; the driver prints
+            `at path:line:col` under every located checker error (`locate_span`). A global
+            registry was tried first and reverted: a `static Mutex` and `..` slicing are outside
+            the codegen subset. Using the locations, clotho's four checker errors were fixed
+            with checker-compatible rewrites (`alias.rs` subst `while` loop, `&body`;
+            `parser.rs` `&item`; `resolve.rs` `*is_root` and `p.0`/`&p.1`), each with the
+            clippy `needless_borrow` allow where Rust itself would not need the borrow.
+            **Clotho's check now passes** (exit 0; probe: check ok). Own C rose 398 -> 412:
+            four of the new errors name the new functions, the rest come from their `while`
+            loops and `Option` handling. Next: clotho's C kinds, led by `Option` initialisers
+            (16), subscripted non-arrays (14), and `ExprKind` assigned from `int` (13).
  each crate uses the std
             surface and the typed-temporary lowering broadly, and each new feature also adds
             its own source to the probe. The route that worked for the four checker-side

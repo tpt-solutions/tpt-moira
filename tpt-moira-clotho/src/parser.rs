@@ -28,6 +28,9 @@ fn item_name(item: &Item) -> Option<(&str, Span)> {
 /// both be hoisted without renaming. Both are dropped rather than one binding the
 /// other's calls: a call to a dropped item then fails to resolve, which the checker
 /// reports, instead of silently calling the wrong function.
+// `item_name(&item)` borrows the closure's `&Item` again: the Moira checker types the
+// closure parameter as the item, so the borrow is what it accepts.
+#[allow(clippy::needless_borrow)]
 fn unique_hoisted(items: &[Item], hoisted: Vec<Item>) -> Vec<Item> {
     let mut count: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     for item in items.iter().chain(hoisted.iter()) {
@@ -37,7 +40,7 @@ fn unique_hoisted(items: &[Item], hoisted: Vec<Item>) -> Vec<Item> {
     }
     hoisted
         .into_iter()
-        .filter(|item| match item_name(item) {
+        .filter(|item| match item_name(&item) {
             Some((name, _)) => count.get(name) == Some(&1),
             None => true,
         })

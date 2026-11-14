@@ -208,8 +208,8 @@ impl Resolver {
             }
             // An alias of a colliding type (`use a::Function as F;`) names its definition.
             if i == 0 {
-                if let Some((d, orig)) = self.scopes[u].aliases.get(name) {
-                    segs[0].node = self.mangle(*d, orig);
+                if let Some(p) = self.scopes[u].aliases.get(name) {
+                    segs[0].node = self.mangle(p.0, &p.1);
                     continue;
                 }
             }
@@ -513,7 +513,7 @@ fn unit_of_segment(keys: &[(String, bool)], u: usize, seg: &str) -> Option<usize
     // The key may be given either way (`clotho` or `tpt_moira_clotho`).
     keys.iter().position(|(k, is_root)| {
         let k = k.strip_prefix("tpt_moira_").unwrap_or(k);
-        !is_root
+        !*is_root
             && !k.is_empty()
             && k.chars()
                 .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })

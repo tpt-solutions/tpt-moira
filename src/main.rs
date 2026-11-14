@@ -90,6 +90,8 @@ fn real_main() -> ExitCode {
     // One span-offset counter for the root file and every extern crate (see
     // `compile_file_in`): spans stay unique across the whole run.
     let mut span_base = 0usize;
+    // Every file loaded, with its span base, to locate a checker diagnostic in its file.
+    let mut source_files: Vec<tpt_moira_clotho::SourceFile> = Vec::new();
     let (source, program) = if let Some(path) = positional.first() {
         let src = match std::fs::read_to_string(path) {
             Ok(s) => s,
@@ -98,14 +100,17 @@ fn real_main() -> ExitCode {
                 return ExitCode::FAILURE;
             }
         };
-        let prog =
-            match tpt_moira_clotho::compile_file_in(std::path::Path::new(path), &mut span_base) {
-                Ok(p) => p,
-                Err(diag) => {
-                    eprintln!("moira: parse error: {}", diag);
-                    return ExitCode::FAILURE;
-                }
-            };
+        let prog = match tpt_moira_clotho::compile_file_mapped(
+            std::path::Path::new(path),
+            &mut span_base,
+            &mut source_files,
+        ) {
+            Ok(p) => p,
+            Err(diag) => {
+                eprintln!("moira: parse error: {}", diag);
+                return ExitCode::FAILURE;
+            }
+        };
         (src, prog)
     } else {
         let mut buf = String::new();
@@ -140,8 +145,11 @@ fn real_main() -> ExitCode {
     for pair in &extern_pairs {
         let name = &pair.0;
         let path = &pair.1;
-        let compiled =
-            tpt_moira_clotho::compile_file_in(std::path::Path::new(path), &mut span_base);
+        let compiled = tpt_moira_clotho::compile_file_mapped(
+            std::path::Path::new(path),
+            &mut span_base,
+            &mut source_files,
+        );
         match compiled {
             Ok(p) => {
                 extern_programs.push((name.clone(), p));
@@ -237,6 +245,11 @@ fn real_main() -> ExitCode {
         if let Err(diags) = pipeline().checked(&source, || check_call(&program)) {
             for d in &diags {
                 eprintln!("moira: {}", d);
+                if let Some(sp) = d.span {
+                    if let Some(loc) = tpt_moira_clotho::locate_span(&source_files, sp.start) {
+                        eprintln!("moira:   at {loc}");
+                    }
+                }
             }
             eprintln!("moira: aborting: {} type/borrow error(s)", diags.len());
             return ExitCode::FAILURE;

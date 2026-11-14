@@ -127,14 +127,21 @@ impl AliasTable {
 
     /// If `path<args>` names an alias, return its body with the parameters
     /// replaced by `args`, expanded again (aliases may refer to aliases).
+    // `substitute(&body, ..)` borrows a binding that is already a reference: the Moira
+    // checker types the tuple-destructured `body` as a value, so the borrow is what it accepts.
+    #[allow(clippy::needless_borrow)]
     fn expand_use(&self, path: &Path, args: &[Type], depth: usize) -> Option<Type> {
         if path.segments.len() != 1 {
             return None;
         }
         let (params, body) = self.defs.get(&path.segments[0].node)?;
-        let subst: HashMap<&str, &Type> =
-            params.iter().map(|p| p.as_str()).zip(args.iter()).collect();
-        let substituted = substitute(body, &subst);
+        let mut subst: HashMap<&str, &Type> = HashMap::new();
+        let mut k = 0;
+        while k < params.len() && k < args.len() {
+            subst.insert(params[k].as_str(), &args[k]);
+            k += 1;
+        }
+        let substituted = substitute(&body, &subst);
         Some(self.expand_depth(&substituted, depth + 1))
     }
 }
