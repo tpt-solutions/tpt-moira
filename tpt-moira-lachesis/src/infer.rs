@@ -1673,8 +1673,13 @@ impl TypeChecker {
                     .insert((sp.span.start, sp.span.end), pt.clone());
             }
             param_tys.push(pt.clone());
-            let name = pat_name(&p.pat);
-            self.env.last_mut().unwrap().insert(name, pt);
+            // A destructuring parameter (`|(a, b)|`) binds its names from the type's parts.
+            if matches!(p.pat, Pat::Ident(_)) {
+                let name = pat_name(&p.pat);
+                self.env.last_mut().unwrap().insert(name, pt);
+            } else {
+                self.bind_pattern(&p.pat, &pt);
+            }
         }
         let body_ty = self.infer_expr(body);
         let ret_ty: Ty = match ret {
@@ -2880,7 +2885,16 @@ impl TypeChecker {
         let bt = self.strip_refs(&bt);
         match &bt {
             Ty::Struct(s) | Ty::Apply(s, _) => match self.structs.get(s) {
-                Some(info) => match info.fields.iter().find(|(n, _)| n == &field.node) {
+                Some(info) => match info.fields.iter().find(|(n, _)| n == &field.node).or_else(|| {
+                    // A tuple struct's fields are unnamed: `.0`, `.1`, .. select by position.
+                    let positional = info.fields.iter().all(|(n, _)| n.is_empty());
+                    field
+                        .node
+                        .parse::<usize>()
+                        .ok()
+                        .and_then(|i| info.fields.get(i))
+                        .filter(|_| positional)
+                }) {
                     Some((_, ft)) => {
                         // A generic struct's field is typed with the instance's arguments.
                         let args: &[Ty] = match &bt {
@@ -4041,6 +4055,22 @@ impl TypeChecker {
         );
         self.assoc_fns
             .insert(("Box".into(), "new".into()), sig(vec![Unknown], std("Box")));
+        // Shared pointers and slice views the self-host sources use: their result types are
+        // not modeled beyond the value they wrap.
+        self.assoc_fns
+            .insert(("Arc".into(), "new".into()), sig(vec![Unknown], Unknown));
+        self.assoc_fns
+            .insert(("slice".into(), "from_ref".into()), sig(vec![Unknown], Unknown));
+        self.assoc_fns
+            .insert(("f64".into(), "from_bits".into()), sig(vec![U64], F64));
+        self.assoc_fns.insert(
+            ("Vec".into(), "with_capacity".into()),
+            sig(vec![Usize], Apply("Vec".into(), vec![Unknown])),
+        );
+        self.assoc_fns.insert(
+            ("String".into(), "with_capacity".into()),
+            sig(vec![Usize], std("String")),
+        );
         self.assoc_fns.insert(
             ("RefCell".into(), "new".into()),
             sig(vec![Unknown], std("RefCell")),
@@ -4459,13 +4489,14 @@ impl TypeChecker {
             .insert(("Vec".into(), "map".into()), sig(vec![Unknown], std("Vec")));
         self.methods
             .insert(("Vec".into(), "collect".into()), sig(vec![], std("Vec")));
+        // The pattern is a `&str`, a `char`, or a predicate: any of them.
         self.methods.insert(
             ("String".into(), "contains".into()),
-            sig(vec![Ref(Box::new(Str))], Bool),
+            sig(vec![Unknown], Bool),
         );
         self.methods.insert(
             ("str".into(), "contains".into()),
-            sig(vec![Ref(Box::new(Str))], Bool),
+            sig(vec![Unknown], Bool),
         );
         // String / byte-slice surface.
         self.methods
@@ -5069,10 +5100,11 @@ impl TypeChecker {
                     .last()
                     .map(|s| s.node.clone())
                     .unwrap_or_default();
-                // `impl Into<String>` / `impl AsRef<str>` (the trait's arguments are not kept):
-                // the conversion target is a string in this crate.
+                // `impl Into<String>` / `impl AsRef<str>` (the trait's arguments are not kept): any
+                // argument that converts (a `String`, a `&str`, a `&String`) is accepted, so the
+                // type is not checked beyond that.
                 if (name == "Into" || name == "AsRef") && args.is_empty() {
-                    return Ty::Str;
+                    return Ty::Unknown;
                 }
                 // A function-pointer type `fn(A, B) -> R` is a path `fn` whose arguments are
                 // the parameter types followed by the return type: a function type.
@@ -5180,6 +5212,12 @@ impl TypeChecker {
         if let Ty::Apply(n, args) = b {
             if n == "Box" && args.len() == 1 && !matches!(a, Ty::Apply(m, _) if m == "Box") {
                 return self.compatible(a, &args[0]);
+            }
+        }
+        // Deref coercion: `&&T` (or `&mut &T`) is accepted where `&T` is expected.
+        if let (Ty::Ref(ai) | Ty::RefMut(ai), Ty::Ref(_) | Ty::RefMut(_)) = (a, b) {
+            if matches!(**ai, Ty::Ref(_) | Ty::RefMut(_)) {
+                return self.compatible(ai, b);
             }
         }
         // `String` and `str` are one type to the checker (the owned/borrowed split is
