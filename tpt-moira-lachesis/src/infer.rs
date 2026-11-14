@@ -4862,6 +4862,63 @@ impl TypeChecker {
                 .or_insert_with(|| sig(params.clone(), ret.clone()));
         }
 
+        // Further std methods the lachesis sources use. A result whose type needs an iterator or
+        // a generic is `Unknown`, which the checker absorbs.
+        for (name, ity) in [
+            ("u8", U8),
+            ("u16", U16),
+            ("u32", U32),
+            ("u64", U64),
+            ("usize", Usize),
+            ("i8", I8),
+            ("i16", I16),
+            ("i32", I32),
+            ("i64", I64),
+            ("isize", Isize),
+        ] {
+            for m in ["wrapping_add", "wrapping_sub", "wrapping_mul", "saturating_add", "saturating_mul"] {
+                self.methods
+                    .entry((name.to_string(), m.to_string()))
+                    .or_insert_with(|| sig(vec![ity.clone()], ity.clone()));
+            }
+        }
+        for (recv, m, params, ret) in [
+            ("str", "exists", vec![], Bool),
+            ("str", "into_owned", vec![], Str),
+            ("String", "rsplit", vec![Unknown], Apply("Iter".into(), vec![Str])),
+            ("str", "rsplit", vec![Unknown], Apply("Iter".into(), vec![Str])),
+            ("HashSet", "union", vec![Unknown], Apply("Iter".into(), vec![Unknown])),
+            ("HashSet", "intersection", vec![Unknown], Apply("Iter".into(), vec![Unknown])),
+            ("HashMap", "retain", vec![Unknown], Unit),
+            ("HashMap", "clear", vec![], Unit),
+            ("Vec", "extend_from_slice", vec![Unknown], Unit),
+            ("Vec", "as_slice", vec![], Unknown),
+            ("Iter", "take_while", vec![Unknown], Apply("Iter".into(), vec![Unknown])),
+            ("Iter", "find_map", vec![Unknown], Unknown),
+            ("Iter", "by_ref", vec![], Unknown),
+        ] {
+            self.methods
+                .entry((recv.to_string(), m.to_string()))
+                .or_insert_with(|| sig(params.clone(), ret.clone()));
+        }
+        // Free and associated functions of the std modules the sources use.
+        for (seg, m, params, ret) in [
+            ("String", "from_utf8", vec![Unknown], Unknown),
+            ("fs", "read", vec![Unknown], Unknown),
+            ("fs", "create", vec![Unknown], Unknown),
+            ("fs", "create_dir_all", vec![Unknown], Unknown),
+            ("cmp", "max", vec![Unknown, Unknown], Unknown),
+            ("Default", "default", vec![], Unknown),
+            ("u64", "from_str_radix", vec![Unknown, U32], Unknown),
+            ("u32", "from_str_radix", vec![Unknown, U32], Unknown),
+            ("usize", "from_str_radix", vec![Unknown, U32], Unknown),
+            ("i64", "from_str_radix", vec![Unknown, U32], Unknown),
+        ] {
+            self.assoc_fns
+                .entry((seg.to_string(), m.to_string()))
+                .or_insert_with(|| sig(params.clone(), ret.clone()));
+        }
+
         // ASCII-byte methods on `u8` (a byte is the same C value as an ASCII `char`).
         for (m, ret) in [
             ("is_ascii_digit", Bool),

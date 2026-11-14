@@ -131,10 +131,21 @@ impl AliasTable {
     // checker types the tuple-destructured `body` as a value, so the borrow is what it accepts.
     #[allow(clippy::needless_borrow)]
     fn expand_use(&self, path: &Path, args: &[Type], depth: usize) -> Option<Type> {
-        if path.segments.len() != 1 {
+        // A bare name, or one qualified by this crate (`crate::`, `self::`, `super::`) or by a
+        // workspace crate (`tpt_moira_*::`), names the alias. Other qualified names (`fmt::Result`)
+        // are not the alias.
+        let last = &path.segments.last()?.node;
+        let qualified_here = match path.segments.len() {
+            1 => true,
+            _ => {
+                let first = &path.segments[0].node;
+                matches!(first.as_str(), "crate" | "self" | "super") || first.starts_with("tpt_moira")
+            }
+        };
+        if !qualified_here {
             return None;
         }
-        let (params, body) = self.defs.get(&path.segments[0].node)?;
+        let (params, body) = self.defs.get(last)?;
         let mut subst: HashMap<&str, &Type> = HashMap::new();
         let mut k = 0;
         while k < params.len() && k < args.len() {
