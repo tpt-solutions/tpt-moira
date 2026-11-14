@@ -4331,6 +4331,19 @@ impl Lower {
         Ok(mir::Operand::Unit)
     }
 
+    /// Whether `arg` names a function whose first parameter is a pointer, so an adapter
+    /// passes it the item's address.
+    fn fn_item_takes_pointer(&self, arg: &Expr) -> bool {
+        match &arg.kind {
+            ExprKind::Path(p) if p.segments.len() == 1 => self
+                .fn_param_tys
+                .get(&p.segments[0].node)
+                .and_then(|ps| ps.first())
+                .is_some_and(|t| t.ends_with('*')),
+            _ => false,
+        }
+    }
+
     /// The argument list of an adapter closure call: its captured variables, then the
     /// item. After `enumerate` the item is the pair `(position, item)`, which a closure
     /// with an `(index, item)` pattern takes as two arguments. Without `enumerate` a
@@ -4371,7 +4384,21 @@ impl Lower {
                     args.push(mir::Operand::var(t));
                 }
             }
-            (false, None) => args.push(mir::Operand::var(item)),
+            (false, None) => {
+                // A function item taking a reference (`map(double)` with `fn double(x: &i64)`)
+                // gets the item's address.
+                if self.fn_item_takes_pointer(arg) {
+                    let item_ty = self.temp_type_of(item);
+                    let p = self.fresh_temp(format!("{}*", item_ty));
+                    self.emit(
+                        p.clone(),
+                        mir::Rvalue::Ref(mir::Operand::var(item.to_string()), false),
+                    );
+                    args.push(mir::Operand::var(p));
+                } else {
+                    args.push(mir::Operand::var(item));
+                }
+            }
             (false, Some(_)) => {
                 return Err(LowerError(
                     "an `enumerate` item needs a closure with an `(index, item)` pattern".into(),

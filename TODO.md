@@ -820,9 +820,14 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
             `.zip(..)` is outside the codegen subset. Regression test:
             `iterator_zip_pairs_items_and_stops_at_shorter_run`. Own C: clotho 399, atropos 1297,
             lachesis 1288, driver 211; checker counts unchanged (atropos 137).
-            Still open for clotho: `map` with a function item argument (`map(map)`-style, which
-            `closure_callee` does not accept); `collect` into a map from a zip chain; a zip
-            followed by `max`/`min`/`last`.
+            **Function-item adapters (2026-11-14).** Done: `map(f)` / `filter(f)` with a named
+            function `f`; a function whose first parameter is a pointer gets the item's address
+            (`fn_item_takes_pointer`). `collect` into a map from a zip chain works (test
+            `iterator_zip_collects_into_map_runs`). Own C: clotho 398, atropos 1294, lachesis 1280,
+            driver 211; checker counts unchanged (atropos 137).
+            Still open for clotho: `map` with an associated function item (`map(T::f)` through
+            `closure_callee`'s second branch is untested here), and a zip followed by
+            `max`/`min`/`last` (bare call today).
  each crate uses the std
             surface and the typed-temporary lowering broadly, and each new feature also adds
             its own source to the probe. The route that worked for the four checker-side

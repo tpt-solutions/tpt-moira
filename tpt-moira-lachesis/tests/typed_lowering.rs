@@ -1053,3 +1053,39 @@ fn main() {
         assert_eq!(lines, vec!["14", "2"]);
     }
 }
+
+/// A function item passed to `map` is applied to each item, as a closure would be.
+#[test]
+fn iterator_map_with_function_item_runs() {
+    let src = r#"
+fn double(x: &i64) -> i64 {
+    *x * 2
+}
+fn main() {
+    let v: Vec<i64> = vec![1, 2, 3];
+    print_i64(v.iter().map(double).sum());
+}
+"#;
+    if let Some(out) = check_and_run("iter_map_fn_item", src) {
+        assert_eq!(out.trim(), "12");
+    }
+}
+
+/// `zip` after a `map`, collected into a map: the pairs become its entries.
+#[test]
+fn iterator_zip_collects_into_map_runs() {
+    let src = r#"
+use std::collections::HashMap;
+fn main() {
+    let keys: Vec<i64> = vec![1, 2];
+    let vals: Vec<i64> = vec![10, 20];
+    let m: HashMap<i64, i64> = keys.iter().map(|p| *p * 100).zip(vals.iter()).map(|(k, v)| (k, *v)).collect();
+    print_i64(m.len() as i64);
+    print_i64(m.get(200).unwrap_or(-1));
+}
+"#;
+    if let Some(out) = check_and_run("iter_zip_map", src) {
+        let lines: Vec<&str> = out.lines().filter(|l| !l.is_empty()).collect();
+        assert_eq!(lines, vec!["2", "20"]);
+    }
+}
