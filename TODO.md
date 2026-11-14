@@ -776,6 +776,14 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
             `entry(k).and_modify(f)` (e044c1c). Own errors now: clotho 503, atropos 1386,
             lachesis 1376, driver 223.
             Still open: `values_mut`, and `Option::take` on a receiver that is not a place.
+            **Clotho's checker: 4 errors left (2026-11-14, commit 2683e14).** Found by mapping the
+            diagnostic offsets to source (the flattened spans: root file at 0, then each `mod`
+            file in depth-first order, each reserving its length + 1): `alias.rs` `substitute`
+            (`expected &Type, found Type`: `(*arg).clone()` on a `&&Type` lookup); `parser.rs`
+            `tokens.last().map(|t| t.span.end)` (`expected &Item, found Item`, the offset may sit
+            in a nearby item); `std_imports.rs` (`expected bool, found &bool`, likely the closure
+            over `on`); `resolve.rs` `expr` or-pattern (`cannot dereference a non-reference`).
+            Each is a reference/value rule in the checker, not a missing method.
             Remaining families: string methods (`split`, `split_at`, `starts_with`,
             `strip_suffix`, `trim_end_matches`); slice and iterator methods (`zip`, `split_last`,
             `to_vec`, `values`, `with_capacity`); `saturating_*`; and receivers that have no
