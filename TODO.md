@@ -722,6 +722,17 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
             `Lower::lower_tuple_destructure`); lachesis 1399 / 2050; driver 225 / 3235.
             The largest own group is now `request for member 'tag'` on values the lowering types
             as `long long` (scrutinees of matches on extern-crate values, most likely).
+            **Later the same round.** `Vec::retain` is typed and lowered (in-place compaction;
+            `request for member 'tag'` falls from 267 to 25). `wrapping_*` integer methods lower
+            to the C operators. Current (own / extern): clotho 518 / 0; atropos 1402 / 492;
+            lachesis 1398 / 2045; driver 225 / 3229.
+            The remaining own errors are mostly downstream of implicit declarations (99 distinct
+            names in atropos). Still unmodeled, by family: Option combinators (`unwrap`,
+            `unwrap_or`, `unwrap_or_else`, `unwrap_or_default`, `then_some`, `take`); string
+            methods (`split`, `split_at`, `starts_with`, `strip_suffix`, `trim_end_matches`,
+            `trim_end`, `to_string` on an unknown receiver); slice/iterator methods (`zip`,
+            `split_last`, `to_vec`, `values`, `with_capacity`); `saturating_*` (typed, not
+            lowered). The driver's `spawn`/`scope` need thread support in the subset.
             These numbers are not comparable with the earlier per-crate ones: the bundled unit
             now type-checks the extern types, so errors that were hidden behind `unknown type
             name 'Expr'` appear. The largest own group is `request for member ... not a
