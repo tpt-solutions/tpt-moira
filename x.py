@@ -102,6 +102,9 @@ class ProbeResult:
     parse_ok: bool = False
     check_ok: bool = False
     codegen_ok: bool = False
+    # gcc errors on the emitted C, split into this crate's and its extern crates' code.
+    c_errors_own: int = 0
+    c_errors_extern: int = 0
     notes: list[str] = field(default_factory=list)
 
     @property
@@ -147,6 +150,84 @@ def build_host(release: bool) -> Optional[Path]:
     return find_moira_binary(release)
 
 
+def crate_dependencies(crate: dict) -> list[dict]:
+    """The workspace crates `crate` depends on, read from its Cargo.toml path dependencies.
+
+    A crate's C unit is bundled with these (and only these) crates: a crate is not
+    compiled together with the whole workspace.
+    """
+    lib_dir = (ROOT / crate["lib"]).parent.parent
+    cargo = lib_dir / "Cargo.toml"
+    if not cargo.exists():
+        return []
+    deps: list[dict] = []
+    in_deps = False
+    for line in cargo.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if stripped.startswith("["):
+            in_deps = stripped == "[dependencies]"
+            continue
+        if not in_deps:
+            continue
+        m = re.match(r'^[\w-]+\s*=\s*\{[^}]*path\s*=\s*"([^"]+)"', stripped)
+        if not m:
+            continue
+        dep_dir = (lib_dir / m.group(1)).resolve()
+        for other in CRATES:
+            other_dir = (ROOT / other["lib"]).parent.parent.resolve()
+            if other_dir == dep_dir and other not in deps:
+                deps.append(other)
+    return deps
+
+
+# A C function definition header: a line at column 0 that ends in `) {`.
+_C_FN_HEADER = re.compile(r"^[A-Za-z_][^;=]*\)\s*\{\s*$")
+
+
+def attribute_c_errors(
+    c_file: Path, errors: list[str], extern_names: list[str]
+) -> tuple[int, int]:
+    """Split gcc's errors on `c_file` into (this crate, extern crates).
+
+    The bundle names an extern crate's functions `<crate>__<name>`, and the root's own
+    names are unprefixed. Each error is attributed to the function whose body contains
+    its line. An error outside every function (a type or a prototype) belongs to an extern
+    crate when its line names one of that crate's items, and otherwise to this crate.
+    """
+    lines = c_file.read_text(encoding="utf-8", errors="replace").splitlines()
+    prefixes = tuple(f"{n}__" for n in extern_names)
+    own = extern = 0
+    for err in errors:
+        # gcc prints `<file>:<line>:<col>: error: ...`; the file may be a Windows path with
+        # a drive letter (`D:\...`), so the line number is taken from the match, not a split.
+        m = re.search(r":(\d+):\d+: error:", err)
+        if not m:
+            own += 1
+            continue
+        line_no = int(m.group(1))
+        func = None
+        for i in range(line_no - 1, -1, -1):
+            if _C_FN_HEADER.match(lines[i]):
+                func = lines[i]
+                break
+        if func is None:
+            # A top-level line (a type or a prototype): it belongs to an extern crate when it
+            # names one of that crate's items.
+            text = lines[line_no - 1] if 0 < line_no <= len(lines) else ""
+            if any(p in text for p in prefixes):
+                extern += 1
+            else:
+                own += 1
+            continue
+        head = func.split("(", 1)[0].split()
+        name = head[-1].lstrip("*") if head else ""
+        if name.startswith(prefixes):
+            extern += 1
+        else:
+            own += 1
+    return own, extern
+
+
 def probe_crate(moira: Path, crate: dict) -> ProbeResult:
     """Run Moira's pipeline on a crate's entry point and record how far it gets."""
     lib = ROOT / crate["lib"]
@@ -158,10 +239,9 @@ def probe_crate(moira: Path, crate: dict) -> ProbeResult:
     # Cross-crate signature resolution: every *other* workspace crate is
     # passed as `--extern name=lib.rs` so paths like
     # `tpt_moira_atropos::lower_program(...)` resolve during checking.
+    deps = crate_dependencies(crate)
     extern_args: list[str] = []
-    for other in CRATES:
-        if other["name"] == crate["name"]:
-            continue
+    for other in deps:
         other_lib = ROOT / other["lib"]
         if other_lib.exists():
             extern_args += ["--extern", f"{other['name']}={other_lib}"]
@@ -198,8 +278,21 @@ def probe_crate(moira: Path, crate: dict) -> ProbeResult:
     safe = "".join(c if c.isalnum() or c in "-._" else "_" for c in crate["name"])
     # The emit step gets the same cross-crate signatures as the check step: the
     # typed lowering takes its expression types from the checker.
+    # With extern crates the C unit is the whole bundle (`--bundle`): the crate's C refers
+    # to its dependencies' types, which only a bundled unit defines. The errors are then
+    # attributed to the crate below (see `attribute_c_errors`).
+    bundle_args = ["--bundle"] if extern_args else []
     res_c = run(
-        [str(moira), "--emit", "c", *extern_args, "-o", str(BUILD_DIR / f"{safe}.c"), str(lib)]
+        [
+            str(moira),
+            "--emit",
+            "c",
+            *bundle_args,
+            *extern_args,
+            "-o",
+            str(BUILD_DIR / f"{safe}.c"),
+            str(lib),
+        ]
     )
     result.codegen_ok = res_c.returncode == 0
     if res_c.returncode != 0:
@@ -214,13 +307,24 @@ def probe_crate(moira: Path, crate: dict) -> ProbeResult:
     if result.codegen_ok and cc and c_file.exists():
         res_cc = run([cc, "-w", "-fsyntax-only", str(c_file)])
         if res_cc.returncode != 0:
-            result.codegen_ok = False
             err = (res_cc.stderr or res_cc.stdout).strip().splitlines()
             errors = [l for l in err if "error:" in l]
             snippet = errors[0] if errors else "(no diagnostic)"
-            result.notes.append(
-                f"emitted C does not compile ({len(errors)} error(s)): {snippet}"
-            )
+            own, extern = attribute_c_errors(c_file, errors, [o["name"] for o in deps])
+            result.c_errors_own = own
+            result.c_errors_extern = extern
+            # The crate's own C must compile; errors in an extern crate's code are that
+            # crate's to fix, and are reported separately.
+            result.codegen_ok = own == 0
+            if own:
+                result.notes.append(
+                    f"emitted C does not compile ({own} error(s) in this crate, "
+                    f"{extern} in extern crates): {snippet}"
+                )
+            elif extern:
+                result.notes.append(
+                    f"own C compiles; {extern} error(s) come from extern crates"
+                )
 
     return result
 
