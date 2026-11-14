@@ -697,25 +697,28 @@ fn is_literal(k: &TokenKind) -> bool {
     )
 }
 
-fn frag_stoppers(frag: Frag) -> &'static [TokenKind] {
+/// The tokens that end a `$x:frag` fragment when it is matched without a delimiter.
+/// Owned (not a `&'static` slice of a literal array): a reference to a temporary array
+/// would dangle once returned.
+fn frag_stoppers(frag: Frag) -> Vec<TokenKind> {
     match frag {
-        Frag::Expr => &[TokenKind::Comma, TokenKind::Semicolon, TokenKind::FatArrow],
-        Frag::Ty => &[
+        Frag::Expr => vec![TokenKind::Comma, TokenKind::Semicolon, TokenKind::FatArrow],
+        Frag::Ty => vec![
             TokenKind::Comma,
             TokenKind::Semicolon,
             TokenKind::FatArrow,
             TokenKind::Arrow,
         ],
-        Frag::Pat => &[
+        Frag::Pat => vec![
             TokenKind::Comma,
             TokenKind::Semicolon,
             TokenKind::FatArrow,
             TokenKind::Eq,
             TokenKind::Arrow,
         ],
-        Frag::Stmt => &[TokenKind::Semicolon, TokenKind::FatArrow],
-        Frag::Item => &[],
-        Frag::Path => &[
+        Frag::Stmt => vec![TokenKind::Semicolon, TokenKind::FatArrow],
+        Frag::Item => vec![],
+        Frag::Path => vec![
             TokenKind::Comma,
             TokenKind::Semicolon,
             TokenKind::FatArrow,
@@ -729,7 +732,7 @@ fn frag_stoppers(frag: Frag) -> &'static [TokenKind] {
             TokenKind::RBrace,
             TokenKind::RBracket,
         ],
-        _ => &[],
+        _ => vec![],
     }
 }
 

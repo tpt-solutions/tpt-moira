@@ -564,14 +564,37 @@ impl<'src> Lexer<'src> {
             0xF0..=0xF7 => 4,
             _ => return first as char,
         };
-        let mut buf = [first, 0, 0, 0];
-        for slot in buf.iter_mut().take(len).skip(1) {
-            *slot = self.bump().unwrap_or(0);
-        }
-        std::str::from_utf8(&buf[..len])
-            .ok()
-            .and_then(|s| s.chars().next())
-            .unwrap_or('\u{FFFD}')
+        // The lexer reads bytes of a `&str`, so the sequence is valid UTF-8 and the code
+        // point decodes directly from its bytes. The bytes are read in order, and only
+        // as many as the sequence has (written without iterator adapters or slices, so
+        // the Stage-1 subset can lower it).
+        let buf = match len {
+            2 => [first, self.bump().unwrap_or(0), 0, 0],
+            3 => {
+                let b1 = self.bump().unwrap_or(0);
+                [first, b1, self.bump().unwrap_or(0), 0]
+            }
+            _ => {
+                let b1 = self.bump().unwrap_or(0);
+                let b2 = self.bump().unwrap_or(0);
+                [first, b1, b2, self.bump().unwrap_or(0)]
+            }
+        };
+        let code: u32 = match len {
+            2 => ((buf[0] as u32 & 0x1F) << 6) | (buf[1] as u32 & 0x3F),
+            3 => {
+                ((buf[0] as u32 & 0x0F) << 12)
+                    | ((buf[1] as u32 & 0x3F) << 6)
+                    | (buf[2] as u32 & 0x3F)
+            }
+            _ => {
+                ((buf[0] as u32 & 0x07) << 18)
+                    | ((buf[1] as u32 & 0x3F) << 12)
+                    | ((buf[2] as u32 & 0x3F) << 6)
+                    | (buf[3] as u32 & 0x3F)
+            }
+        };
+        char::from_u32(code).unwrap_or('\u{FFFD}')
     }
 
     fn read_hex_escape(&mut self, count: usize) -> u32 {

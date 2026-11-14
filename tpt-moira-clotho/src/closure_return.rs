@@ -19,7 +19,8 @@
 //! The existing capturing-closure lowering then handles `f` like any other let-bound
 //! closure. A call used as a pure-argument operand of a statement (`apply(make(4), 1)`)
 //! is first hoisted into its own `let` before that statement, and a call inside the
-//! arguments of `println!`-like macros is hoisted out of the token stream. Captured
+//! arguments of `println!`-like or `assert!`/`vec!` macros is hoisted out of the token
+//! stream. Captured
 //! candidates left with no references are removed, since they cannot be emitted as C.
 //!
 //! The pass is purely syntactic and deliberately conservative: a candidate must be a
@@ -217,11 +218,13 @@ fn rewrite_block_lets(b: &mut Block, cands: &HashMap<String, Candidate>, fresh: 
         match &mut stmt.kind {
             StmtKind::Local(local) => {
                 if let Some(e) = &mut local.init {
-                    hoist_call_args(e, cands, &mut out, fresh);
+                    let allow = impure_hoist_ok(e, cands);
+                    hoist_call_args(e, cands, &mut out, fresh, allow);
                 }
             }
             StmtKind::Expr(e) | StmtKind::Semi(e) => {
-                hoist_call_args(e, cands, &mut out, fresh);
+                let allow = impure_hoist_ok(e, cands);
+                hoist_call_args(e, cands, &mut out, fresh, allow);
             }
             StmtKind::Item(_) => {}
         }
@@ -239,7 +242,70 @@ fn rewrite_block_lets(b: &mut Block, cands: &HashMap<String, Candidate>, fresh: 
 /// Replace each argument `g(pure..)` of a call in `e` (where `g` is a candidate) by a
 /// fresh name bound by a `let` pushed onto `out` (inlined like a direct `let`). Only
 /// straight-line operands are visited: nothing under a block, branch, loop or closure.
+///
+/// `allow_impure` is set by `impure_hoist_ok` for a statement whose only effectful
+/// operand is one candidate call: then that call's arguments may be impure, because
+/// hoisting it runs them before the statement, which nothing else precedes.
 fn hoist_call_args(
+    e: &mut Expr,
+    cands: &HashMap<String, Candidate>,
+    out: &mut Vec<Stmt>,
+    fresh: &mut usize,
+    allow_impure: bool,
+) {
+    match &mut e.kind {
+        ExprKind::Call(callee, args) => {
+            hoist_nested(callee, cands, out, fresh);
+            for a in args.iter_mut() {
+                if let Some(name) = hoistable_name(a, cands, allow_impure) {
+                    hoist_one(a, &name, cands, out, fresh);
+                } else {
+                    hoist_nested(a, cands, out, fresh);
+                }
+            }
+        }
+        _ => hoist_nested(e, cands, out, fresh),
+    }
+}
+
+/// Bind the candidate call `a` (named `name`) to a fresh `let` pushed onto `out`, and
+/// replace `a` with a reference to that binding.
+fn hoist_one(
+    a: &mut Expr,
+    name: &str,
+    cands: &HashMap<String, Candidate>,
+    out: &mut Vec<Stmt>,
+    fresh: &mut usize,
+) {
+    let bind = format!("__hoist_{}_{}", name, *fresh);
+    *fresh += 1;
+    let local = Local {
+        pat: Pat::Ident(Spanned {
+            node: bind.clone(),
+            span: a.span,
+        }),
+        ty: None,
+        init: Some(a.clone()),
+        mutable: false,
+    };
+    if !emit_let(&local, cands, fresh, out) {
+        out.push(Stmt {
+            kind: StmtKind::Local(local),
+        });
+    }
+    *a = Expr {
+        kind: ExprKind::Path(Path {
+            segments: vec![Spanned {
+                node: bind,
+                span: a.span,
+            }],
+        }),
+        span: a.span,
+    };
+}
+
+/// Hoisting below the top-level expression of a statement: pure-argument rules only.
+fn hoist_nested(
     e: &mut Expr,
     cands: &HashMap<String, Candidate>,
     out: &mut Vec<Stmt>,
@@ -247,58 +313,34 @@ fn hoist_call_args(
 ) {
     match &mut e.kind {
         ExprKind::Call(callee, args) => {
-            hoist_call_args(callee, cands, out, fresh);
+            hoist_nested(callee, cands, out, fresh);
             for a in args.iter_mut() {
-                if let Some(name) = hoistable_name(a, cands) {
-                    let bind = format!("__hoist_{}_{}", name, *fresh);
-                    *fresh += 1;
-                    let local = Local {
-                        pat: Pat::Ident(Spanned {
-                            node: bind.clone(),
-                            span: a.span,
-                        }),
-                        ty: None,
-                        init: Some(a.clone()),
-                        mutable: false,
-                    };
-                    if !emit_let(&local, cands, fresh, out) {
-                        out.push(Stmt {
-                            kind: StmtKind::Local(local),
-                        });
-                    }
-                    *a = Expr {
-                        kind: ExprKind::Path(Path {
-                            segments: vec![Spanned {
-                                node: bind,
-                                span: a.span,
-                            }],
-                        }),
-                        span: a.span,
-                    };
+                if let Some(name) = hoistable_name(a, cands, false) {
+                    hoist_one(a, &name, cands, out, fresh);
                 } else {
-                    hoist_call_args(a, cands, out, fresh);
+                    hoist_nested(a, cands, out, fresh);
                 }
             }
         }
         ExprKind::Binary(a, _, b) => {
-            hoist_call_args(a, cands, out, fresh);
-            hoist_call_args(b, cands, out, fresh);
+            hoist_nested(a, cands, out, fresh);
+            hoist_nested(b, cands, out, fresh);
         }
         ExprKind::Unary(_, a)
         | ExprKind::Ref(a, _)
         | ExprKind::Cast(a, _)
         | ExprKind::Field(a, _) => {
-            hoist_call_args(a, cands, out, fresh);
+            hoist_nested(a, cands, out, fresh);
         }
         ExprKind::MethodCall(r, _, args) => {
-            hoist_call_args(r, cands, out, fresh);
+            hoist_nested(r, cands, out, fresh);
             for a in args {
-                hoist_call_args(a, cands, out, fresh);
+                hoist_nested(a, cands, out, fresh);
             }
         }
         ExprKind::Tuple(v) | ExprKind::Array(v) => {
             for a in v {
-                hoist_call_args(a, cands, out, fresh);
+                hoist_nested(a, cands, out, fresh);
             }
         }
         ExprKind::Macro(m) if is_format_macro(&m.path) => {
@@ -308,8 +350,49 @@ fn hoist_call_args(
     }
 }
 
+/// True when the statement expression `e` is `f(.., g(impure..), ..)`: a call to a plain
+/// name whose only non-pure argument is one candidate call `g(..)` of matching arity.
+/// Hoisting `g(..)` before the statement then runs its impure arguments before anything
+/// else in the statement, so evaluation order is preserved.
+fn impure_hoist_ok(e: &Expr, cands: &HashMap<String, Candidate>) -> bool {
+    let ExprKind::Call(callee, args) = &e.kind else {
+        return false;
+    };
+    let ExprKind::Path(p) = &callee.kind else {
+        return false;
+    };
+    if p.segments.len() != 1 {
+        return false;
+    }
+    let mut impure = 0usize;
+    for a in args {
+        if is_pure(a) {
+            continue;
+        }
+        impure += 1;
+        let ExprKind::Call(c, cargs) = &a.kind else {
+            return false;
+        };
+        let ExprKind::Path(cp) = &c.kind else {
+            return false;
+        };
+        if cp.segments.len() != 1 {
+            return false;
+        }
+        match cands.get(&cp.segments[0].node) {
+            Some(cand) if cand.params.len() == cargs.len() => {}
+            _ => return false,
+        }
+    }
+    impure == 1
+}
+
 /// The candidate name of `e` when it is a call `g(pure..)` with matching arity.
-fn hoistable_name(e: &Expr, cands: &HashMap<String, Candidate>) -> Option<String> {
+fn hoistable_name(
+    e: &Expr,
+    cands: &HashMap<String, Candidate>,
+    allow_impure: bool,
+) -> Option<String> {
     let ExprKind::Call(c, cargs) = &e.kind else {
         return None;
     };
@@ -321,19 +404,34 @@ fn hoistable_name(e: &Expr, cands: &HashMap<String, Candidate>) -> Option<String
     }
     let name = &p.segments[0].node;
     let cand = cands.get(name)?;
-    if cand.params.len() == cargs.len() && cargs.iter().all(is_pure) {
+    if cand.params.len() == cargs.len() && (allow_impure || cargs.iter().all(is_pure)) {
         Some(name.clone())
     } else {
         None
     }
 }
 
+/// Built-in macros whose arguments are evaluated eagerly, in order, once per expansion,
+/// so a pure candidate call among them can be bound by a `let` before the statement.
+/// Other macros (user `macro_rules!`, `matches!`) may evaluate lazily or repeatedly and
+/// are left alone.
 fn is_format_macro(path: &Path) -> bool {
     match path.segments.last() {
-        Some(s) => {
-            let n = s.node.as_str();
-            n == "println" || n == "print" || n == "eprintln" || n == "eprint" || n == "format"
-        }
+        Some(s) => matches!(
+            s.node.as_str(),
+            "println"
+                | "print"
+                | "eprintln"
+                | "eprint"
+                | "format"
+                | "assert"
+                | "debug_assert"
+                | "assert_eq"
+                | "assert_ne"
+                | "debug_assert_eq"
+                | "debug_assert_ne"
+                | "vec"
+        ),
         None => false,
     }
 }
@@ -358,7 +456,7 @@ fn hoist_macro_tokens(
                 if let Some(j) = matching_paren(tokens, i + 1) {
                     let parsed = Parser::parse_macro_args(tokens[i..=j].to_vec());
                     if parsed.len() == 1 {
-                        if let Some(call_name) = hoistable_name(&parsed[0], cands) {
+                        if let Some(call_name) = hoistable_name(&parsed[0], cands, false) {
                             let bind = format!("__hoist_{}_{}", call_name, *fresh);
                             *fresh += 1;
                             let local = Local {

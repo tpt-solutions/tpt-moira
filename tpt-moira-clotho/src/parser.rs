@@ -1613,7 +1613,11 @@ impl Parser {
         let c = comma?;
         let scrutinee = Parser::segment(tokens[..c].to_vec()).parse_expr().ok()?;
         let mut pat_tokens = tokens[c + 1..].to_vec();
-        if matches!(pat_tokens.last().map(|t| &t.kind), Some(TokenKind::Comma)) {
+        let ends_with_comma = match pat_tokens.last() {
+            Some(t) => matches!(t.kind, TokenKind::Comma),
+            None => false,
+        };
+        if ends_with_comma {
             pat_tokens.pop();
         }
         let mut pp = Parser::segment(pat_tokens);

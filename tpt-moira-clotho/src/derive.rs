@@ -168,17 +168,20 @@ fn derive_struct(trait_name: &str, s: &StructDef) -> Option<String> {
         return Some(src);
     }
     // A generic struct gets a generic impl: `impl Clone for Pair` becomes
-    // `impl<T> Clone for Pair<T>`, so monomorphization instantiates it per use.
-    let params: Vec<&str> = s
+    // `impl<T: Clone> Clone for Pair<T>`, so monomorphization instantiates it per use.
+    // As with rustc's derives, each type parameter is bounded by the derived trait:
+    // the generated bodies compare or copy `T` values, which needs that bound.
+    let names: Vec<&str> = s
         .generics
         .params
         .iter()
         .map(|p| p.name.node.as_str())
         .collect();
-    let list = params.join(", ");
+    let bounded: Vec<String> = names.iter().map(|n| format!("{n}: {trait_name}")).collect();
+    let list = names.join(", ");
     let header_for = format!(" for {name} ");
     let generic = src
-        .replacen("impl ", &format!("impl<{list}> "), 1)
+        .replacen("impl ", &format!("impl<{}> ", bounded.join(", ")), 1)
         .replacen(&header_for, &format!(" for {name}<{list}> "), 1);
     Some(generic)
 }

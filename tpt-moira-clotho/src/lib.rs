@@ -25,6 +25,7 @@ pub mod macros;
 pub mod parser;
 pub mod pipeline;
 pub mod resolve;
+pub mod std_imports;
 pub mod token;
 
 use std::path::{Path, PathBuf};
@@ -33,7 +34,7 @@ use std::path::{Path, PathBuf};
 pub fn parse_source(src: &str) -> Result<ast::Program, error::Diag> {
     let mut p = parser::Parser::from_source(src);
     Ok(closure_return::inline_returned_closures(
-        let_conditions::desugar_let_conditions(p.parse_program()?),
+        let_conditions::desugar_let_conditions(std_imports::resolve_std_paths(p.parse_program()?)),
     ))
 }
 
