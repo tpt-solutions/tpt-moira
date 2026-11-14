@@ -732,3 +732,20 @@ fn main() {
         assert_eq!(lines, vec!["3", "2", "9"]);
     }
 }
+
+/// The `wrapping_*` integer methods are the C operators.
+#[test]
+fn wrapping_integer_methods_run() {
+    let src = r#"
+fn main() {
+    let a: i64 = 7;
+    print_i64(a.wrapping_add(5));
+    print_i64(a.wrapping_mul(3));
+    print_i64(a.wrapping_sub(10));
+}
+"#;
+    if let Some(out) = check_and_run("wrapping_methods", src) {
+        let lines: Vec<&str> = out.lines().filter(|l| !l.is_empty()).collect();
+        assert_eq!(lines, vec!["12", "21", "-3"]);
+    }
+}

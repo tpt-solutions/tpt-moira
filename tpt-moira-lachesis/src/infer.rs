@@ -3949,7 +3949,18 @@ impl TypeChecker {
                 (prim.to_string(), "to_string".into()),
                 sig(vec![], std("String")),
             );
-            for op in ["saturating_add", "saturating_sub", "saturating_mul"] {
+            for op in [
+                "saturating_add",
+                "saturating_sub",
+                "saturating_mul",
+                "wrapping_add",
+                "wrapping_sub",
+                "wrapping_mul",
+                "wrapping_div",
+                "wrapping_rem",
+                "wrapping_shl",
+                "wrapping_shr",
+            ] {
                 self.methods
                     .insert((prim.to_string(), op.into()), sig(vec![Unknown], Unknown));
             }

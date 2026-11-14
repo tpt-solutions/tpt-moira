@@ -59,6 +59,20 @@ fn hint_applies(hint: &str) -> bool {
     // A pointer (a reference to a scalar or to a struct) is a pointer-typed value.
 }
 
+/// The operator of a `wrapping_*` integer method.
+fn wrapping_binop(method: &str) -> Option<mir::BinOp> {
+    Some(match method {
+        "wrapping_add" => mir::BinOp::Add,
+        "wrapping_sub" => mir::BinOp::Sub,
+        "wrapping_mul" => mir::BinOp::Mul,
+        "wrapping_div" => mir::BinOp::Div,
+        "wrapping_rem" => mir::BinOp::Rem,
+        "wrapping_shl" => mir::BinOp::Shl,
+        "wrapping_shr" => mir::BinOp::Shr,
+        _ => return None,
+    })
+}
+
 /// Lower a whole program without type hints.
 pub fn lower_program(prog: &Program) -> Result<mir::MirProgram> {
     lower_program_typed(prog, &TypeHints::new())
@@ -4679,6 +4693,34 @@ impl Lower {
     }
 
     /// Whether a receiver is a string: the checker's hint says so, or its local's C type does.
+    /// Whether a method receiver is a number (an integer or float, by its checker hint or
+    /// its C type), so an arithmetic method on it is the C operator.
+    fn receiver_is_number(&self, recv: &Expr) -> bool {
+        match self.hint_of_expr(recv) {
+            Some(h) => matches!(
+                h.as_str(),
+                "i8" | "i16"
+                    | "i32"
+                    | "i64"
+                    | "i128"
+                    | "isize"
+                    | "u8"
+                    | "u16"
+                    | "u32"
+                    | "u64"
+                    | "u128"
+                    | "usize"
+                    | "long long"
+                    | "int64_t"
+                    | "int"
+                    | "double"
+                    | "f32"
+                    | "f64"
+            ),
+            None => true,
+        }
+    }
+
     fn recv_is_str(&self, recv: &Expr) -> bool {
         match self.hint_of_expr(recv) {
             Some(h) => matches!(h.trim_end_matches('*'), "str" | "String"),
@@ -8569,6 +8611,17 @@ impl Lower {
                 }
                 if let Some(v) = self.lower_vec_mut_method(recv, &method.node, args)? {
                     return Ok(v);
+                }
+                // `x.wrapping_add(y)` and the other wrapping operators on a number: the C
+                // operator (a fixed-width machine integer wraps the same way).
+                if let Some(op) = wrapping_binop(&method.node) {
+                    if args.len() == 1 && self.receiver_is_number(recv) {
+                        let a = self.lower_expr(recv)?;
+                        let b = self.lower_expr(&args[0])?;
+                        let t = self.fresh_temp("long long");
+                        self.emit(t.clone(), mir::Rvalue::Binary(op, a, b));
+                        return Ok(mir::Operand::var(t));
+                    }
                 }
                 if method.node == "retain" && args.len() == 1 {
                     if let Some(v) = self.lower_vec_retain(recv, &args[0])? {
