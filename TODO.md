@@ -740,6 +740,12 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
             checker's default `i32` even where the context says `i64` (`ok_or_else(|| 4)` against
             `Result<i64, i64>` mismatches in C); the checker should take the expected type of a
             closure's result from the context.
+            **Option typing (2026-11-14, latest).** The checker types `Option::{as_ref, as_deref,
+            or_else, filter, and_then}`; `as_ref` lowers to the address of the payload, and
+            `map` takes the payload type of its expression when the closure's C type is only the
+            default (commit 88196de). Own errors: clotho 510, atropos 1365, lachesis 1381,
+            driver 222 (sum 3478, from 3487). Not lowered yet: `filter`, `and_then`, and
+            `or_else` with a closure that returns `None` (its body has no hint).
             Remaining families: string methods (`split`, `split_at`, `starts_with`,
             `strip_suffix`, `trim_end_matches`); slice and iterator methods (`zip`, `split_last`,
             `to_vec`, `values`, `with_capacity`); `saturating_*`; and receivers that have no
