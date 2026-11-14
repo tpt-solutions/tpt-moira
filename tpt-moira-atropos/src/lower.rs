@@ -4207,7 +4207,11 @@ impl Lower {
         );
         self.set_term(mir::Terminator::Goto(join));
         self.current = keep;
-        self.emit(value.clone(), mir::Rvalue::Use(mir::Operand::Const(0)));
+        // The placeholder is only read when the key is absent, so a non-scalar value (a struct,
+        // a Vec, a tuple) needs no assignment; a scalar or pointer placeholder is `0`.
+        if is_scalar_c_type(v) || v == "str" || v.ends_with('*') {
+            self.emit(value.clone(), mir::Rvalue::Use(mir::Operand::Const(0)));
+        }
         self.set_term(mir::Terminator::Goto(join));
         self.current = join;
         let slot = self.fresh_temp(format!("{v}*"));

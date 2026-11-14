@@ -1455,3 +1455,25 @@ fn unannotated_nested_vec_and_mem_take_run() {
     };
     assert_eq!(out, "2", "`Vec::new()` takes its element type from later pushes");
 }
+
+#[test]
+fn entry_or_insert_with_struct_value_keeps_first_insert_and_runs() {
+    let out = match run_src(
+        "use std::collections::HashMap;
+        struct Pt { x: i64, y: i64 }
+        fn main() {
+            let mut m: HashMap<i64, Pt> = HashMap::new();
+            m.entry(1).or_insert_with(|| Pt { x: 4, y: 5 });
+            m.entry(1).or_insert_with(|| Pt { x: 9, y: 9 });
+            let p = m.get(&1).unwrap();
+            print_i32(p.x + p.y);
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping entry run");
+            return;
+        }
+    };
+    assert_eq!(out, "9", "a present key keeps its first value");
+}
