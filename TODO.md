@@ -695,6 +695,18 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
             `double`) costs atropos 64 errors: its `match` over `Rvalue` with or-patterns is the
             same shape the subset does not lower (`rename_rvalue` already has 62). Fixing that
             match shape in the lowering recovers those.
+            **Update (2026-11-14, later):** the Rvalue matches now name `mir::Rvalue::...`
+            (commit "atropos: write Rvalue patterns with their full path"). A pattern whose path
+            goes through a `use ... as` alias (`R::Use(a)` with `use mir::Rvalue as R`) was not
+            resolved: its bindings took the types of same-named variants of other enums. The
+            lowering should resolve aliased paths; until then, write full paths in the source.
+            Atropos is now 1255 errors. Its largest group is `unknown type name 'Expr'` (225),
+            with `Spanned__String`, `Pat`, `AliasTable`, `clotho_Block` and others: the AST types
+            of clotho, which the per-crate probe never defines, because `--extern` is for
+            checking only. `--bundle` defines them, but it emits the extern crates too, so
+            atropos with its externs is 5683 errors: a different measurement. Decision needed:
+            keep the per-crate metric and report the extern-type errors separately, or make the
+            probe bundle and count only the root crate's functions.
             Previously: clotho 592, atropos 1310, lachesis 1779, driver 270 `gcc -fsyntax-only` errors on the emitted C (the driver's
             large-stack thread, below, adds 7 that the backend cannot lower yet). Fixed: diverging match
             arms (`=> return x`) no longer assign a placeholder to the result; a function-typed
