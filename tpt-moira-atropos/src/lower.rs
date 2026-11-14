@@ -7568,7 +7568,7 @@ impl Lower {
         args: &[Expr],
     ) -> Result<Option<mir::Operand>> {
         let is_len = method == "len";
-        if !(is_len || method == "first" || method == "last")
+        if !(is_len || matches!(method, "first" | "last" | "first_mut" | "last_mut"))
             || !args.is_empty()
             || !self.is_sequence(recv)
         {
@@ -7625,7 +7625,7 @@ impl Lower {
             none_blk,
         ));
         self.current = some_blk;
-        let idx = if method == "first" {
+        let idx = if matches!(method, "first" | "first_mut") {
             mir::Operand::Const(0)
         } else {
             let i = self.fresh_temp("long long");

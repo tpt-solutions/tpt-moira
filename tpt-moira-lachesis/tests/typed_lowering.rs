@@ -954,3 +954,24 @@ fn main() {
         assert_eq!(lines, vec!["2", "2"]);
     }
 }
+
+/// `last_mut()` and `first_mut()` give a reference into the vector, so `*r += x` updates it.
+#[test]
+fn vec_first_mut_last_mut_update_the_element_run() {
+    let src = r#"
+fn main() {
+    let mut v: Vec<i64> = Vec::new();
+    v.push(1);
+    v.push(2);
+    v.push(3);
+    *v.last_mut().unwrap() += 10;
+    *v.first_mut().unwrap() += 20;
+    print_i64(v[0]);
+    print_i64(v[2]);
+}
+"#;
+    if let Some(out) = check_and_run("vec_mut_refs", src) {
+        let lines: Vec<&str> = out.lines().filter(|l| !l.is_empty()).collect();
+        assert_eq!(lines, vec!["21", "13"]);
+    }
+}

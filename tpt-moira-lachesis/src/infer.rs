@@ -3116,6 +3116,17 @@ impl TypeChecker {
             if n == "Vec" && targs.len() == 1 && args.is_empty() && (m == "first" || m == "last") {
                 return Ty::Apply("Option".into(), vec![ref_item(targs[0].clone())]);
             }
+            // `first_mut()` / `last_mut()` give a mutable reference to the element.
+            if n == "Vec"
+                && targs.len() == 1
+                && args.is_empty()
+                && (m == "first_mut" || m == "last_mut")
+            {
+                return Ty::Apply(
+                    "Option".into(),
+                    vec![Ty::RefMut(Box::new(targs[0].clone()))],
+                );
+            }
             // `retain(|x| keep)` keeps the elements the closure accepts; the closure gets a
             // reference to each element.
             if n == "Vec" && targs.len() == 1 && args.len() == 1 && m == "retain" {
