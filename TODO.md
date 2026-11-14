@@ -665,10 +665,17 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
             start of the session and 229 after these fixes: `is_some_and` on `Option`,
             `Vec<String>::contains` (content comparison helper), and a `format!` of a
             non-scalar now fails in lowering with a named error instead of printing the
-            value's bits as an integer. Clotho's next blocker is that error: `TokenKind`
-            has a user `impl Display`, and `format!` of a user type with `Display` is not
-            lowered yet (it needs a `Formatter` model and `write!` into it). Tests:
-            `tpt-moira-atropos/tests/codegen.rs` (three new). Workspace `cargo test` is green.
+            value's bits as an integer. Tests: `tpt-moira-atropos/tests/codegen.rs`.
+          - Status (2026-11-15, Display): user `impl Display` now works for `format!` and
+            `write!`/`writeln!`. `Formatter` is a `fmtbuf` (a `char**` buffer pointer),
+            `format!` of a value whose type has a `Display` impl calls its `fmt` into a fresh
+            buffer, and `fmt::Result` is a status code. `println!` of a user `Display` type
+            still uses the old path and is a named lowering error. Also fixed: an unclosed
+            `impl`/`struct` body hung the parser at EOF; it is now a parse error. Clotho now
+            lowers and emits C, with 223 `gcc -fsyntax-only` errors, the same class as before
+            (raw method calls on values whose type the lowering can't see, and Option/Vec
+            helper gaps). Tests: `codegen.rs` (`user_display_impl_formats_through_format_and_write_runs`,
+            `unclosed_impl_is_a_parse_error_not_a_hang`). Workspace `cargo test` is green.
           - Status (2026-08-22): the `x.py self-host` probe now measures parse
             independently of type-check (`moira --emit ast` sets `parse_ok`;
             `moira --check` sets `check_ok`; `moira --emit c` sets `codegen_ok`), so

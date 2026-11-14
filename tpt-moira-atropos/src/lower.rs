@@ -922,16 +922,23 @@ fn add_impl_methods(
                             Some(t) => type_to_c(t, &impl_aliases),
                             None => "void".to_string(),
                         };
-                        methods.insert(
-                            (ty.clone(), f.name.node.clone()),
-                            (format!("{ty}__{}", f.name.node), self_kind(f), ret),
-                        );
+                        let entry = (format!("{ty}__{}", f.name.node), self_kind(f), ret);
+                        // `impl Display` supplies the text `{}` formats (kept apart from other
+                        // traits' `fmt`).
+                        if f.name.node == "fmt" && imp.trait_name.node.ends_with("Display") {
+                            methods.insert((ty.clone(), DISPLAY_FMT_KEY.to_string()), entry.clone());
+                        }
+                        methods.insert((ty.clone(), f.name.node.clone()), entry);
                     }
                 }
             }
         }
     }
 }
+
+/// The `methods` key of a type's `impl Display` `fmt` (a method named `Display::fmt`, so other
+/// traits' `fmt` methods do not shadow it).
+const DISPLAY_FMT_KEY: &str = "Display::fmt";
 
 /// Whether every type in a function's signature is one the subset models: a primitive,
 /// a struct or enum of the program, a generic parameter, or a std container it knows.
@@ -942,7 +949,7 @@ fn signature_is_modeled(
     const KNOWN: &[&str] = &[
         "bool", "char", "str", "String", "i8", "i16", "i32", "i64", "i128", "isize", "u8", "u16",
         "u32", "u64", "u128", "usize", "f32", "f64", "Self", "Option", "Result", "Vec", "HashMap",
-        "HashSet", "BTreeMap", "BTreeSet", "Box",
+        "HashSet", "BTreeMap", "BTreeSet", "Box", "Formatter",
     ];
     fn known(
         t: &ast::Type,
@@ -1153,6 +1160,11 @@ fn type_to_c_expanded(ty: &ast::Type) -> String {
                 // parameter is a string conversion in this crate (`impl Into<String>`).
                 (Some("Into" | "AsRef"), 0) => "str".to_string(),
                 (Some("Option"), 1) => format!("Option<{}>", arg(0)),
+                // `fmt::Result` is `Ok(())` or an error; the subset models it as a status code.
+                (Some("Result"), 0) => "long long".to_string(),
+                // A `Formatter` is the string buffer it writes into (`&mut Formatter` is a
+                // pointer to that buffer).
+                (Some("Formatter"), 0) => "fmtbuf".to_string(),
                 (Some("Result"), 2) => format!("Result<{},{}>", arg(0), arg(1)),
                 // `io::Result<T>` (a one-argument alias) fixes the error to a string.
                 (Some("Result"), 1) => format!("Result<{},str>", arg(0)),
@@ -10857,6 +10869,160 @@ impl Lower {
         mir::Operand::var(t)
     }
 
+    /// `{}` of a value whose type has a user `impl Display`: the text `Type::fmt` writes into a
+    /// fresh buffer (its `Formatter` is a pointer to that buffer). `None` when the type has no
+    /// such impl, so the caller formats the value itself.
+    fn user_display_piece(&mut self, op: &mir::Operand) -> Result<Option<mir::Operand>> {
+        let mir::Operand::Var(n) = op else {
+            return Ok(None);
+        };
+        let ty = self.temp_type_of(n);
+        let is_ptr = ty.ends_with('*');
+        // A struct or enum temporary is typed by its C name (`struct K`); the methods are keyed by
+        // the Rust name.
+        let c_base = ty.trim_end_matches('*').to_string();
+        let base = c_base.trim_start_matches("struct ").to_string();
+        let Some((cname, kind, _ret)) = self
+            .methods
+            .get(&(base.clone(), DISPLAY_FMT_KEY.to_string()))
+            .cloned()
+        else {
+            return Ok(None);
+        };
+        if kind != 1 {
+            return Ok(None);
+        }
+        let self_ptr = if is_ptr {
+            op.clone()
+        } else {
+            let p = self.fresh_temp(format!("{c_base}*"));
+            self.emit(p.clone(), mir::Rvalue::Ref(op.clone(), true));
+            mir::Operand::var(p)
+        };
+        let buf = self.heap_string(mir::Operand::CStr(String::new()))?;
+        let buf_name = match &buf {
+            mir::Operand::Var(b) => b.clone(),
+            _ => return Err(LowerError("`format!` into a string".into())),
+        };
+        let buf_ptr = self.fresh_temp("char**");
+        self.emit(
+            buf_ptr.clone(),
+            mir::Rvalue::Ref(mir::Operand::var(buf_name), true),
+        );
+        let done = self.fresh_temp("long long");
+        self.emit(
+            done,
+            mir::Rvalue::Call(
+                mir::Operand::Func(cname),
+                vec![self_ptr, mir::Operand::var(buf_ptr)],
+            ),
+        );
+        Ok(Some(buf))
+    }
+
+    /// `format!`'s pieces: a new heap string of the literal pieces, with each
+    /// placeholder's argument converted to text (`{}` only).
+    fn lower_format_pieces(&mut self, args: &[ast::Expr]) -> Result<mir::Operand> {
+        let mut fmt: Option<String> = None;
+        let mut rest: Vec<&ast::Expr> = Vec::new();
+        for (i, a) in args.iter().enumerate() {
+            if i == 0 {
+                if let ExprKind::Lit(ast::Lit::Str(s)) = &a.kind {
+                    fmt = Some(s.clone());
+                    continue;
+                }
+            }
+            rest.push(a);
+        }
+        let Some(f) = fmt else {
+            return Err(LowerError("`format!` needs a literal format string".into()));
+        };
+        let segments: Vec<String> = f.split("{}").map(|s| s.to_string()).collect();
+        let out = self.heap_string(mir::Operand::CStr(String::new()))?;
+        let out_name = match &out {
+            mir::Operand::Var(n) => n.clone(),
+            _ => return Err(LowerError("`format!` into a string".into())),
+        };
+        for (i, seg) in segments.iter().enumerate() {
+            if i > 0 {
+                let Some(a) = rest.get(i - 1) else {
+                    return Err(LowerError(
+                        "`format!` has more placeholders than arguments".into(),
+                    ));
+                };
+                let op = self.lower_expr(a)?;
+                // A reference to a scalar formats the value it points to.
+                let op = self.deref_scalar_for_print(op);
+                // The checker's type for the argument decides (a `true` is a constant).
+                // A pointer hint is a reference: its value's type is the temporary's.
+let user_piece = self.user_display_piece(&op)?;
+if let Some(piece) = user_piece {
+    self.push_to_string(&out_name, piece);
+} else {
+                    let ty = match self.hint_of_expr(a) {
+                        Some(h) if !h.ends_with('*') => h,
+                        _ => match &op {
+                            mir::Operand::Var(n) => self.temp_type_of(n),
+                            mir::Operand::Float(_) => "double".to_string(),
+                            _ => "long long".to_string(),
+                        },
+                    };
+                    // A reference to a non-scalar (an enum, say) has no `Display` lowering:
+                    // report it rather than formatting its bits as an integer.
+                    if let Some(h) = self.hint_of_expr(a) {
+                        if h.ends_with('*') && !is_formattable_scalar(h.trim_end_matches('*')) {
+                            return Err(LowerError(format!(
+                                "`format!`/`println!` of a value of type `{}` has no lowering yet (only integers, floats, bools and strings format)",
+                                h.trim_end_matches('*')
+                            )));
+                        }
+                    }
+                    if !ty.contains("char*")
+                        && ty != "str"
+                        && !is_formattable_scalar(ty.trim_end_matches('*'))
+                    {
+                        return Err(LowerError(format!(
+                            "`format!`/`println!` of a value of type `{ty}` has no lowering yet (only integers, floats, bools and strings format)"
+                        )));
+                    }
+                    // A pointer or struct has no `Display` lowering here; formatting it as an
+                    // integer would print a wrong value, so it is an error instead.
+                    if !ty.contains("char*")
+                        && ty != "str"
+                        && (ty.ends_with('*')
+                            || ty.starts_with("struct ")
+                            || matches!(ty.as_str(), "f32" | "float")
+                            || self.struct_names.contains(ty.as_str()))
+                    {
+                        return Err(LowerError(format!(
+                            "`format!`/`println!` of a value of type `{ty}` has no lowering yet (only integers, floats, bools and strings format)"
+                        )));
+                    }
+                    let piece = if ty.contains("char*") || ty == "str" {
+                        op
+                    } else {
+                        let helper = match ty.as_str() {
+                            "bool" => "moira_bool_str",
+                            "double" | "f64" => "moira_f64_to_string",
+                            _ => "moira_int_to_string",
+                        };
+                        let t = self.fresh_temp("char*");
+                        self.emit(
+                            t.clone(),
+                            mir::Rvalue::Call(mir::Operand::Func(helper.to_string()), vec![op]),
+                        );
+                        mir::Operand::var(t)
+                    };
+                    self.push_to_string(&out_name, piece);
+}
+            }
+            if !seg.is_empty() {
+                self.push_to_string(&out_name, mir::Operand::CStr(seg.clone()));
+            }
+        }
+        Ok(out)
+    }
+
     fn lower_print_macro(&mut self, m: &ast::MacroCall) -> Result<mir::Operand> {
         let name = m
             .path
@@ -11005,103 +11171,33 @@ impl Lower {
                 }
                 Ok(mir::Operand::Unit)
             }
-            "format" => {
-                // `format!("a{}b", x)`: a new heap string of the literal pieces, with each
-                // placeholder's argument converted to text (`{}` only).
-                let mut fmt: Option<String> = None;
-                let mut rest: Vec<&ast::Expr> = Vec::new();
-                for (i, a) in args.iter().enumerate() {
-                    if i == 0 {
-                        if let ExprKind::Lit(ast::Lit::Str(s)) = &a.kind {
-                            fmt = Some(s.clone());
-                            continue;
-                        }
-                    }
-                    rest.push(a);
-                }
-                let Some(f) = fmt else {
-                    return Err(LowerError("`format!` needs a literal format string".into()));
+            // `write!(f, "..", args)` / `writeln!`: the formatted text is appended to the
+            // `Formatter`'s buffer; the result is `Ok(())` (status 0).
+            "write" | "writeln" => {
+                let Some(f) = args.first() else {
+                    return Err(LowerError(format!("{name}! needs a formatter")));
                 };
-                let segments: Vec<String> = f.split("{}").map(|s| s.to_string()).collect();
-                let out = self.heap_string(mir::Operand::CStr(String::new()))?;
-                let out_name = match &out {
+                let fop = self.lower_expr(f)?;
+                let text = self.lower_format_pieces(&args[1..])?;
+                let text_name = match &text {
                     mir::Operand::Var(n) => n.clone(),
-                    _ => return Err(LowerError("`format!` into a string".into())),
+                    _ => return Err(LowerError("`write!` into a string".into())),
                 };
-                for (i, seg) in segments.iter().enumerate() {
-                    if i > 0 {
-                        let Some(a) = rest.get(i - 1) else {
-                            return Err(LowerError(
-                                "`format!` has more placeholders than arguments".into(),
-                            ));
-                        };
-                        let op = self.lower_expr(a)?;
-                        // A reference to a scalar formats the value it points to.
-                        let op = self.deref_scalar_for_print(op);
-                        // The checker's type for the argument decides (a `true` is a constant).
-                        // A pointer hint is a reference: its value's type is the temporary's.
-                        let ty = match self.hint_of_expr(a) {
-                            Some(h) if !h.ends_with('*') => h,
-                            _ => match &op {
-                                mir::Operand::Var(n) => self.temp_type_of(n),
-                                mir::Operand::Float(_) => "double".to_string(),
-                                _ => "long long".to_string(),
-                            },
-                        };
-                        // A reference to a non-scalar (an enum, say) has no `Display` lowering:
-                        // report it rather than formatting its bits as an integer.
-                        if let Some(h) = self.hint_of_expr(a) {
-                            if h.ends_with('*') && !is_formattable_scalar(h.trim_end_matches('*')) {
-                                return Err(LowerError(format!(
-                                    "`format!`/`println!` of a value of type `{}` has no lowering yet (only integers, floats, bools and strings format)",
-                                    h.trim_end_matches('*')
-                                )));
-                            }
-                        }
-                        if !ty.contains("char*")
-                            && ty != "str"
-                            && !is_formattable_scalar(ty.trim_end_matches('*'))
-                        {
-                            return Err(LowerError(format!(
-                                "`format!`/`println!` of a value of type `{ty}` has no lowering yet (only integers, floats, bools and strings format)"
-                            )));
-                        }
-                        // A pointer or struct has no `Display` lowering here; formatting it as an
-                        // integer would print a wrong value, so it is an error instead.
-                        if !ty.contains("char*")
-                            && ty != "str"
-                            && (ty.ends_with('*')
-                                || ty.starts_with("struct ")
-                                || matches!(ty.as_str(), "f32" | "float")
-                                || self.struct_names.contains(ty.as_str()))
-                        {
-                            return Err(LowerError(format!(
-                                "`format!`/`println!` of a value of type `{ty}` has no lowering yet (only integers, floats, bools and strings format)"
-                            )));
-                        }
-                        let piece = if ty.contains("char*") || ty == "str" {
-                            op
-                        } else {
-                            let helper = match ty.as_str() {
-                                "bool" => "moira_bool_str",
-                                "double" | "f64" => "moira_f64_to_string",
-                                _ => "moira_int_to_string",
-                            };
-                            let t = self.fresh_temp("char*");
-                            self.emit(
-                                t.clone(),
-                                mir::Rvalue::Call(mir::Operand::Func(helper.to_string()), vec![op]),
-                            );
-                            mir::Operand::var(t)
-                        };
-                        self.push_to_string(&out_name, piece);
-                    }
-                    if !seg.is_empty() {
-                        self.push_to_string(&out_name, mir::Operand::CStr(seg.clone()));
-                    }
+                if name == "writeln" {
+                    self.push_to_string(&text_name, mir::Operand::CStr("
+".to_string()));
                 }
-                Ok(out)
+                let done = self.fresh_temp("long long");
+                self.emit(
+                    done,
+                    mir::Rvalue::Call(
+                        mir::Operand::Func("moira_str_push_str".into()),
+                        vec![fop, text],
+                    ),
+                );
+                Ok(mir::Operand::Const(0))
             }
+            "format" => self.lower_format_pieces(&args),
             other => Err(LowerError(format!(
                 "macro `{}` is not in the codegen subset",
                 other

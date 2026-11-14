@@ -1357,3 +1357,46 @@ fn format_of_enum_without_display_lowering_is_rejected() {
         "unexpected error: {err}"
     );
 }
+
+#[test]
+fn user_display_impl_formats_through_format_and_write_runs() {
+    let out = match run_src(
+        "use std::fmt;
+        struct P { x: i64 }
+        impl fmt::Display for P {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(f, \"P({})\", self.x)
+            }
+        }
+        enum K { A(i64), B }
+        impl fmt::Display for K {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                match self {
+                    K::A(n) => write!(f, \"a{}\", n),
+                    K::B => write!(f, \"b\"),
+                }
+            }
+        }
+        fn main() {
+            let p = P { x: 3 };
+            let s = format!(\"[{}]\", p);
+            let t = format!(\"{} {}\", K::A(5), K::B);
+            print_i32(s.len() as i64);
+            print_i32(t.len() as i64);
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping Display run");
+            return;
+        }
+    };
+    // "[P(3)]" is 6 bytes and "a5 b" is 4.
+    assert_eq!(out, "6\n4", "`{{}}` of a user `impl Display` must use its `fmt`");
+}
+
+#[test]
+fn unclosed_impl_is_a_parse_error_not_a_hang() {
+    let r = tpt_moira_clotho::compile_source("struct K {}\nimpl K {\nfn main() {\n    let p = 1;\n}\n");
+    assert!(r.is_err(), "an impl missing its closing brace must be rejected");
+}

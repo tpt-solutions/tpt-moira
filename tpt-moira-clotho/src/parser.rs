@@ -363,6 +363,21 @@ impl Parser {
     /// Parse one item, or consume and drop an unmodeled one and return `None`.
     /// Loops over items use this so their own end-of-block check sees the
     /// position after the dropped item (e.g. end of file).
+    /// Consume a `}` that ends a braced list. End of input before it is an error (an item loop
+    /// would otherwise spin forever at EOF, since an item parser consumes nothing there).
+    fn eat_close_brace(&mut self) -> ParseResult<bool> {
+        if self.eat(&TokenKind::RBrace) {
+            return Ok(true);
+        }
+        if self.at_eof() {
+            return Err(Diag::error(
+                format!("expected `}}`, found {}", self.peek_kind()),
+                Some(self.peek().span),
+            ));
+        }
+        Ok(false)
+    }
+
     pub(crate) fn parse_item_opt(&mut self) -> ParseResult<Option<Item>> {
         // A stray `;` is left behind by an item-position macro call (`m!();`).
         if self.eat(&TokenKind::Semicolon) {
@@ -608,7 +623,7 @@ impl Parser {
             fs
         } else if self.eat(&TokenKind::LBrace) {
             let mut fs = Vec::new();
-            while !self.eat(&TokenKind::RBrace) {
+            while !self.eat_close_brace()? {
                 // A field may carry attributes; a false `#[cfg(..)]` drops it.
                 let attrs = self.parse_attributes()?;
                 let enabled = crate::cfg::attrs_enabled(&attrs);
@@ -645,7 +660,7 @@ impl Parser {
         let generics = self.parse_where_clause(generics)?;
         self.expect(TokenKind::LBrace)?;
         let mut variants = Vec::new();
-        while !self.eat(&TokenKind::RBrace) {
+        while !self.eat_close_brace()? {
             // A variant may carry attributes (`#[default]`, `#[repr(..)]`,
             // …). The Phase-1 subset ignores them, so they are parsed and
             // dropped here to keep variant-heavy code parseable.
@@ -780,7 +795,7 @@ impl Parser {
         let generics = self.parse_where_clause(generics)?;
         self.expect(TokenKind::LBrace)?;
         let mut items = Vec::new();
-        while !self.eat(&TokenKind::RBrace) {
+        while !self.eat_close_brace()? {
             if let Some(item) = self.parse_item_opt()? {
                 items.push(item);
             }
@@ -816,7 +831,7 @@ impl Parser {
         } else {
             self.expect(TokenKind::LBrace)?;
             let mut items = Vec::new();
-            while !self.eat(&TokenKind::RBrace) {
+            while !self.eat_close_brace()? {
                 if let Some(item) = self.parse_item_opt()? {
                     items.push(item);
                 }
@@ -2389,7 +2404,7 @@ impl Parser {
     fn parse_struct_literal_body(&mut self) -> ParseResult<StructLiteral> {
         let mut fields = Vec::new();
         let mut base = None;
-        while !self.eat(&TokenKind::RBrace) {
+        while !self.eat_close_brace()? {
             // A field may carry attributes; a false `#[cfg(..)]` drops the field.
             let attrs = self.parse_attributes()?;
             let enabled = crate::cfg::attrs_enabled(&attrs);
@@ -2502,7 +2517,7 @@ impl Parser {
         let scrutinee = self.parse_expr_bp(1, false)?;
         self.expect(TokenKind::LBrace)?;
         let mut arms = Vec::new();
-        while !self.eat(&TokenKind::RBrace) {
+        while !self.eat_close_brace()? {
             // An arm may carry attributes; a false `#[cfg(..)]` drops the arm.
             let attrs = self.parse_attributes()?;
             let enabled = crate::cfg::attrs_enabled(&attrs);

@@ -837,6 +837,11 @@ fn vec_helpers(elem: &str, struct_names: &std::collections::HashSet<&str>) -> St
 }
 
 fn c_type(ty: &str, struct_names: &std::collections::HashSet<&str>) -> String {
+    // A bare `Result` is `fmt::Result` (the checker's type of `write!`): a status code, as the
+    // lowering models it. The prelude `Result` enum is only ever instantiated with arguments.
+    if ty == "Result" {
+        return "long long".to_string();
+    }
     if let Some(elem) = mir::slice_elem(ty) {
         return mir::slice_c_name(elem);
     }
@@ -899,6 +904,8 @@ fn c_type(ty: &str, struct_names: &std::collections::HashSet<&str>) -> String {
         "f32" => "float",
         "f64" => "double",
         "str" => "char*",
+        // A `Formatter` is the string buffer it writes into (see `lower::Lower::user_display_piece`).
+        "fmtbuf" => "char*",
         other => other,
     };
     mapped.to_string()
