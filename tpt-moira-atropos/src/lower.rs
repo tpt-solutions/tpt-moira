@@ -1860,6 +1860,15 @@ impl Lower {
         t
     }
 
+    /// Whether an operand is a floating-point value: a float constant or a `double` temporary.
+    fn is_float_operand(&self, o: &mir::Operand) -> bool {
+        match o {
+            mir::Operand::Float(_) => true,
+            mir::Operand::Var(n) => self.temp_type_of(n) == "double",
+            _ => false,
+        }
+    }
+
     fn temp_type_of(&self, name: &str) -> String {
         // Temporaries and locals bound by `let` are in `types`; parameters and
         // declared locals are only in the function's local list.
@@ -2385,6 +2394,11 @@ impl Lower {
                             || self.hint_of_expr(init).as_deref() == Some("Iter<char>") =>
                         {
                             Some("moira_chars".to_string())
+                        }
+                        // A floating-point value is a C `double` (an integer default would
+                        // truncate it).
+                        _ if self.hint_of_expr(init).as_deref() == Some("f64") => {
+                            Some("double".to_string())
                         }
                         _ => self.hint_of_expr(init).filter(|h| {
                             h == "str"
@@ -6863,6 +6877,7 @@ impl Lower {
                 }
                 _ => None,
             });
+            let is_f64 = matches!(recv_ty.as_deref(), Some("double" | "f64"));
             let is_int = recv_ty.is_some_and(|h| {
                 matches!(
                     h.as_str(),
@@ -6883,15 +6898,17 @@ impl Lower {
                         | "unsigned long long"
                 )
             });
-            if is_int {
+            if is_int || is_f64 {
+                let helper = if is_int {
+                    "moira_int_to_string"
+                } else {
+                    "moira_f64_to_string"
+                };
                 let v = self.lower_expr(recv)?;
                 let t = self.fresh_temp("char*");
                 self.emit(
                     t.clone(),
-                    mir::Rvalue::Call(
-                        mir::Operand::Func("moira_int_to_string".to_string()),
-                        vec![v],
-                    ),
+                    mir::Rvalue::Call(mir::Operand::Func(helper.to_string()), vec![v]),
                 );
                 return Ok(Some(mir::Operand::var(t)));
             }
@@ -8554,9 +8571,9 @@ impl Lower {
             ExprKind::Lit(ast::Lit::Int(v, _)) => Ok(mir::Operand::Const(*v as i128)),
             ExprKind::Lit(ast::Lit::Bool(b)) => Ok(mir::Operand::Const(if *b { 1 } else { 0 })),
             ExprKind::Lit(ast::Lit::Float(text, _)) => {
-                // Store as integer bits lossily; demo avoids floats in codegen.
-                let f: f64 = text.parse().unwrap_or(0.0);
-                Ok(mir::Operand::Const(f as i128))
+                // The literal's exact value as a floating-point constant.
+                let f: f64 = text.replace('_', "").parse().unwrap_or(0.0);
+                Ok(mir::Operand::float(f))
             }
             // A string literal is a C string constant (`"hi"` is a `char*`).
             ExprKind::Lit(ast::Lit::Str(text)) => Ok(mir::Operand::CStr(text.clone())),
@@ -8727,7 +8744,16 @@ impl Lower {
                         return Ok(res);
                     }
                 }
-                let t = self.fresh_temp("long long");
+                // Floating-point arithmetic yields a `double`; comparisons yield a truth value.
+                let arith = matches!(
+                    mop,
+                    mir::BinOp::Add | mir::BinOp::Sub | mir::BinOp::Mul | mir::BinOp::Div
+                );
+                let float_ty = arith
+                    && (self.is_float_operand(&l)
+                        || self.is_float_operand(&r)
+                        || self.hint_of_expr(e).as_deref() == Some("f64"));
+                let t = self.fresh_temp(if float_ty { "double" } else { "long long" });
                 self.emit(t.clone(), mir::Rvalue::Binary(mop, l, r));
                 Ok(mir::Operand::var(t))
             }
@@ -8752,7 +8778,10 @@ impl Lower {
                     self.emit(t.clone(), mir::Rvalue::Unary(mop, o));
                     return Ok(mir::Operand::var(t));
                 }
-                let t = self.fresh_temp("long long");
+                // Negating a floating-point value yields a `double`; `!` stays an integer.
+                let float_ty = matches!(mop, mir::UnOp::Neg)
+                    && (self.is_float_operand(&o) || self.hint_of_expr(e).as_deref() == Some("f64"));
+                let t = self.fresh_temp(if float_ty { "double" } else { "long long" });
                 self.emit(t.clone(), mir::Rvalue::Unary(mop, o));
                 Ok(mir::Operand::var(t))
             }
@@ -10840,17 +10869,17 @@ impl Lower {
                     for (i, a) in placeholders.iter_mut().enumerate() {
                         let op = self.lower_expr(a)?;
                         let op = self.deref_scalar_for_print(op);
-                        let printer = match self
-                            .temp_type_of(match &op {
-                                mir::Operand::Var(n) => n.as_str(),
-                                _ => "",
-                            })
-                            .as_str()
+                        let printer = match match &op {
+                            mir::Operand::Var(n) => self.temp_type_of(n),
+                            mir::Operand::Float(_) => "double".to_string(),
+                            _ => String::new(),
+                        }
+                        .as_str()
                         {
                             t if t.contains("char*") => "__moira_w_str",
                             "str" => "__moira_w_str",
                             "bool" => "__moira_w_bool",
-                            "double" => "__moira_w_f64",
+                            "double" | "f64" => "__moira_w_f64",
                             _ => "__moira_w_i64",
                         };
                         let seg_idx = i + 1;
@@ -10920,21 +10949,38 @@ impl Lower {
                             ));
                         };
                         let op = self.lower_expr(a)?;
+                        // A reference to a scalar formats the value it points to.
+                        let op = self.deref_scalar_for_print(op);
                         // The checker's type for the argument decides (a `true` is a constant).
+                        // A pointer hint is a reference: its value's type is the temporary's.
                         let ty = match self.hint_of_expr(a) {
-                            Some(h) => h,
-                            None => match &op {
+                            Some(h) if !h.ends_with('*') => h,
+                            _ => match &op {
                                 mir::Operand::Var(n) => self.temp_type_of(n),
+                                mir::Operand::Float(_) => "double".to_string(),
                                 _ => "long long".to_string(),
                             },
                         };
+                        // A pointer or struct has no `Display` lowering here; formatting it as an
+                        // integer would print a wrong value, so it is an error instead.
+                        if !ty.contains("char*")
+                            && ty != "str"
+                            && (ty.ends_with('*')
+                                || ty.starts_with("struct ")
+                                || matches!(ty.as_str(), "f32" | "float")
+                                || self.struct_names.contains(ty.as_str()))
+                        {
+                            return Err(LowerError(format!(
+                                "`format!`/`println!` of a value of type `{ty}` has no lowering yet (only integers, floats, bools and strings format)"
+                            )));
+                        }
                         let piece = if ty.contains("char*") || ty == "str" {
                             op
                         } else {
-                            let helper = if ty == "bool" {
-                                "moira_bool_str"
-                            } else {
-                                "moira_int_to_string"
+                            let helper = match ty.as_str() {
+                                "bool" => "moira_bool_str",
+                                "double" | "f64" => "moira_f64_to_string",
+                                _ => "moira_int_to_string",
                             };
                             let t = self.fresh_temp("char*");
                             self.emit(

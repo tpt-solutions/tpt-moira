@@ -165,6 +165,9 @@ impl<'a> Emitter<'a> {
     fn gen_val(&self, v: &Val) -> String {
         match v {
             Val::Const(c) => format!("    mov rax, {}\n    push rax\n", *c as i64),
+            // The native backend has no floating-point support yet. A float operand traps
+            // (`ud2`) rather than computing with a truncated integer.
+            Val::Float(_) => "    ud2\n".to_string(),
             Val::Unit => "    xor rax, rax\n    push rax\n".to_string(),
             Val::Name(n) => {
                 let slot = self.slots.named[n];

@@ -9,6 +9,50 @@ use crate::mir;
 
 /// The C runtime for `str`/`String` methods. Each helper is named
 /// `moira_str_<method>`; a method call on a string receiver lowers to a call of it.
+/// `f64` `Display`, as Rust prints it: the shortest decimal that reads back to the same
+/// value, in positional notation (never an exponent). `2.5` is `2.5`, `2.0` is `2`,
+/// `1e21` is `1` followed by 21 zeros. Writes into `out`, which must hold 400 bytes.
+const F64_RUNTIME: &str = r#"#include <math.h>
+static int moira_f64_format(char* out, double x) {
+    int n = 0;
+    if (isnan(x)) { strcpy(out, "NaN"); return 3; }
+    if (signbit(x)) out[n++] = '-';
+    double a = fabs(x);
+    if (isinf(a)) { strcpy(out + n, "inf"); return n + 3; }
+    if (a == 0.0) { out[n++] = '0'; out[n] = 0; return n; }
+    char e[64];
+    int prec;
+    for (prec = 1; prec <= 17; prec++) {
+        snprintf(e, sizeof e, "%.*e", prec - 1, a);
+        if (strtod(e, NULL) == a) break;
+    }
+    /* `e` is `d[.ddd]e[+-]XX`: the significant digits and the decimal exponent. */
+    char digits[32];
+    int nd = 0;
+    const char* p = e;
+    while (*p && *p != 'e') {
+        if (*p >= '0' && *p <= '9') digits[nd++] = *p;
+        p++;
+    }
+    int exp10 = atoi(p + 1);
+    while (nd > 1 && digits[nd - 1] == '0') nd--;
+    if (exp10 >= 0) {
+        for (int i = 0; i <= exp10; i++) out[n++] = i < nd ? digits[i] : '0';
+        if (nd > exp10 + 1) {
+            out[n++] = '.';
+            for (int i = exp10 + 1; i < nd; i++) out[n++] = digits[i];
+        }
+    } else {
+        out[n++] = '0';
+        out[n++] = '.';
+        for (int i = 0; i < -exp10 - 1; i++) out[n++] = '0';
+        for (int i = 0; i < nd; i++) out[n++] = digits[i];
+    }
+    out[n] = 0;
+    return n;
+}
+"#;
+
 const STR_RUNTIME: &str = r#"#include <ctype.h>
 static char* moira_str_dup_n(const char* s, size_t n) { char* r = (char*)malloc(n + 1); memcpy(r, s, n); r[n] = 0; return r; }
 char* moira_str_dup(char* s) { return moira_str_dup_n(s, strlen(s)); }
@@ -23,6 +67,7 @@ char* moira_path_join(char* a, char* b) {
     return r;
 }
 char* moira_str_to_string(char* s) { return moira_str_dup(s); }
+char* moira_f64_to_string(double x) { char b[400]; moira_f64_format(b, x); return moira_str_dup(b); }
 char* moira_int_to_string(long long x) { char b[32]; sprintf(b, "%lld", x); return moira_str_dup(b); }
 char* moira_str_to_owned(char* s) { return moira_str_dup(s); }
 char* moira_str_trim_start(char* s) { while (*s && isspace((unsigned char)*s)) s++; return moira_str_dup(s); }
@@ -242,14 +287,15 @@ pub fn emit_c(prog: &mir::MirProgram) -> String {
     out.push_str("void print_i32(long long x) { printf(\"%lld\\n\", x); }\n");
     out.push_str("void print_i64(long long x) { printf(\"%lld\\n\", x); }\n");
     out.push_str("void print_usize(unsigned long long x) { printf(\"%llu\\n\", x); }\n");
-    out.push_str("void print_f64(double x) { printf(\"%f\\n\", x); }\n");
+    out.push_str(F64_RUNTIME);
+    out.push_str("void print_f64(double x) { char b[400]; moira_f64_format(b, x); printf(\"%s\\n\", b); }\n");
     out.push_str("void print_bool(long long x) { printf(\"%s\\n\", x ? \"true\" : \"false\"); }\n");
     out.push_str("void print_str(char* x) { printf(\"%s\\n\", x); }\n");
     // Raw writers (no newline): `print!`/`println!` write their pieces with these and
     // end the line with an explicit "\n" piece.
     out.push_str("void __moira_w_i64(long long x) { printf(\"%lld\", x); }\n");
     out.push_str("void __moira_w_usize(unsigned long long x) { printf(\"%llu\", x); }\n");
-    out.push_str("void __moira_w_f64(double x) { printf(\"%f\", x); }\n");
+    out.push_str("void __moira_w_f64(double x) { char b[400]; moira_f64_format(b, x); printf(\"%s\", b); }\n");
     out.push_str(
         "void __moira_w_bool(long long x) { printf(\"%s\", x ? \"true\" : \"false\"); }\n",
     );
@@ -590,9 +636,22 @@ fn emit_operand(o: &mir::Operand) -> String {
     match o {
         mir::Operand::Var(n) => n.clone(),
         mir::Operand::Const(c) => c.to_string(),
+        mir::Operand::Float(b) => c_f64_lit(mir::Operand::as_f64(*b)),
         mir::Operand::Unit => "0".to_string(),
         mir::Operand::Func(n) => n.clone(),
         mir::Operand::CStr(s) => c_str_lit(s),
+    }
+}
+
+/// A C `double` literal with the exact value. `{:?}` is the shortest round-trip form and
+/// always has a `.` or an exponent, so C reads it as floating-point, not as an integer.
+fn c_f64_lit(v: f64) -> String {
+    if v.is_nan() {
+        "(0.0/0.0)".to_string()
+    } else if v.is_infinite() {
+        if v > 0.0 { "(1.0/0.0)" } else { "(-1.0/0.0)" }.to_string()
+    } else {
+        format!("{v:?}")
     }
 }
 

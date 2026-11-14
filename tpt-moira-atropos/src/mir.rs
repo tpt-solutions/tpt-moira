@@ -171,6 +171,9 @@ pub enum Operand {
     Var(String),
     /// An integer/boolean constant.
     Const(i128),
+    /// A floating-point constant, stored as its IEEE-754 bits so the operand stays `Eq`.
+    /// Use [`Operand::float`] to build one and [`Operand::as_f64`] to read it back.
+    Float(u64),
     /// The unit value `()`.
     Unit,
     /// A reference to a top-level function by name — a function-pointer constant.
@@ -187,6 +190,16 @@ impl Operand {
     pub fn var(name: impl Into<String>) -> Operand {
         Operand::Var(name.into())
     }
+
+    /// A floating-point constant.
+    pub fn float(value: f64) -> Operand {
+        Operand::Float(value.to_bits())
+    }
+
+    /// The value of a [`Operand::Float`] constant.
+    pub fn as_f64(bits: u64) -> f64 {
+        f64::from_bits(bits)
+    }
 }
 
 impl fmt::Display for Operand {
@@ -194,6 +207,7 @@ impl fmt::Display for Operand {
         match self {
             Operand::Var(n) => f.write_str(n),
             Operand::Const(c) => write!(f, "{}", c),
+            Operand::Float(b) => write!(f, "{:?}", Operand::as_f64(*b)),
             Operand::Unit => f.write_str("()"),
             Operand::Func(n) => f.write_str(n),
             Operand::CStr(s) => write!(f, "{:?}", s),

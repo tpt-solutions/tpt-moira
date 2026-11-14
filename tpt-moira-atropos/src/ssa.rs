@@ -26,6 +26,8 @@ pub enum Val {
     Name(String),
     /// An integer constant.
     Const(i128),
+    /// A floating-point constant (IEEE-754 bits; see `mir::Operand::Float`).
+    Float(u64),
     /// The unit value `()`.
     Unit,
     /// An opaque C string constant (from an expanded `println!` segment);
@@ -135,6 +137,7 @@ fn build_function(f: &mir::Function) -> Result<SsaFunction, String> {
                     }
                 }
                 mir::Operand::Const(c) => Val::Const(*c),
+                mir::Operand::Float(b) => Val::Float(*b),
                 mir::Operand::Unit => Val::Unit,
                 mir::Operand::Func(n) => Val::Name(n.clone()),
                 mir::Operand::CStr(s) => Val::CStr(s.clone()),
@@ -591,6 +594,7 @@ fn show_val(v: &Val) -> String {
         Val::Value(i) => format!("t{}", i),
         Val::Name(n) => n.clone(),
         Val::Const(c) => c.to_string(),
+        Val::Float(b) => format!("{:?}", mir::Operand::as_f64(*b)),
         Val::Unit => "()".to_string(),
         Val::CStr(s) => format!("{:?}", s),
     }
