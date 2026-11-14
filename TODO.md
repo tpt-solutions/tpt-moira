@@ -689,8 +689,13 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
             and clotho's own functions called before they are declared. The std surface still
             needed: `mem::take`/`replace`, `fs::read_to_string`, `fs::File`, `io::Read`/`Error`,
             `fmt::Formatter::write_str`, `sync::atomic::AtomicUsize`, `str::from_utf8`.
-            **Probe reports error counts (2026-11-14):** clotho 592, atropos 1310, lachesis
-            1779, driver 270 `gcc -fsyntax-only` errors on the emitted C (the driver's
+            **Probe reports error counts (2026-11-14, after the C keyword escape below):** clotho 593,
+            atropos 1374, lachesis 1775, driver 267. The probe compiles each crate's own source, so
+            the escape pass (`escape_c_names`, which renames C-reserved names such as a function
+            `double`) costs atropos 64 errors: its `match` over `Rvalue` with or-patterns is the
+            same shape the subset does not lower (`rename_rvalue` already has 62). Fixing that
+            match shape in the lowering recovers those.
+            Previously: clotho 592, atropos 1310, lachesis 1779, driver 270 `gcc -fsyntax-only` errors on the emitted C (the driver's
             large-stack thread, below, adds 7 that the backend cannot lower yet). Fixed: diverging match
             arms (`=> return x`) no longer assign a placeholder to the result; a function-typed
             reference to a user struct hints its pointer.
