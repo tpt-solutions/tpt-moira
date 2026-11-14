@@ -3853,6 +3853,59 @@ impl Lower {
         Ok(Some(mir::Operand::var(t)))
     }
 
+    /// `entry(k).and_modify(f)`: when `k` is present, call `f` with a pointer to its value.
+    fn lower_and_modify(
+        &mut self,
+        recv_ptr: &mir::Operand,
+        key: &mir::Operand,
+        k: &str,
+        v: &str,
+        closure: &Expr,
+    ) -> Result<()> {
+        let found = self.fresh_temp("long long");
+        self.emit(
+            found.clone(),
+            mir::Rvalue::Call(
+                mir::Operand::Func(mir::map_fn_name(k, v, "find")),
+                vec![recv_ptr.clone(), key.clone()],
+            ),
+        );
+        let present = self.fresh_temp("long long");
+        self.emit(
+            present.clone(),
+            mir::Rvalue::Binary(
+                mir::BinOp::Ge,
+                mir::Operand::var(found.clone()),
+                mir::Operand::Const(0),
+            ),
+        );
+        let call = self.new_block();
+        let join = self.new_block();
+        self.set_term(mir::Terminator::If(mir::Operand::var(present), call, join));
+        self.current = call;
+        let vals = self.fresh_temp(format!("{v}*"));
+        self.emit(
+            vals.clone(),
+            mir::Rvalue::Field(recv_ptr.clone(), "vals".into(), true),
+        );
+        let slot = self.fresh_temp(format!("{v}*"));
+        self.emit(
+            slot.clone(),
+            mir::Rvalue::IndexRef(mir::Operand::var(vals), mir::Operand::var(found)),
+        );
+        self.closure_param_hint = Some(vec![format!("{v}*")]);
+        let callee = self.closure_callee(closure);
+        self.closure_param_hint = None;
+        let (f, caps) = callee?;
+        let mut args = caps;
+        args.push(mir::Operand::var(slot));
+        let t = self.fresh_temp("long long");
+        self.emit(t, mir::Rvalue::Call(mir::Operand::Func(f), args));
+        self.set_term(mir::Terminator::Goto(join));
+        self.current = join;
+        Ok(())
+    }
+
     /// `m.entry(k).or_default().push(x)` (or `or_insert(v).push(x)`): the slot of the entry is
     /// a pointer to a vector, which the push helper takes directly. `None` for other shapes.
     fn lower_entry_vec_push(&mut self, slot: &Expr, arg: &Expr) -> Result<Option<mir::Operand>> {
@@ -3959,6 +4012,13 @@ impl Lower {
         method: &str,
         args: &[Expr],
     ) -> Result<Option<mir::Operand>> {
+        // `entry(k).and_modify(f)`: `f` runs on the value when `k` is present.
+        let (recv, modify) = match &recv.kind {
+            ExprKind::MethodCall(inner, m, margs) if m.node == "and_modify" && margs.len() == 1 => {
+                (&**inner, Some(&margs[0]))
+            }
+            _ => (recv, None),
+        };
         let ExprKind::MethodCall(map_expr, entry, entry_args) = &recv.kind else {
             return Ok(None);
         };
@@ -4010,6 +4070,9 @@ impl Lower {
             mir::Operand::var(p)
         };
         let key = self.lower_key_arg(&entry_args[0], &k)?;
+        if let Some(f) = modify {
+            self.lower_and_modify(&recv_ptr, &key, &k, &v, f)?;
+        }
         let value = match default {
             Some(d) => d,
             None => {

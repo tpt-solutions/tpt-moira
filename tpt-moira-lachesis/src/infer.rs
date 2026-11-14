@@ -3039,6 +3039,10 @@ impl TypeChecker {
                         return Ty::RefMut(Box::new(v));
                     }
                     ("or_default", 0) => return Ty::RefMut(Box::new(v)),
+                    ("and_modify", 1) => {
+                        self.closure_result(&args[0], &Ty::RefMut(Box::new(v.clone())));
+                        return Ty::Apply("Entry".to_string(), targs.clone());
+                    }
                     ("or_insert_with", 1) => {
                         self.closure_result(&args[0], &Ty::Unit);
                         return Ty::RefMut(Box::new(v));

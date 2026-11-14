@@ -975,3 +975,25 @@ fn main() {
         assert_eq!(lines, vec!["21", "13"]);
     }
 }
+
+/// `entry(k).and_modify(f).or_insert(v)`: `f` changes a present value, and `v` is inserted
+/// for an absent key.
+#[test]
+fn map_entry_and_modify_or_insert_runs() {
+    let src = r#"
+use std::collections::HashMap;
+
+fn main() {
+    let mut m: HashMap<i64, i64> = HashMap::new();
+    m.entry(1).and_modify(|v| *v += 5).or_insert(1);
+    m.entry(1).and_modify(|v| *v += 5).or_insert(1);
+    m.entry(2).and_modify(|v| *v += 5).or_insert(100);
+    print_i64(m.get(1).unwrap_or(-1));
+    print_i64(m.get(2).unwrap_or(-1));
+}
+"#;
+    if let Some(out) = check_and_run("entry_and_modify", src) {
+        let lines: Vec<&str> = out.lines().filter(|l| !l.is_empty()).collect();
+        assert_eq!(lines, vec!["6", "100"]);
+    }
+}
