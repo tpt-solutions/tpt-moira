@@ -705,6 +705,20 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
             spans a file id is the next step for checker work. Also open: `mem::take`-style
             `Vec` helpers for struct elements (copied shallowly), `as_bytes`, `into_iter`,
             `contains` on non-string vectors.
+          - Status (2026-11-15, checker, round 2): span file ids already exist
+            (`locate_span`, with a `path:line:col` note on every checker error), so the
+            earlier "spans carry no file" note was wrong and is withdrawn. Checker errors
+            now: atropos 20 (was 151), lachesis 71 (was 89). Done: `impl Into`/`AsRef`
+            parameters accept any argument; `&&T` and `&Box<T>` coerce to `&T`; `.0` on
+            tuple structs; destructuring closure parameters; match ergonomics confirmed;
+            `as_ref`/`borrow`/`deref`; sequence `==`; `bool` `&`/`|`/`^`; `slice::join`;
+            `Arc::new`, `from_ref`, `from_bits`, `with_capacity`; `str::contains` with any
+            pattern. The lenient borrow-check flag is a `Lower` field (no thread-local).
+            Left open on purpose: `HashMap::get` should return `Option<&V>` (Rust's type),
+            but the lowering produces the value, so the checker keeps `Option<V>` until the
+            lowering agrees. Open items: `thread::scope`, `Command` output types, a
+            `TypeHints::new()` alias path, `str::to_string` as a function value, and a name
+            clash between a clotho `Stmt` and a `clotho_Stmt` type in the checker.
           - Test-harness correction (2026-11-15): `run_src` used to return `None` when the
             emitted C failed to compile, and the run tests then passed silently. A compile
             failure now fails the test. The run tests moved to
