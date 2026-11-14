@@ -674,7 +674,15 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
             `impl`/`struct` body hung the parser at EOF; it is now a parse error. Clotho now
             lowers and emits C, with 223 `gcc -fsyntax-only` errors, the same class as before
             (raw method calls on values whose type the lowering can't see, and Option/Vec
-            helper gaps). Tests: `codegen.rs` (`user_display_impl_formats_through_format_and_write_runs`,
+            helper gaps).
+          - Status (2026-11-15, later): clotho's C is at 222 errors. Fixed: unannotated
+            `Vec::new()` takes its element type from later pushes (the checker keeps waiting
+            while the element type has unknowns); `mem::take` on a vector local; `&arr` and
+            `&[..]` passed to slice parameters. Largest remaining groups: values assigned
+            from a fallback `0` where a struct is expected (e.g. `entry(..).or_insert_with`
+            on a map whose value is a tuple struct), raw method calls on receivers with no
+            known type (`next`, `iter`, `map`, `filter`, `take`), and Option/struct field
+            access on fallback temporaries. Atropos and lachesis still fail the checker. Tests: `codegen.rs` (`user_display_impl_formats_through_format_and_write_runs`,
             `unclosed_impl_is_a_parse_error_not_a_hang`). Workspace `cargo test` is green.
           - Status (2026-08-22): the `x.py self-host` probe now measures parse
             independently of type-check (`moira --emit ast` sets `parse_ok`;
