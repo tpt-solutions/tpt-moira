@@ -865,6 +865,15 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
             `buf[..]` subscripts): clotho C 380 -> 368. Also a real bug: a normal string literal
             appended each byte as a `char`, so `"é"` lexed as two characters; it now decodes
             the sequence (`lex_string`). Test: `multi_byte_characters_in_string_literals_decode`.
+            **Expected payload types of `return` and tails (2026-11-14).** `return Ok(None);`,
+            `return Ok(Some(3))` and a function body's tail `Ok(Some(3))` now take the declared
+            return type: a call in those positions gets it as its expectation, and an argument
+            left untyped (`None`, an unsuffixed literal) takes the payload type of the expected
+            `Option`/`Result`. Test: `return_ok_none_takes_declared_payload_runs`. Own C:
+            clotho 368 -> 360.
+            **Note:** `tpt-moira-lachesis/src/infer.rs` was edited by another process during this
+            session (a `is_int_ty` helper and a body-tail change appeared and were removed
+            again). The committed change is only the hunks listed above; that edit was not kept.
  each crate uses the std
             surface and the typed-temporary lowering broadly, and each new feature also adds
             its own source to the probe. The route that worked for the four checker-side

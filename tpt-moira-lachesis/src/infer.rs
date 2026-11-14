@@ -119,6 +119,9 @@ pub struct TypeChecker {
     /// span of the initializer: the first assignment of a `Some(..)` to one gives the
     /// payload type, which the initializer's hint then carries (`let mut sep = None;`).
     pending_option: HashMap<String, Span>,
+    /// The expected type of the next block's tail (a function body's tail takes the return
+    /// type); taken by `infer_block` on entry, so nested blocks do not see it.
+    block_tail_expected: Option<Ty>,
     /// Stack of the generic parameter lists of the functions currently being
     /// checked. The top entry scopes the generic type parameters so that a bare
     /// type-name in a signature/body resolves to [`Ty::Generic`] and so that
@@ -556,6 +559,7 @@ impl Default for TypeChecker {
             env: Vec::new(),
             pending_vec: HashMap::new(),
             pending_option: HashMap::new(),
+            block_tail_expected: None,
             generic_scope: Vec::new(),
             ret: Ty::Unit,
             ret_span: Span::default(),
@@ -1150,6 +1154,7 @@ impl TypeChecker {
             .map(|t| self.type_to_ty(t))
             .unwrap_or(Ty::Unit);
         self.ret_span = f.ret.as_ref().map(|t| t.span).unwrap_or(f.name.span);
+        self.block_tail_expected = Some(self.ret.clone()).filter(|r| !matches!(r, Ty::Unit));
         let body_ty = self.infer_block(&f.body);
         // A tail whose type the context decides (`collect()`, an unsuffixed literal) takes
         // the return type.
@@ -1176,6 +1181,7 @@ impl TypeChecker {
     }
 
     fn infer_block(&mut self, block: &Block) -> Ty {
+        let tail_expected = self.block_tail_expected.take();
         self.env.push(HashMap::new());
         let glob_mark = self.glob_enums.len();
         // The type of the final statement, used to detect a diverging block
@@ -1255,7 +1261,15 @@ impl TypeChecker {
             }
         }
         let ty = match &block.tail {
-            Some(t) => self.infer_expr(t),
+            Some(t) => {
+                // A call as the tail takes the expected type (a function body's return type).
+                if let (Some(e), ExprKind::Call(..)) = (&tail_expected, &t.kind) {
+                    self.expected_call_ty = Some(e.clone());
+                }
+                let ty = self.infer_expr(t);
+                self.expected_call_ty = None;
+                ty
+            }
             None => {
                 // No tail expression: the block diverges (type `!`) if its final
                 // statement diverges, mirroring Rust. This lets a `match` arm like
@@ -1943,7 +1957,16 @@ impl TypeChecker {
             }
             ExprKind::Return(opt) => {
                 let t = match opt {
-                    Some(e2) => self.infer_expr(e2),
+                    Some(e2) => {
+                        // A call returned (`return Ok(None);`) takes the return type as its
+                        // expectation, as a `let` with an annotation does.
+                        if matches!(e2.kind, ExprKind::Call(..)) && !matches!(self.ret, Ty::Unit) {
+                            self.expected_call_ty = Some(self.ret.clone());
+                        }
+                        let t = self.infer_expr(e2);
+                        self.expected_call_ty = None;
+                        t
+                    }
                     None => Ty::Unit,
                 };
                 let ret = self.ret.clone();
@@ -2459,13 +2482,26 @@ impl TypeChecker {
                 }
                 _ => None,
             };
-            if let Some(pe) = payload_expected {
+            if let Some(pe) = payload_expected.clone() {
                 if matches!(args[0].kind, ExprKind::Call(..)) {
                     self.expected_call_ty = Some(pe);
                 }
             }
-            let t = self.infer_expr(&args[0]);
+            let inferred = self.infer_expr(&args[0]);
             self.expected_call_ty = None;
+            // A payload typed by nothing else (`Ok(None)`, `Some(3)`) takes the expected payload
+            // type, both as the argument's and as the constructor's.
+            let t = match payload_expected {
+                Some(pe)
+                    if (has_unknown(&inferred) || has_default_int(&inferred))
+                        && !has_unknown(&pe) =>
+                {
+                    self.expr_types
+                        .insert((args[0].span.start, args[0].span.end), pe.clone());
+                    pe
+                }
+                _ => inferred,
+            };
             return match name.as_str() {
                 "Some" => Ty::Apply("Option".to_string(), vec![t]),
                 "Ok" => Ty::Apply("Result".to_string(), vec![t, Ty::Unknown]),

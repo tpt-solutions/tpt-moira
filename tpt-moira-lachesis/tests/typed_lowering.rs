@@ -1143,3 +1143,33 @@ fn main() {
         assert_eq!(lines, vec!["100", "11", "21"]);
     }
 }
+
+/// `return Ok(None);` takes the function's result type: the `None` is an option of the
+/// declared payload, so the caller's match sees the right variant.
+#[test]
+fn return_ok_none_takes_declared_payload_runs() {
+    let src = r#"
+fn find(c: bool) -> Result<Option<i64>, String> {
+    if c {
+        return Ok(None);
+    }
+    Ok(Some(3))
+}
+fn main() {
+    match find(true) {
+        Ok(Some(v)) => print_i64(v),
+        Ok(None) => print_i64(0),
+        Err(_) => print_i64(-1),
+    }
+    match find(false) {
+        Ok(Some(v)) => print_i64(v),
+        Ok(None) => print_i64(0),
+        Err(_) => print_i64(-1),
+    }
+}
+"#;
+    if let Some(out) = check_and_run("return_ok_none", src) {
+        let lines: Vec<&str> = out.lines().filter(|l| !l.is_empty()).collect();
+        assert_eq!(lines, vec!["0", "3"]);
+    }
+}
