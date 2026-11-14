@@ -48,6 +48,19 @@ Target: compile a strict subset of Rust (no complex trait resolution, no async/a
     `tpt-moira-bench --full --rustc-mode full` (third). The 10x target remains open
     for the canonical front-end+mid-end number; closing it depends on the
     Phase-4 final optimization pass (parallel codegen, arena tuning).
+    - **Host floor (2026-11-15): 10x is not reachable by wall-clock on this host.**
+      Every timed run is a process launch. Measured here: an empty C executable
+      7.2 ms, `moira --emit ssa` on an empty file 8.8-9.5 ms, `rustc --emit=metadata`
+      on a trivial file ~59 ms. With zero compile work the ceiling is therefore
+      about 6.5-8x, and the bench now prints it (`wall-clock ceiling` line).
+      The battery's own compile work is small. Per-stage profile of the xlarge program
+      (`MOIRA_TIMINGS=1`, median, cache off): read+parse ~0.5 ms, lower+SSA ~0.9 ms,
+      C emission ~2.7 ms (this includes a full type check to produce typed hints, ~1.4 ms).
+      Halving all compile work would move the xlarge ratio from ~4.5x to ~5.5x, not 10x.
+      **Decision needed:** keep wall-clock as the headline (current), or adopt an
+      in-process compile-time metric for the 10x claim. Recommendation: keep wall-clock
+      as the headline and report the floor-bounded ceiling beside it. Leave the 10x
+      target open and marked as blocked by the host until the metric is decided.
   - [x] Extend `tpt-moira-bench` to time the *full* pipeline (type-check +
         borrow-check + incremental cache), not just front-end + SSA mid-end
         — `--full` now times `moira --emit check`; the table prints which
@@ -409,7 +422,7 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
             `match` / generics / closures tasks below. The driver routes real
             source files through `tpt_moira_clotho::compile_file`, which recursively
             flattens `mod` declarations.
-    - [ ] Re-run `x.py self-host` probe after each fix and track crate-by-crate parse pass/fail in `docs/SELF_HOSTING.md`
+    - [x] Re-run `x.py self-host` probe after each fix and track crate-by-crate parse pass/fail in `docs/SELF_HOSTING.md`
       - Status: **Resolved (2026-08-22).** `x.py`'s `probe_crate` now runs a
         dedicated parse stage (`moira --emit ast`, which only lexes + parses +
         macro-expands and never invokes the Lachesis checker or Atropos lowering)
@@ -626,6 +639,27 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
         `concrete_receiver_trait_method_resolves_via_impl_search`, and
         `trait_method_without_matching_impl_is_rejected_for_concrete_receiver`.
   - [ ] **Coverage tracking**
+    - Status (2026-11-15): probe `1/5` (`moira-alloc`). The driver's checker now passes:
+      its two `&str`-for-`&Path` errors are fixed, since `&str` coerces to `&Path` and
+      `PathBuf` is modeled as `str`. `std::mem::take(&mut place)` is typed as the place's
+      type and lowered for `Vec` locals and fields (tests in
+      `tpt-moira-lachesis/tests/mem_take_run.rs`). `moira-alloc`'s arena was rewritten as
+      chunked storage, and its `Vec::len`/`is_empty` uses became loops, since a method path
+      as a function value is not yet checked. Remaining own C errors: clotho 235,
+      atropos 1206 (with 139 checker errors), lachesis 1256 (88 checker), driver 202.
+      See `docs/SELF_HOSTING.md` for the matrix.
+    - Status (2026-11-15, later): **floats were miscompiled**. A float literal was
+      truncated to an integer, and float locals and temporaries were `long long`, so
+      `2.5` printed `2` and `f64` arithmetic was integer arithmetic. Fixed in the C
+      backend and lowering: `mir::Operand::Float` (exact bits), `double` temporaries and
+      locals, and a shortest round-trip `Display` (`moira_f64_format`) that matches rustc
+      (tests: `tpt-moira-lachesis/tests/float_run.rs`, checked against `rustc` output). The
+      native x86 backend has no float support: a float there traps (`ud2`). `format!` of a
+      pointer, struct, or `f32` is now a lowering error instead of an integer.
+      Also fixed: derived `Clone` of a `Box` payload (`Box::new((**a).clone())`), which
+      stored a struct where a box was needed (test: `tpt-moira-lachesis/tests/box_clone_run.rs`).
+      Probe now: clotho C 230, atropos 1215 (check 143, up 4 from an untraced cause), lachesis
+      1250 (check 88), driver 209 (check ok).
     - [ ] Re-run `x.py self-host` after each milestone above; update the crate-by-crate self-hostable count (the `mod` and generics-`<` parse gaps are resolved — remaining blockers are type-check depth: `match`/closures/generics-in-`infer`/tuple-destructure)
           - Status (2026-08-22): the `x.py self-host` probe now measures parse
             independently of type-check (`moira --emit ast` sets `parse_ok`;
@@ -1301,6 +1335,9 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
         (see `docs/SELF_HOSTING.md`); probe currently reports 0/5 crates
         self-hostable, blocked by generics (`<`) and `mod` parsing gaps.
   - [ ] Verify behavior parity of the self-compiled binary
+    - Blocked (2026-11-15): no Stage-1 binary exists; the probe is `1/5`. The parity
+      harness (`tests/stage_parity.rs`) and the CI gate are ready and skip until
+      `MOIRA_STAGE1_BIN` is set.
     - [ ] Once Moira can compile itself, build the Stage-1 `moira` binary
     - [ ] Run the existing `clotho`/`lachesis`/`atropos` test suites through the Stage-1 binary and diff results against the Stage-0 (rustc-built) binary
     - [ ] Run `tpt-moira-bench` and `tests/determinism.rs` against the Stage-1 binary
@@ -1350,6 +1387,14 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
       errors stay deterministic for the test suite while the work is parallel.
       Locked in by `tpt_moira_lachesis::tests::parallel_check_aggregates_type_and_borrow_errors`.
   - [ ] Profile the end-to-end pipeline on a large corpus and identify the next hot path (flamegraph/`perf`/`cargo flamegraph`)
+    - Partial (2026-11-15): `MOIRA_TIMINGS=1` prints per-phase times (read+parse, emit,
+      and check inside emit). Findings on the xlarge battery program (median, cache off):
+      read+parse ~0.5 ms; lower+SSA ~0.9 ms; `--emit c` ~2.7 ms, of which a full type check
+      to produce typed hints is ~1.4 ms (`lower_for_emit` calls `expr_type_hints`). The
+      `--check` flag also prints the full AST debug dump under the default `ast` emit
+      (~0.3-0.9 ms). Changing that is a CLI output change, so it goes through
+      `docs/STABILITY.md`. Not done: a large-corpus profile, which needs a corpus Moira can
+      check (see the crates item below), and a sampling profiler on Windows.
   - [x] Parallelize codegen (SSA→C/ASM emission) across functions/modules, following the type-check/borrow-check pattern above
         - **Status: Resolved.** `tpt_moira_atropos::codegen_c::emit_c` now emits each
           function body on its own OS thread (`std::thread::scope`) and joins the
@@ -1360,10 +1405,21 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
           passes are independent and their results concatenate in a fixed order,
           preserving the cross-process byte-identical determinism guarantee
           (`tests/determinism.rs` still passes). The from-scratch native ASM
-          backend (`emit_asm`) follows the same shape but is not yet threaded; its
-          SSA program is still built and emitted sequentially.
+          backend (`emit_asm`) is threaded the same way (one thread per function,
+          joined in order). This note previously said otherwise.
   - [ ] Tune `moira-alloc` arena sizing/reuse based on profile data from real (not synthetic) compiles
+    - Blocked (2026-11-15): the arena is not on the compile path (no pipeline stage calls
+      `Arena::alloc`), so no profile can show its cost. Done meanwhile: the arena is now
+      chunked bump storage (chunks double from 64 to 65,536 values; no per-value `Box`),
+      with tests for reference stability across growth and drop-once.
   - [ ] Re-run `tpt-moira-bench --dashboard` after each optimization to confirm no regressions
+    - Harness changes (2026-11-15): timed runs set `MOIRA_NO_CACHE=1` (cold compiles; the
+      cache had been answering repeated runs of the same source); the run prints the
+      process-start floor and the wall-clock ceiling; `--corpus <dir>` times every `.rs`
+      file of a directory (a file Moira rejects is n/a); `--dashboard` also prints the
+      crates.io pass-rate trend. Results recorded before this change used the cache, so
+      compare only runs made after it. No run was recorded this session: the working tree
+      is uncommitted, and a record would carry the wrong commit.
       - Latest run recorded 2026-08-22: geomean **6.91x** vs
         `rustc --emit=metadata` (small 6.53x / medium 7.60x / large 6.77x /
         xlarge 6.93x / nested 6.78x); no regressions vs the previous run
@@ -1387,9 +1443,15 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
       in `lachesis/src/pipeline_cache.rs` (`checked_caches_and_reuses`,
       `checked_ok_roundtrips`, `text_caches_and_is_label_scoped`).
 - [ ] Validate against a full Linux kernel build
-  - [ ] Confirm scope: target the Rust-for-Linux kernel modules (the actual Linux kernel is C; Rust support there is the relevant subset)
+  - [x] Confirm scope: target the Rust-for-Linux kernel modules (the actual Linux kernel is C; Rust support there is the relevant subset)
+        - Scope: the kernel crate `rust/kernel/lib.rs` (its `mod` files are resolved by
+          `compile_file`) and the `samples/rust/*.rs` modules that import it as `kernel::...`.
+          `tools/kernel_probe.py` probes both; see its docstring.
   - [ ] Stand up a build environment that can drive Rust-for-Linux's build with an alternate compiler front end
   - [ ] Attempt compilation, triage the first wave of unsupported-construct failures via `moira --diff`
+    - Blocked (2026-11-15): no kernel source tree is on this machine. `tools/kernel_probe.py
+      --kernel-tree <path>` runs the probe and writes the triage. It was checked on a small
+      synthetic tree with the same layout (`rust/kernel/lib.rs`, `samples/rust/*.rs`).
   - [ ] Iterate: fix or document each blocking gap until the target module set builds
   - [ ] Record pass/fail + divergence report for the attempted module set
 - [ ] Validate against large crates.io dependency graphs
@@ -1400,12 +1462,19 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
         - Status: parse 19/19, check 2/19 (cfg-if, clap). Remaining check gaps are type-checker work: nested items, std API modeling, macros outside `println!`-family, method and field resolution.
   - [x] Triage top blocking gaps by how many crates they unblock (highest leverage first)
         - The report ranks gap classes by the crates they alone block. Parser gaps closed so far: `const fn`, `-> !`, `use core::str`, brace `use {..}`, item-position macro calls, `macro_rules!` brace skipping, `vis`/`lifetime`/`meta` fragments, statement-vs-expression macro expansion, `#[cfg]` evaluation for the fixed target.
-  - [ ] Track pass-rate trend over time in the same dashboard used by `tpt-moira-bench`
-        - Partial: each run appends to `build/crates_probe/history.jsonl`. Not yet shown in the `tpt-moira-bench --dashboard` view.
+  - [x] Track pass-rate trend over time in the same dashboard used by `tpt-moira-bench`
+        - Done (2026-11-15): `tpt-moira-bench --dashboard` prints the crates probe history
+          (`build/crates_probe/history.jsonl`) beside the speed runs.
+        - Also fixed: the probe counted each `at file:line:col` location line as a separate
+          diagnostic, which made every location its own gap class in the triage.
 - [ ] Achieve ≥5x speedup over `rustc` on production-scale codebases
   - [ ] Depends on: Linux-kernel-module and crates.io validation above producing a large-codebase corpus to benchmark
-  - [ ] Extend `tpt-moira-bench` to accept an external large-codebase corpus (not just the Phase-1 synthetic battery)
+  - [x] Extend `tpt-moira-bench` to accept an external large-codebase corpus (not just the Phase-1 synthetic battery)
+        - `tpt-moira-bench --corpus <dir>` times every `.rs` file in the directory.
   - [ ] Measure and record geomean speedup on that corpus via `tpt-moira-bench --record`
+    - Blocked: the crates.io sample checks for 2 of 19 crates, so no corpus of meaningful
+      size is checkable yet. On this host the process floor (see Phase 1) also caps any
+      wall-clock ratio.
   - [ ] If short of 5x, profile and address the largest remaining bottleneck (see "Final cross-subsystem optimization pass" above)
 - [x] Error message parity audit against `rustc`
   - **Status: Resolved.** `tpt_moira_lachesis::diff::parity` scores diagnostic fidelity

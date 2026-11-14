@@ -25,8 +25,28 @@ acceptance.
 parses, checks, and its emitted C compiles). The probe compiles each emitted C file,
 so this is the real gate. Its tests are not run through Moira yet.
 
-Check errors: `clotho` 113, `atropos` 182, `lachesis` 128. The driver checks cleanly
-but its C needs types from other crates. Blockers, in the order they block:
+Current per-crate state (this probe run, after the `mem::take` and `&str`→`&Path`
+coercion changes; `moira-alloc`'s arena and the driver's checker pass were the same round):
+
+| Crate | Parse | Check | Own C errors | Notes |
+|-------|-------|-------|--------------|-------|
+| `moira-alloc` | ok | ok | 0 | self-hostable |
+| `clotho` | ok | ok | 230 | untyped `long long` temporaries assigned struct/pointer values |
+| `atropos` | ok | 143 checker errors | 1215 | `unknown type name '_'` in its lowering source |
+| `lachesis` | ok | 88 checker errors | 1250 | `unknown type name 'Spanned'` (generic instances) |
+| driver | ok | ok | 209 | its C needs `Spanned`/extern types (2629 errors in extern crates) |
+
+Floats now lower as floats (literals, arithmetic, `Display` matching rustc); a `format!`
+of a pointer, struct, or `f32` is a lowering error, not an integer. Two crates' checker
+counts moved for reasons outside this round: atropos +4 checker errors is not yet traced.
+
+Closest to flipping: `clotho`, since its checker already passes. Its C errors are a
+long tail: placeholder `0` values for unlowered std methods (`Vec::pop`, `take`,
+iterator chains), `Option`/`Result` payload types, and generic `Spanned` instances.
+Stage 1 needs each of these modeled; no single fix flips a crate.
+
+The driver checks cleanly but its C needs types from other crates. Blockers, in the
+order they block:
 
 - **Cross-crate types in per-crate C.** `Diag`, `Expr`, `Ty` and `Program` are used
   but not emitted into a per-crate file. `--bundle` emits them, but bundling needs
