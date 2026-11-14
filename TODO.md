@@ -694,6 +694,17 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
             "method on a receiver whose type is unknown" (157) and "call to a path whose
             type is unknown" (89): the checker records no usable type for those
             expressions, so improving checker expression coverage is the main lever.
+          - Status (2026-11-15, checker coverage): blocked functions per crate in the probe:
+            clotho 41 → 29, lachesis 79, driver 9. Atropos' checker errors went 151 → 80.
+            Done: expression-position and struct-field `HashMap::new()`; `to_vec` on
+            vectors and slices (copy helper); unannotated `Vec::new()` typed from a `&mut`
+            argument; locals shadow same-named functions (checker and lowering); std
+            signatures the self-host sources use (str/String, f64, Option::or, Vec sort,
+            BTreeSet::contains). Open: the checker's error spans carry no file, so errors in
+            module files (for example `expected str, found &str`) cannot be placed. Giving
+            spans a file id is the next step for checker work. Also open: `mem::take`-style
+            `Vec` helpers for struct elements (copied shallowly), `as_bytes`, `into_iter`,
+            `contains` on non-string vectors.
           - Test-harness correction (2026-11-15): `run_src` used to return `None` when the
             emitted C failed to compile, and the run tests then passed silently. A compile
             failure now fails the test. The run tests moved to
