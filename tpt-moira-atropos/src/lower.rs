@@ -6548,6 +6548,9 @@ impl Lower {
                 | "as_ref"
                 | "copied"
                 | "cloned"
+                | "unwrap_or_default"
+                | "ok"
+                | "ok_or_else"
         );
         if !known {
             return Ok(None);
@@ -6641,10 +6644,108 @@ impl Lower {
                 self.current = join;
                 Ok(Some(mir::Operand::var(r)))
             }
+            "ok" if targs.len() == 2 => {
+                // `Result<T, E>::ok()`: `Some(v)` for `Ok(v)`, else `None`.
+                let ok_ty = targs[0].clone();
+                let r = self.fresh_temp(format!("Option<{ok_ty}>"));
+                let cond = test(self, ok_tag);
+                let then_blk = self.new_block();
+                let else_blk = self.new_block();
+                let join = self.new_block();
+                self.set_term(mir::Terminator::If(cond, then_blk, else_blk));
+                self.current = then_blk;
+                let v = self.fresh_temp(ok_ty);
+                self.emit(v.clone(), mir::Rvalue::Field(op, "f0".into(), ptr));
+                self.emit(
+                    r.clone(),
+                    mir::Rvalue::StructLit(
+                        "Option".to_string(),
+                        vec![
+                            ("tag".to_string(), mir::Operand::Const(0)),
+                            ("f0".to_string(), mir::Operand::var(v)),
+                        ],
+                    ),
+                );
+                self.set_term(mir::Terminator::Goto(join));
+                self.current = else_blk;
+                self.emit(
+                    r.clone(),
+                    mir::Rvalue::StructLit(
+                        "Option".to_string(),
+                        vec![("tag".to_string(), mir::Operand::Const(1))],
+                    ),
+                );
+                self.set_term(mir::Terminator::Goto(join));
+                self.current = join;
+                Ok(Some(mir::Operand::var(r)))
+            }
+            "ok_or_else" if targs.len() == 1 => {
+                // `Option<T>::ok_or_else(f)`: `Ok(v)` for `Some(v)`, else `Err(f())`.
+                let Some(f) = args.first() else {
+                    return Err(LowerError("`ok_or_else` needs a closure".into()));
+                };
+                self.closure_param_hint = Some(Vec::new());
+                let callee = self.closure_callee(f);
+                self.closure_param_hint = None;
+                let (lifted, caps) = callee?;
+                let err_ty = self
+                    .closure_rets
+                    .get(&lifted)
+                    .cloned()
+                    .unwrap_or_else(|| "long long".to_string());
+                let r = self.fresh_temp(format!("Result<{payload_ty},{err_ty}>"));
+                let cond = test(self, ok_tag);
+                let then_blk = self.new_block();
+                let else_blk = self.new_block();
+                let join = self.new_block();
+                self.set_term(mir::Terminator::If(cond, then_blk, else_blk));
+                self.current = then_blk;
+                let v = self.fresh_temp(payload_ty.clone());
+                self.emit(v.clone(), mir::Rvalue::Field(op, "f0".into(), ptr));
+                self.emit(
+                    r.clone(),
+                    mir::Rvalue::StructLit(
+                        "Result".to_string(),
+                        vec![
+                            ("tag".to_string(), mir::Operand::Const(0)),
+                            (payload_field("Result", 0, 0), mir::Operand::var(v)),
+                        ],
+                    ),
+                );
+                self.set_term(mir::Terminator::Goto(join));
+                self.current = else_blk;
+                let e = self.fresh_temp(err_ty);
+                self.emit(
+                    e.clone(),
+                    mir::Rvalue::Call(mir::Operand::Func(lifted), caps),
+                );
+                self.emit(
+                    r.clone(),
+                    mir::Rvalue::StructLit(
+                        "Result".to_string(),
+                        vec![
+                            ("tag".to_string(), mir::Operand::Const(1)),
+                            (payload_field("Result", 1, 0), mir::Operand::var(e)),
+                        ],
+                    ),
+                );
+                self.set_term(mir::Terminator::Goto(join));
+                self.current = join;
+                Ok(Some(mir::Operand::var(r)))
+            }
             _ => {
-                // `unwrap_or(d)`: the payload when present, else `d`.
-                let Some(default) = args.first() else {
-                    return Err(LowerError("`unwrap_or` needs a default value".into()));
+                // `unwrap_or(d)`: the payload when present, else `d`; `unwrap_or_default()`
+                // falls back to the zero value of the payload (`0`, or the empty string).
+                let default_op = if method == "unwrap_or_default" {
+                    match payload_ty.as_str() {
+                        "str" | "char*" => mir::Operand::CStr(String::new()),
+                        _ => mir::Operand::Const(0),
+                    }
+                } else {
+                    let Some(default) = args.first() else {
+                        return Err(LowerError("`unwrap_or` needs a default value".into()));
+                    };
+                    self.lower_expr(default)?
                 };
                 let r = self.fresh_temp(payload_ty.clone());
                 let cond = test(self, ok_tag);
@@ -6658,8 +6759,7 @@ impl Lower {
                 self.emit(r.clone(), mir::Rvalue::Use(mir::Operand::var(v)));
                 self.set_term(mir::Terminator::Goto(join));
                 self.current = else_blk;
-                let d = self.lower_expr(default)?;
-                self.emit(r.clone(), mir::Rvalue::Use(d));
+                self.emit(r.clone(), mir::Rvalue::Use(default_op));
                 self.set_term(mir::Terminator::Goto(join));
                 self.current = join;
                 Ok(Some(mir::Operand::var(r)))

@@ -749,3 +749,32 @@ fn main() {
         assert_eq!(lines, vec!["12", "21", "-3"]);
     }
 }
+
+/// `unwrap_or_default`, `Result::ok` and `Option::ok_or_else` on named values.
+#[test]
+fn option_result_combinators_run() {
+    let src = r#"
+fn find(ok: bool) -> Result<i64, i64> {
+    if ok { Ok(5) } else { Err(2) }
+}
+
+fn main() {
+    let a: Option<i64> = None;
+    let b: Option<i64> = Some(9);
+    print_i64(a.unwrap_or_default());
+    print_i64(b.unwrap_or_default());
+    let r: Option<i64> = find(false).ok();
+    print_i64(r.unwrap_or(-1));
+    let s: Option<i64> = find(true).ok();
+    print_i64(s.unwrap_or(-1));
+    let e: Result<i64, i64> = b.ok_or_else(|| 4i64);
+    print_i64(e.unwrap_or(-2));
+    let f: Result<i64, i64> = a.ok_or_else(|| 4i64);
+    print_i64(f.unwrap_or(-2));
+}
+"#;
+    if let Some(out) = check_and_run("option_combinators", src) {
+        let lines: Vec<&str> = out.lines().filter(|l| !l.is_empty()).collect();
+        assert_eq!(lines, vec!["0", "9", "-1", "5", "9", "-2"]);
+    }
+}
