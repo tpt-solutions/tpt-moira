@@ -3247,14 +3247,18 @@ impl TypeChecker {
                 if args.is_empty() && method.node == "clone" {
                     return self.strip_refs(&recv_ty);
                 }
+                // A method on an unknown receiver is unknown too (the absorbing type).
+                if matches!(self.strip_refs(&recv_ty), Ty::Unknown) {
+                    return Ty::Unknown;
+                }
+                // A receiver with no name to report (a generic bound by a std trait such as
+                // `Read`) is not checked here: its methods are unknown.
+                let Some(type_name) = self.type_name(&recv_ty) else {
+                    return Ty::Unknown;
+                };
                 self.err(
                     span,
-                    format!(
-                        "no method `{}` on type `{}`",
-                        method.node,
-                        self.type_name(&recv_ty)
-                            .unwrap_or_else(|| "<unknown>".to_string())
-                    ),
+                    format!("no method `{}` on type `{}`", method.node, type_name),
                 );
                 return Ty::Unknown;
             }
@@ -4258,9 +4262,25 @@ impl TypeChecker {
             .insert(("String".into(), "as_str".into()), sig(vec![], Str));
         self.methods
             .insert(("String".into(), "is_empty".into()), sig(vec![], Bool));
+        // `as_bytes` is a borrowed slice of the bytes (`&[u8]`, length 0 in the type).
         self.methods.insert(
             ("str".into(), "as_bytes".into()),
-            sig(vec![], Apply("Vec".into(), vec![U8])),
+            sig(vec![], Ref(Box::new(Array(Box::new(U8), 0)))),
+        );
+        self.methods.insert(
+            ("Formatter".into(), "write_str".into()),
+            sig(vec![Ref(Box::new(Str))], Unknown),
+        );
+        self.methods.insert(
+            ("AtomicUsize".into(), "fetch_add".into()),
+            sig(vec![Usize, Unknown], Usize),
+        );
+        // The memory ordering of atomic operations: a value the runtime does not model.
+        self.assoc_consts
+            .insert(("Ordering".into(), "SeqCst".into()), Unknown);
+        self.assoc_fns.insert(
+            ("mem".into(), "replace".into()),
+            sig(vec![RefMut(Box::new(Unknown)), Unknown], Unknown),
         );
         self.methods.insert(
             ("str".into(), "chars".into()),

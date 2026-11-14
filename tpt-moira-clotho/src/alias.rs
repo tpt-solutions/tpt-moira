@@ -133,7 +133,7 @@ impl AliasTable {
         }
         let (params, body) = self.defs.get(&path.segments[0].node)?;
         let subst: HashMap<&str, &Type> =
-            params.iter().map(String::as_str).zip(args.iter()).collect();
+            params.iter().map(|p| p.as_str()).zip(args.iter()).collect();
         let substituted = substitute(body, &subst);
         Some(self.expand_depth(&substituted, depth + 1))
     }
