@@ -855,6 +855,11 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
             which the checker rejects as `..base` and reports as a missing field for every
             field (about 30 errors); it now uses `default()` and assigns the one field.
             Lachesis checker: 118 -> 89. Clotho's check still passes.
+            **Diverging match arms in blocks (2026-11-14).** An arm `=> { return x; }` produced
+            a placeholder `0` for the match's result, which C rejects where the result is a
+            struct (`ExprKind`). `arm_diverges` now looks through a block's tail or last
+            statement, as the direct `return`/`break`/`continue` check already did. Test:
+            `match_arm_block_that_returns_yields_no_value_runs`. Own C: clotho 399 -> 380.
  each crate uses the std
             surface and the typed-temporary lowering broadly, and each new feature also adds
             its own source to the probe. The route that worked for the four checker-side

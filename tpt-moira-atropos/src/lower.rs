@@ -664,6 +664,25 @@ fn is_scalar_c_type(t: &str) -> bool {
 }
 
 /// Whether a closure argument takes an `(index, item)` pair as its one parameter.
+/// Whether an arm body never yields a value: it returns, breaks or continues, directly or as
+/// the last statement of a block (`{ return f(x); }`).
+fn arm_diverges(e: &Expr) -> bool {
+    match &e.kind {
+        ExprKind::Return(_) | ExprKind::Break | ExprKind::Continue => true,
+        ExprKind::Block(b) => match &b.tail {
+            Some(t) => arm_diverges(t),
+            None => match b.stmts.last() {
+                Some(st) => match &st.kind {
+                    ast::StmtKind::Semi(x) | ast::StmtKind::Expr(x) => arm_diverges(x),
+                    _ => false,
+                },
+                None => false,
+            },
+        },
+        _ => false,
+    }
+}
+
 fn closure_takes_pair(arg: &Expr) -> bool {
     match &arg.kind {
         ExprKind::Closure { params, .. } => {
@@ -10408,10 +10427,7 @@ impl Lower {
             let v = self.lower_expr(body)?;
             // A diverging arm (`=> return x`, `break`, `continue`) produces no value: its
             // block is unreachable, and assigning the placeholder would mistype it in C.
-            if !matches!(
-                body.kind,
-                ExprKind::Return(_) | ExprKind::Break | ExprKind::Continue
-            ) {
+            if !arm_diverges(body) {
                 self.emit(result.clone(), mir::Rvalue::Use(v));
             }
             self.set_term(mir::Terminator::Goto(merge));

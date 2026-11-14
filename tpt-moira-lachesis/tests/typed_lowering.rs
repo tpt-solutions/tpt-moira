@@ -1116,3 +1116,30 @@ fn main() {
         assert_eq!(lines, vec!["5", "8", "2", "-1"]);
     }
 }
+
+/// A match arm that returns from inside a block (`=> { return x; }`) yields no value, so
+/// the match's result is only the other arms' values.
+#[test]
+fn match_arm_block_that_returns_yields_no_value_runs() {
+    let src = r#"
+fn pick(n: i64) -> i64 {
+    let v = match n {
+        0 => {
+            return 100;
+        }
+        1 => 10,
+        _ => 20,
+    };
+    v + 1
+}
+fn main() {
+    print_i64(pick(0));
+    print_i64(pick(1));
+    print_i64(pick(2));
+}
+"#;
+    if let Some(out) = check_and_run("arm_block_return", src) {
+        let lines: Vec<&str> = out.lines().filter(|l| !l.is_empty()).collect();
+        assert_eq!(lines, vec!["100", "11", "21"]);
+    }
+}
