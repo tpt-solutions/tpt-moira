@@ -13,6 +13,7 @@ pub mod codegen_c;
 pub mod codegen_native;
 pub mod lower;
 pub mod mir;
+pub mod retype;
 pub mod ssa;
 
 pub use bundle::lower_bundle;
