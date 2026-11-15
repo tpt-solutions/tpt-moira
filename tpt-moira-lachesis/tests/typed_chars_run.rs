@@ -22,6 +22,8 @@ fn run(name: &str, src: &str) -> Option<String> {
     std::fs::write(&c_path, &c).expect("write C");
     let build = Command::new(cc)
         .arg("-w")
+        .arg("-Werror=incompatible-pointer-types")
+        .arg("-Werror=int-conversion")
         .arg(&c_path)
         .arg("-o")
         .arg(&exe_path)

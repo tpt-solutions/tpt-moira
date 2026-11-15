@@ -27,6 +27,8 @@ fn compile_ok(name: &str, src: &str) {
     std::fs::write(&path, &c).expect("write C");
     let out = Command::new(cc)
         .arg("-w")
+        .arg("-Werror=incompatible-pointer-types")
+        .arg("-Werror=int-conversion")
         .arg("-fsyntax-only")
         .arg(&path)
         .output()

@@ -788,6 +788,11 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
             "abc" (the C had a `char**` from `char*`; the build's warnings were suppressed). The
             `as_deref` view is shared (`Ref`), not mutable. Probe: clotho 29 → 27, atropos 145 → 136,
             lachesis 106 → 105.
+          - Status (2026-11-15, codegen round 16): the C checks no longer hide miscompiles. The
+            codegen test harness and the run tests compile with `-Werror=incompatible-pointer-types`
+            and `-Werror=int-conversion` (the `-w` flag does not suppress promoted warnings), and so
+            does the probe. The suite and probe found nothing new: a pointer or integer mismatch in
+            the emitted C now fails the test instead of running with a wrong value.
           - Status (2026-11-15, codegen round 10): `append` on a vector field is a draining
             `extend` (the argument is `other` or `&mut other`; the source length is cleared), and
             `remove(&k)` on a map (a new `remove` helper returning `Option<V>`; the last entry fills

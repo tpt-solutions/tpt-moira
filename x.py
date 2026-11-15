@@ -317,7 +317,7 @@ def probe_crate(moira: Path, crate: dict) -> ProbeResult:
     c_file = BUILD_DIR / f"{safe}.c"
     cc = next((c for c in ("gcc", "clang", "cc") if shutil.which(c)), None)
     if result.codegen_ok and cc and c_file.exists():
-        res_cc = run([cc, "-w", "-fsyntax-only", str(c_file)])
+        res_cc = run([cc, "-w", "-Werror=incompatible-pointer-types", "-Werror=int-conversion", "-fsyntax-only", str(c_file)])
         if res_cc.returncode != 0:
             err = (res_cc.stderr or res_cc.stdout).strip().splitlines()
             errors = [l for l in err if "error:" in l]

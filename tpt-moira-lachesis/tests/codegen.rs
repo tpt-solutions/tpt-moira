@@ -208,8 +208,12 @@ fn run_src(src: &str) -> Option<String> {
             .status()
             .ok()
     } else {
+        // A pointer or integer mismatch in the emitted C is a miscompile that still runs (the
+        // value is wrong), so those warnings are errors here.
         Command::new(&cc)
             .arg("-O2")
+            .arg("-Werror=incompatible-pointer-types")
+            .arg("-Werror=int-conversion")
             .arg(&c_path)
             .arg("-o")
             .arg(&exe_path)

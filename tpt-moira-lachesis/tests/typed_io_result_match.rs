@@ -35,6 +35,8 @@ fn io_result_and_bare_none_arm_emit_compilable_c() {
     std::fs::write(&path, &c).expect("write C");
     let out = Command::new(cc)
         .arg("-w")
+        .arg("-Werror=incompatible-pointer-types")
+        .arg("-Werror=int-conversion")
         .arg("-fsyntax-only")
         .arg(&path)
         .output()
