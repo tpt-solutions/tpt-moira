@@ -73,6 +73,10 @@ char* moira_str_to_owned(char* s) { return moira_str_dup(s); }
 char* moira_str_trim_start(char* s) { while (*s && isspace((unsigned char)*s)) s++; return moira_str_dup(s); }
 char* moira_str_trim_end(char* s) { size_t n = strlen(s); while (n > 0 && isspace((unsigned char)s[n - 1])) n--; return moira_str_dup_n(s, n); }
 char* moira_str_trim(char* s) { return moira_str_trim_end(moira_str_trim_start(s)); }
+char* moira_str_trim_end_matches_char(char* s, long long c) { size_t n = strlen(s); while (n > 0 && (long long)(unsigned char)s[n - 1] == c) n--; return moira_str_dup_n(s, n); }
+char* moira_str_trim_start_matches_char(char* s, long long c) { while (*s && (long long)(unsigned char)*s == c) s++; return moira_str_dup(s); }
+char* moira_str_trim_end_matches_str(char* s, char* p) { size_t m = strlen(p), n = strlen(s); if (m == 0) return moira_str_dup(s); while (n >= m && strncmp(s + n - m, p, m) == 0) n -= m; return moira_str_dup_n(s, n); }
+char* moira_str_trim_start_matches_str(char* s, char* p) { size_t m = strlen(p); if (m == 0) return moira_str_dup(s); while (strncmp(s, p, m) == 0) s += m; return moira_str_dup(s); }
 long long moira_str_len(char* s) { return (long long)strlen(s); }
 long long moira_str_is_empty(char* s) { return s[0] == 0; }
 long long moira_str_starts_with(char* s, char* p) { return strncmp(s, p, strlen(p)) == 0; }

@@ -7194,6 +7194,8 @@ impl Lower {
             "trim",
             "trim_start",
             "trim_end",
+            "trim_start_matches",
+            "trim_end_matches",
             "starts_with",
             "ends_with",
             "contains",
@@ -7254,6 +7256,21 @@ impl Lower {
         }
         // `s.push_str(t)` / `s.push(c)` grow the string's heap buffer in place: the
         // runtime takes the string's address (a `char**`).
+        // `s.trim_end_matches(p)` / `trim_start_matches(p)`: a char or a string pattern.
+        if matches!(method, "trim_end_matches" | "trim_start_matches") && args.len() == 1 {
+            let s = self.lower_expr(recv)?;
+            let (helper, pat) = if let ExprKind::Lit(ast::Lit::Char(_)) = &args[0].kind {
+                (format!("moira_str_{method}_char"), self.lower_expr(&args[0])?)
+            } else {
+                (format!("moira_str_{method}_str"), self.pattern_string(&args[0])?)
+            };
+            let t = self.fresh_temp("char*");
+            self.emit(
+                t.clone(),
+                mir::Rvalue::Call(mir::Operand::Func(helper), vec![s, pat]),
+            );
+            return Ok(Some(mir::Operand::var(t)));
+        }
         if method == "replacen" && args.len() == 3 {
             let s = self.lower_expr(recv)?;
             let from = self.pattern_string(&args[0])?;

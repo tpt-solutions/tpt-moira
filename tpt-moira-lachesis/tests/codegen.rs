@@ -1659,3 +1659,22 @@ fn unannotated_hashset_takes_its_element_type_from_insert() {
     };
     assert_eq!(out, "3");
 }
+
+#[test]
+fn trim_matches_with_char_and_string_patterns_run() {
+    let out = match run_src(
+        "fn main() {
+            let s = String::from(\"ab__\");
+            let t = s.trim_end_matches('_');
+            let u = String::from(\"xxab\").trim_start_matches(\"x\");
+            print_i64((t.len() * 10 + u.len()) as i64);
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping trim_matches run");
+            return;
+        }
+    };
+    assert_eq!(out, "22");
+}
