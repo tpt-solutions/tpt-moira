@@ -120,6 +120,8 @@ impl TraitDb {
                     || matches!(ty, Ty::Bool | Ty::Char | Ty::Str)
                     || matches!(ty, Ty::Array(e, _) if TraitDb::implements(BuiltinTrait::Eq, e))
                     || matches!(ty, Ty::Apply(n, a) if n == "Vec" && a.len() == 1 && TraitDb::implements(BuiltinTrait::Eq, &a[0]))
+                    || matches!(ty, Ty::Apply(n, a) if crate::solver::is_collection_name(n) && a.iter().all(|t| TraitDb::implements(BuiltinTrait::Eq, t)))
+                    || matches!(ty, Ty::Tuple(es) if es.iter().all(|t| TraitDb::implements(BuiltinTrait::Eq, t)))
             }
             BuiltinTrait::Ord => numeric || matches!(ty, Ty::Bool | Ty::Char),
         }

@@ -3667,7 +3667,20 @@ impl TypeChecker {
         // Receiver check (auto-ref: `x.foo()` where `foo(&self)`).
         if !sig.params.is_empty() {
             let recv_param = &sig.params[0];
+            // A `Copy` receiver is used by value through a reference (`x.f()` for `x: &T`, `f(self)`).
+            // (Only scalars and user types: `Copy`-ness of user types is not tracked, so this is
+            // looser than Rust for a non-`Copy` type.)
+            let by_value_through_ref = match recv_ty {
+                Ty::Ref(inner) | Ty::RefMut(inner)
+                    if inner.is_numeric()
+                        || matches!(**inner, Ty::Bool | Ty::Char | Ty::Struct(_)) =>
+                {
+                    self.compatible(inner, recv_param)
+                }
+                _ => false,
+            };
             let recv_ok = self.compatible(recv_ty, recv_param)
+                || by_value_through_ref
                 || self.compatible(&Ty::Ref(Box::new(recv_ty.clone())), recv_param)
                 || self.compatible(&Ty::RefMut(Box::new(recv_ty.clone())), recv_param);
             if !recv_ok {
@@ -5024,6 +5037,16 @@ impl TypeChecker {
     /// Concrete types are checked against the built-in trait database; a generic
     /// parameter `T` satisfies the operator only when it carries the
     /// corresponding bound (`T: Add`) in its enclosing function's generics.
+    /// Whether `ty` implements the operator trait `tr`, judged without reporting errors (the
+    /// caller reports for the enclosing type).
+    fn op_holds_quietly(&mut self, ty: &Ty, tr: BuiltinTrait, span: Span) -> bool {
+        let before = self.errors.len();
+        self.implements_op(ty, tr, span);
+        let ok = self.errors.len() == before;
+        self.errors.truncate(before);
+        ok
+    }
+
     fn implements_op(&mut self, ty: &Ty, tr: BuiltinTrait, span: Span) {
         // `&A` implements an operator trait when `A` does (`&str == &str`).
         if let Ty::Ref(inner) | Ty::RefMut(inner) = ty {
@@ -5073,6 +5096,14 @@ impl TypeChecker {
                     other => &[other.name()],
                 };
                 names.iter().any(|nm| self.generic_has_bound(n, nm))
+            }
+            // Tuples and collections are equatable when their elements are (checked element by
+            // element, so a user element type is judged by its impls).
+            Ty::Tuple(elems) => elems.iter().all(|e| self.op_holds_quietly(e, tr, span)),
+            Ty::Apply(n, elems)
+                if crate::solver::is_collection_name(n) =>
+            {
+                elems.iter().all(|e| self.op_holds_quietly(e, tr, span))
             }
             _ => std_lenient || solver_ok || TraitDb::implements(tr, ty),
         };

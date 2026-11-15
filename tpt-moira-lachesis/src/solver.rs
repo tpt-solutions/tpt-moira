@@ -300,6 +300,11 @@ impl Solver {
     }
 }
 
+/// The std collections whose equality is element-wise (sets and maps compare their entries).
+pub fn is_collection_name(n: &str) -> bool {
+    matches!(n, "HashSet" | "BTreeSet" | "HashMap" | "BTreeMap")
+}
+
 /// The same rule `TraitDb::implements` uses, expressed over [`TraitId`], so the
 /// built-in program is a drop-in mirror of the existing checks.
 pub fn implements_rule(t: TraitId, ty: &Ty) -> bool {
@@ -315,6 +320,8 @@ pub fn implements_rule(t: TraitId, ty: &Ty) -> bool {
                 || matches!(ty, Ty::Bool | Ty::Char | Ty::Str)
                 || matches!(ty, Ty::Array(e, _) if implements_rule(TraitId::Eq, e))
                 || matches!(ty, Ty::Apply(n, a) if n == "Vec" && a.len() == 1 && implements_rule(TraitId::Eq, &a[0]))
+                || matches!(ty, Ty::Apply(n, a) if is_collection_name(n) && a.iter().all(|t| implements_rule(TraitId::Eq, t)))
+                || matches!(ty, Ty::Tuple(es) if es.iter().all(|t| implements_rule(TraitId::Eq, t)))
         }
         TraitId::Ord => numeric || matches!(ty, Ty::Bool | Ty::Char),
         // User-defined traits are not producible by this rule; the solver uses
