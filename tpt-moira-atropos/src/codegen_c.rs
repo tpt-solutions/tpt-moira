@@ -112,6 +112,14 @@ long long moira_char_to_digit(long long c, long long radix) { long long v = (c >
 long long moira_char_from_u32_valid(long long c) { return (c >= 0 && c <= 0x10FFFF && !(c >= 0xD800 && c <= 0xDFFF)); }
 char* moira_str_before(char* s, long long n) { return moira_str_dup_n(s, (size_t)n); }
 long long moira_line_next(char* s, long long i) { char* q = strchr(s + i, '\n'); return q ? (long long)(q - s) + 1 : (long long)strlen(s); }
+#include <errno.h>
+#include <ctype.h>
+long long moira_parse_s(char* s, long long d, int has_default, int bits) { char* e; errno = 0; if (*s == 0 || isspace((unsigned char)*s)) goto bad; long long v = strtoll(s, &e, 10); long long lim = bits < 64 ? (1LL << (bits - 1)) : 0; if (*e == 0 && errno == 0 && (bits == 64 || (v >= -lim && v < lim))) return v; bad: if (has_default) return d; __moira_panic(); return 0; }
+unsigned long long moira_parse_u(char* s, unsigned long long d, int has_default, int bits) { char* e; errno = 0; if (*s == 0 || isspace((unsigned char)*s) || *s == '-') goto bad; unsigned long long v = strtoull(s, &e, 10); unsigned long long mx = bits < 64 ? ((1ULL << bits) - 1) : 0ULL; if (*e == 0 && errno == 0 && (bits == 64 || v <= mx)) return v; bad: if (has_default) return d; __moira_panic(); return 0; }
+double moira_parse_f(char* s, double d, int has_default) { char* e; errno = 0; if (*s == 0 || isspace((unsigned char)*s)) goto bad; double v = strtod(s, &e); if (*e == 0 && errno == 0) return v; bad: if (has_default) return d; __moira_panic(); return 0; }
+long long moira_split_find(char* s, long long from, char* pat) { long long n = (long long)strlen(s), m = (long long)strlen(pat); for (long long i = from; i + m <= n; i++) if (memcmp(s + i, pat, (size_t)m) == 0) return i; return -1; }
+long long moira_split_end(char* s, long long from, char* pat) { long long i = moira_split_find(s, from, pat); return i < 0 ? (long long)strlen(s) : i; }
+long long moira_split_next(char* s, long long from, char* pat) { long long i = moira_split_find(s, from, pat); return i < 0 ? (long long)strlen(s) + 1 : i + (long long)strlen(pat); }
 char* moira_line_text(char* s, long long i, long long next) { long long n = next - i; if (n > 0 && s[i + n - 1] == '\n') n--; if (n > 0 && s[i + n - 1] == '\r') n--; return moira_str_dup_n(s + i, (size_t)n); }
 long long moira_fs_write(char* path, char* data) { FILE* f = fopen(path, "wb"); if (!f) return 0; size_t n = strlen(data); size_t w = fwrite(data, 1, n, f); fclose(f); return w == n; }
 char* moira_fs_read_to_string(char* path) { FILE* f = fopen(path, "rb"); if (!f) return NULL; fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET); char* b = (char*)malloc((size_t)sz + 1); size_t r = fread(b, 1, (size_t)sz, f); b[r] = 0; fclose(f); return b; }
@@ -189,15 +197,17 @@ fn c_name(name: &str) -> Option<String> {
 /// is left as it is.
 fn escape_c_names(prog: &mir::MirProgram) -> mir::MirProgram {
     let mut prog = prog.clone();
+    let defined: std::collections::HashSet<String> =
+        prog.functions.iter().map(|f| f.name.clone()).collect();
     for f in prog.functions.iter_mut() {
-        escape_function(f);
+        escape_function(f, &defined);
     }
     prog
 }
 
 // Index loops, not `iter_mut()`: the Stage-1 subset lowers `for` only over ranges and arrays.
 #[allow(clippy::needless_range_loop)]
-fn escape_function(f: &mut mir::MirFunction) {
+fn escape_function(f: &mut mir::MirFunction, defined: &std::collections::HashSet<String>) {
     if let Some(c) = c_name(&f.name) {
         f.name = c;
     }
@@ -218,12 +228,12 @@ fn escape_function(f: &mut mir::MirFunction) {
     for bi in 0..f.blocks.len() {
         for si in 0..f.blocks[bi].stmts.len() {
             escape_name(&mut f.blocks[bi].stmts[si].place);
-            escape_rvalue(&mut f.blocks[bi].stmts[si].rvalue);
+            escape_rvalue(&mut f.blocks[bi].stmts[si].rvalue, defined);
         }
         let b = &mut f.blocks[bi];
         match &mut b.term {
-            mir::Terminator::If(op, _, _) | mir::Terminator::Switch(op, _, _) => escape_op(op),
-            mir::Terminator::Return(Some(op)) => escape_op(op),
+            mir::Terminator::If(op, _, _) | mir::Terminator::Switch(op, _, _) => escape_op(op, defined),
+            mir::Terminator::Return(Some(op)) => escape_op(op, defined),
             _ => {}
         }
     }
@@ -235,50 +245,53 @@ fn escape_name(n: &mut String) {
     }
 }
 
-fn escape_op(op: &mut mir::Operand) {
+/// A variable is always renamed; a call target only when the program defines that
+/// function. A library call the lowering emits (`strlen`, `exit`) keeps its C name.
+fn escape_op(op: &mut mir::Operand, defined: &std::collections::HashSet<String>) {
     match op {
-        mir::Operand::Var(n) | mir::Operand::Func(n) => escape_name(n),
+        mir::Operand::Var(n) => escape_name(n),
+        mir::Operand::Func(n) if defined.contains(n.as_str()) => escape_name(n),
         _ => {}
     }
 }
 
 // Index loops, not `iter_mut()`: the Stage-1 subset lowers `for` only over ranges and arrays.
 #[allow(clippy::needless_range_loop)]
-fn escape_rvalue(rv: &mut mir::Rvalue) {
+fn escape_rvalue(rv: &mut mir::Rvalue, defined: &std::collections::HashSet<String>) {
     match rv {
         mir::Rvalue::Use(a)
         | mir::Rvalue::Unary(_, a)
         | mir::Rvalue::Field(a, _, _)
         | mir::Rvalue::FieldAddr(a, _, _)
         | mir::Rvalue::Ref(a, _)
-        | mir::Rvalue::Cast(a, _) => escape_op(a),
+        | mir::Rvalue::Cast(a, _) => escape_op(a, defined),
         mir::Rvalue::Binary(_, a, b) | mir::Rvalue::Index(a, b) | mir::Rvalue::IndexRef(a, b) => {
-            escape_op(a);
-            escape_op(b);
+            escape_op(a, defined);
+            escape_op(b, defined);
         }
         mir::Rvalue::Call(c, args) => {
-            escape_op(c);
+            escape_op(c, defined);
             for i in 0..args.len() {
-                escape_op(&mut args[i]);
+                escape_op(&mut args[i], defined);
             }
         }
         mir::Rvalue::StructLit(_, fields) => {
             for i in 0..fields.len() {
-                escape_op(&mut fields[i].1);
+                escape_op(&mut fields[i].1, defined);
             }
         }
         mir::Rvalue::StoreIndex(a, b, c) => {
-            escape_op(a);
-            escape_op(b);
-            escape_op(c);
+            escape_op(a, defined);
+            escape_op(b, defined);
+            escape_op(c, defined);
         }
         mir::Rvalue::StoreField(a, _, b, _) => {
-            escape_op(a);
-            escape_op(b);
+            escape_op(a, defined);
+            escape_op(b, defined);
         }
         mir::Rvalue::Array(_, ops) | mir::Rvalue::Tuple(_, ops) => {
             for i in 0..ops.len() {
-                escape_op(&mut ops[i]);
+                escape_op(&mut ops[i], defined);
             }
         }
     }
@@ -792,9 +805,19 @@ fn slice_helpers(elem: &str, struct_names: &std::collections::HashSet<&str>) -> 
     let ec = c_type(elem, struct_names);
     let sub = mir::slice_fn_name(elem, "sub");
     let contains = contains_helper(&name, &ec, &mir::slice_fn_name(elem, "contains")).unwrap_or_default();
+    // A byte slice can view a string's bytes: `from_str(s)` aliases the NUL-terminated text.
+    let from_str = if elem == "u8" {
+        let f = mir::slice_fn_name(elem, "from_str");
+        format!(
+            "static {name} {f}(char* s) {{ {name} r; r.data = (uint8_t*)s; r.len = (long long)strlen(s); return r; }}
+"
+        )
+    } else {
+        String::new()
+    };
     format!(
         "static {name} {sub}({ec}* data, long long len, long long a, long long b) {{ {name} s; s.data = data + a; s.len = b - a; (void)len; return s; }}
-{contains}
+{from_str}{contains}
 "
     )
 }
@@ -888,6 +911,43 @@ fn vec_helpers(elem: &str, struct_names: &std::collections::HashSet<&str>) -> St
         "static {name} {copy_n}({ec}* data, long long n) {{ {name} v = {new}(); for (long long i = 0; i < n; i++) {push}(&v, {elem_copy}); return v; }}
 "
     ));
+    // In-place operations: `reverse` swaps the ends inward, `remove(i)` shifts the tail left
+    // and returns the element (out of range panics, as in Rust), and `append(w)` moves `w`'s
+    // elements to the end of `v`, leaving `w` empty. Each returns a status or the element.
+    let reverse = mir::vec_fn_name(elem, "reverse");
+    let remove = mir::vec_fn_name(elem, "remove");
+    let append = mir::vec_fn_name(elem, "append");
+    s.push_str(&format!(
+        "static long long {reverse}({name}* v) {{ for (long long i = 0, j = v->len - 1; i < j; i++, j--) {{ {ec} t = v->data[i]; v->data[i] = v->data[j]; v->data[j] = t; }} return 0; }}\n"
+    ));
+    s.push_str(&format!(
+        "static {ec} {remove}({name}* v, long long i) {{ if (i < 0 || i >= v->len) __moira_panic(); {ec} x = v->data[i]; memmove(&v->data[i], &v->data[i + 1], (size_t)(v->len - i - 1) * sizeof({ec})); v->len--; return x; }}\n"
+    ));
+    s.push_str(&format!(
+        "static long long {append}({name}* v, {name}* w) {{ for (long long i = 0; i < w->len; i++) {push}(v, w->data[i]); w->len = 0; return 0; }}\n"
+    ));
+    // `clear` empties the vector; `dedup` drops each item equal to the one before it (strings by
+    // content, scalars with `==`). Other element types have no equality, so no `dedup`.
+    let clear = mir::vec_fn_name(elem, "clear");
+    s.push_str(&format!(
+        "static long long {clear}({name}* v) {{ v->len = 0; return 0; }}
+"
+    ));
+    let is_scalar = matches!(
+        ec.as_str(),
+        "long long" | "unsigned long long" | "int" | "unsigned int" | "short" | "unsigned short"
+            | "char" | "unsigned char" | "signed char" | "_Bool" | "bool" | "double" | "float"
+            | "int64_t" | "uint64_t" | "int32_t" | "uint32_t" | "int16_t" | "uint16_t"
+            | "int8_t" | "uint8_t"
+    );
+    if ec == "char*" || is_scalar {
+        let dedup = mir::vec_fn_name(elem, "dedup");
+        let same = if ec == "char*" { "strcmp(v->data[i], v->data[w - 1]) == 0" } else { "v->data[i] == v->data[w - 1]" };
+        s.push_str(&format!(
+            "static long long {dedup}({name}* v) {{ if (v->len == 0) return 0; long long w = 1; for (long long i = 1; i < v->len; i++) if (!({same})) v->data[w++] = v->data[i]; v->len = w; return 0; }}
+"
+        ));
+    }
     // `contains`: strings compare by content, scalars with `==`; other element types have no
     // equality helper yet.
     if let Some(body) = contains_helper(&name, &ec, &mir::vec_fn_name(elem, "contains")) {
