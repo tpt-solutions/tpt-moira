@@ -163,6 +163,17 @@ pub fn monomorphize(prog: &Program, externs: &[(&str, &Program)]) -> Program {
                     mono.ty(&mut f.ty, &empty);
                 }
             }
+            // Payload types of an enum's variants name generic instances like any other type
+            // (a `Spanned<String>` payload is the `Spanned__String` instance).
+            ItemKind::Enum(e) => {
+                for v in &mut e.variants {
+                    if let Some(fields) = &mut v.fields {
+                        for f in fields {
+                            mono.ty(&mut f.ty, &empty);
+                        }
+                    }
+                }
+            }
             ItemKind::Impl(imp) => {
                 mono.rewrite_impl(imp, &empty);
             }
@@ -826,7 +837,7 @@ impl Mono {
                     .unwrap_or_default();
                 if p.segments.len() == 1 && args.is_empty() {
                     if let Some(concrete) = sub.get(&last) {
-                        if let Some(written) = ty_to_ast(concrete, t.span) {
+                        if let Some(written) = ty_to_ast(&concrete, t.span) {
                             *t = written;
                             return;
                         }
@@ -1408,6 +1419,8 @@ fn mangle(t: &Ty) -> Option<String> {
         Ty::Char => "char".to_string(),
         Ty::Str => "str".to_string(),
         Ty::Unit => "unit".to_string(),
+        // `String` and `str` are one type to the checker (and one C type): one instance name.
+        Ty::Struct(n) if n == "String" => "str".to_string(),
         Ty::Struct(n) => n.clone(),
         Ty::Apply(n, args) => {
             let mut parts = vec![n.clone()];
