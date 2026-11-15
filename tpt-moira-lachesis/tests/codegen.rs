@@ -2007,3 +2007,24 @@ fn append_and_map_remove_work_through_struct_fields() {
     assert_eq!(out, "11
 0", "append moves the items and empties the source; remove takes the entry out");
 }
+
+#[test]
+fn vec_literal_passed_by_mut_reference_takes_the_parameter_element_type() {
+    let out = match run_src(
+        "fn take(v: &mut Vec<i64>) -> i64 {
+            v.push(9);
+            v.len() as i64
+        }
+        fn main() {
+            let mut extra = vec![3, 4];
+            print_i64(take(&mut extra));
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping vec literal run");
+            return;
+        }
+    };
+    assert_eq!(out, "3", "an unannotated `vec![..]` takes the element type of the `&mut Vec<T>` parameter");
+}

@@ -1355,8 +1355,13 @@ impl TypeChecker {
                     } else if let Some(init) = &l.init {
                         let it = self.infer_expr(init);
                         if let Pat::Ident(n) = &l.pat {
-                            if matches!(&it, Ty::Apply(v, a) if v == "Vec" && matches!(a.as_slice(), [Ty::Unknown]))
-                            {
+                            // A `Vec::new()` whose element type is open, or a `vec![..]` of
+                            // unsuffixed literals (`Vec<Int>`): a later `&mut` argument fixes it.
+                            let open_vec = matches!(&it, Ty::Apply(v, a) if v == "Vec" && matches!(a.as_slice(), [Ty::Unknown]));
+                            let literal_vec = matches!(&init.kind, ExprKind::Macro(m)
+                                if matches!(m.path.segments.last(), Some(seg) if seg.node == "vec"))
+                                && matches!(&it, Ty::Apply(v, a) if v == "Vec" && matches!(a.as_slice(), [Ty::Int]));
+                            if open_vec || literal_vec {
                                 self.pending_vec.insert(n.node.clone(), init.span);
                             } else {
                                 self.pending_vec.remove(&n.node);
