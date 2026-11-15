@@ -1489,8 +1489,10 @@ impl TypeChecker {
             Pat::Ident(n) => {
                 // A bare unit-variant name (`Unknown =>` after `use Ty::*;`) tests
                 // the variant rather than binding (the codegen does the same).
-                let is_variant = n.node.starts_with(|c: char| c.is_ascii_uppercase())
-                    && self.unit_variant_owners.contains_key(&n.node);
+                // `None` is the prelude's unit variant; it is never a binding.
+                let is_variant = n.node == "None"
+                    || (n.node.starts_with(|c: char| c.is_ascii_uppercase())
+                        && self.unit_variant_owners.contains_key(&n.node));
                 if !is_variant {
                     self.env
                         .last_mut()

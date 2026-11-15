@@ -872,3 +872,22 @@ fn option_as_ref_is_an_option_of_a_reference() {
     ))
     .is_ok());
 }
+
+#[test]
+fn none_pattern_is_the_variant_not_a_binding() {
+    // `None =>` after `Some(x) =>` must test the variant; binding it would make the `None`
+    // expression in the arm refer to the scrutinee.
+    assert!(check(&parse(
+        "fn f(b: &Option<i64>) -> Option<String> {
+            match b {
+                Some(init) => match init {
+                    0 => Some(String::from(\"z\")),
+                    _ => None,
+                },
+                None => None,
+            }
+        }
+        fn main() { let _ = f(&Some(1)); }"
+    ))
+    .is_ok());
+}
