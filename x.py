@@ -298,7 +298,13 @@ def probe_crate(moira: Path, crate: dict) -> ProbeResult:
     if res_c.returncode != 0:
         err = (res_c.stderr or res_c.stdout).strip().splitlines()
         # Lowering names one blocker per function (`in fn ...`); list each of them.
-        blockers = [l.strip() for l in err if "in fn `" in l or "in crate `" in l]
+        # Every skipped construct is one line; the first line also carries the `lowering error` prefix.
+        first = next((i for i, l in enumerate(err) if "lowering error" in l), None)
+        if first is not None:
+            head = re.sub(r"^.*?lowering error: (lowering error: )?", "", err[first]).strip()
+            blockers = [head] + [l.strip() for l in err[first + 1:] if l.strip()]
+        else:
+            blockers = []
         if blockers:
             result.notes.append(f"codegen blocked in {len(blockers)} function(s):")
             result.notes.extend(f"  - {b}" for b in blockers)

@@ -735,6 +735,12 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
             `BTreeSet` (sorted sets need rank order, not the key array); `vec![..]` as a map
             value is passed with the wrong C type (`m.insert(k, vec![..])`, found while writing a
             test). Atropos 89 blocked functions, lachesis 75, clotho 28, driver 9.
+          - Status (2026-11-15, codegen round 4): the probe counts every blocked construct, not
+            only the first per function. Lowering continues after a skipped statement (in blocks
+            and closures) and reports them together. Blocked constructs: atropos 171, lachesis
+            130, clotho 44, driver 22 (366). Top kinds: `new` in untyped positions (40), `contains`
+            (36), `iter` (32), `insert` (15), `append` (15), `remove` (15), `and_then` (12),
+            `as_deref` (11), `to_string` (10), `len` (9), `map` (9), `parse` (8).
           - Status (2026-11-15, codegen round 3): sorted sets (`BTreeSet` is hinted as
             `Sorted<K,bool>`; chains read keys in rank order); `saturating_add/sub/mul` on
             integers. Atropos blocked functions 89 → 88 this round. The remaining atropos

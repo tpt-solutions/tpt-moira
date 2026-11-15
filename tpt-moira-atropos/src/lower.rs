@@ -1351,6 +1351,10 @@ struct Lower {
     /// Lowering for the borrow checker (see `lower_program_for_borrow_check`): an unknown callee
     /// is emitted as before instead of being an error.
     lenient_calls: bool,
+    /// Errors of statements that were skipped (lowering continues with the next statement, so a
+    /// function reports every construct the codegen subset does not support). Reported when the
+    /// function is done.
+    deferred: Vec<String>,
     /// The C element type of each `let`-bound array literal (an enum for an array of
     /// variants, else `long long`), so a `for` over it binds elements of that type.
     array_elems: HashMap<String, String>,
@@ -1711,6 +1715,7 @@ impl Lower {
             loops: Vec::new(),
             array_lens: HashMap::new(),
             lenient_calls: false,
+            deferred: Vec::new(),
             array_elems: HashMap::new(),
             const_values: HashMap::new(),
             variants: HashMap::new(),
@@ -1779,6 +1784,10 @@ impl Lower {
         // `tN`). Without this the map stays empty and temporaries are neither
         // typed nor declared in the C output.
         self.func.temp_types = self.types.clone();
+        if !self.deferred.is_empty() {
+            return Err(LowerError(self.deferred.join("
+")));
+        }
         Ok(self.func.clone())
     }
 
@@ -2062,10 +2071,14 @@ impl Lower {
         let saved = self.var_renames.clone();
         let mut result = Ok(());
         for s in &b.stmts {
-            result = self.lower_stmt(s);
-            if result.is_err() {
-                break;
+            if let Err(e) = self.lower_stmt(s) {
+                self.deferred.push(e.0);
             }
+        }
+        if !self.deferred.is_empty() {
+            // The skipped statements are reported with the function; the block's value is not
+            // used then.
+            result = Ok(());
         }
         let value = match result {
             Err(e) => Err(e),
@@ -2209,6 +2222,8 @@ impl Lower {
             ExprKind::Block(b) => sub.lower_block_value(b)?,
             _ => sub.lower_expr(body)?,
         };
+        // The closure's skipped statements are reported with the enclosing function.
+        self.deferred.append(&mut sub.deferred);
         if let mir::Terminator::Unreachable = sub.func.blocks[sub.current].term {
             let ret = if sub.func.ret.is_some() {
                 Some(value)
