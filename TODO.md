@@ -729,6 +729,15 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
             known cases were renamed (MIR types, `rename_rvalue_map`), others (for example
             `new`/`fmt`/`main` across modules) are not yet a checker error only because the
             uses resolve to the right one.
+          - Status (2026-11-15, codegen round 1): blocked functions atropos 116 → 89, lachesis
+            78 → 75, clotho 30 → 29 (driver 9). Done: tuple structs (`Pair(3, 4)`, `p.0` through
+            a pointer); unannotated `HashSet`/`HashMap` take their types from a later `insert`;
+            `trim_end_matches`/`trim_start_matches` (char and string patterns); read-only vector
+            methods (`len`, `is_empty`, `contains`) on any receiver, not only locals. Largest
+            remaining groups (probe, 201 entries): `new` calls in untyped positions (31),
+            `contains` on receivers the checker does not type as a vector (19), `iter` chains
+            (`x.iter().map(..).collect()`, 19), map methods on fields (`insert`, `remove`,
+            `get_mut`, `entry`), `as_deref` on options (7), `to_string` on values (6).
           - Status (2026-11-15, checker round 7): lachesis passes the checker; atropos 7
             checker errors (was 19). Done: `Option::as_ref` is `Option<&T>` (this was the
             "reference to local escapes" report, now gone); atropos' MIR types renamed to
