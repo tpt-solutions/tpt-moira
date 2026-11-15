@@ -470,7 +470,9 @@ fn lower_program_impl(
                         // `write!`) is not emitted; the inherent methods must lower.
                         Err(_) if !imp.trait_name.node.is_empty() => continue,
                         Err(e) => {
-                            errors.push(in_fn(&g.name.node, e).0);
+                            if !lenient {
+                                errors.push(in_fn(&g.name.node, e).0);
+                            }
                             continue;
                         }
                     };
@@ -499,7 +501,9 @@ fn lower_program_impl(
                     let ad = match l.lower_async_function(f) {
                         Ok(ad) => ad,
                         Err(e) => {
-                            errors.push(in_fn(&f.name.node, e).0);
+                            if !lenient {
+                                errors.push(in_fn(&f.name.node, e).0);
+                            }
                             continue;
                         }
                     };
@@ -530,7 +534,9 @@ fn lower_program_impl(
                     let func = match l.lower_function(f) {
                         Ok(func) => func,
                         Err(e) => {
-                            errors.push(in_fn(&f.name.node, e).0);
+                            if !lenient {
+                                errors.push(in_fn(&f.name.node, e).0);
+                            }
                             continue;
                         }
                     };

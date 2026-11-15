@@ -2567,7 +2567,27 @@ impl TypeChecker {
                 return Ty::Unknown;
             }
         };
-        let segments: Vec<String> = path.segments.iter().map(|s| s.node.clone()).collect();
+        let mut segments: Vec<String> = path.segments.iter().map(|s| s.node.clone()).collect();
+        // `Alias::f(..)` for a type alias: the associated function is the aliased type's.
+        if segments.len() == 2 && !self.aliases.is_empty() {
+            let head = tpt_moira_clotho::ast::Type {
+                kind: TypeKind::Path(
+                    tpt_moira_clotho::ast::Path {
+                        segments: vec![tpt_moira_clotho::ast::Spanned::new(
+                            segments[0].clone(),
+                            span,
+                        )],
+                    },
+                    Vec::new(),
+                ),
+                span,
+            };
+            if let TypeKind::Path(p, _) = &self.aliases.expand(&head).kind {
+                if let Some(last) = p.segments.last() {
+                    segments[0] = last.node.clone();
+                }
+            }
+        }
         let name = segments.last().cloned().unwrap_or_default();
         // `std::mem::take(&mut place)` moves the place's current value out and leaves a
         // default behind, so it has the place's type.
@@ -4893,6 +4913,21 @@ impl TypeChecker {
                 .or_insert_with(|| sig(params.clone(), ret.clone()));
         }
 
+        // Hashing and buffered IO constructors (their results are not modeled beyond `Unknown`).
+        self.assoc_fns
+            .entry(("DefaultHasher".into(), "new".into()))
+            .or_insert_with(|| sig(vec![], Unknown));
+        self.assoc_fns
+            .entry(("BufReader".into(), "new".into()))
+            .or_insert_with(|| sig(vec![Unknown], Unknown));
+        self.assoc_fns
+            .entry(("File".into(), "create".into()))
+            .or_insert_with(|| sig(vec![Unknown], Unknown));
+        for name in ["usize", "u64", "u32", "u8", "i64"] {
+            self.methods
+                .entry((name.to_string(), "hash".to_string()))
+                .or_insert_with(|| sig(vec![Unknown], Unit));
+        }
         // Further std methods the lachesis sources use. A result whose type needs an iterator or
         // a generic is `Unknown`, which the checker absorbs.
         for (name, ity) in [
