@@ -8936,6 +8936,39 @@ impl Lower {
         self.hints.get(&(e.span.start, e.span.end)).cloned()
     }
 
+    /// `is_hashmap_ctor`, also for a type alias of a map (`TypeHints::new()` with
+    /// `type TypeHints = HashMap<..>`).
+    fn hashmap_ctor(&self, e: &Expr) -> bool {
+        if is_hashmap_ctor(e) {
+            return true;
+        }
+        let ExprKind::Call(callee, _) = &e.kind else {
+            return false;
+        };
+        let ExprKind::Path(p) = &callee.kind else {
+            return false;
+        };
+        if p.segments.len() != 2 || p.segments[1].node != "new" {
+            return false;
+        }
+        let head = ast::Type {
+            kind: TypeKind::Path(
+                ast::Path {
+                    segments: vec![p.segments[0].clone()],
+                },
+                Vec::new(),
+            ),
+            span: e.span,
+        };
+        match &self.aliases.expand(&head).kind {
+            TypeKind::Path(hp, _) => matches!(
+                hp.segments.last().map(|s| s.node.as_str()),
+                Some("HashMap" | "HashSet" | "BTreeMap" | "BTreeSet")
+            ),
+            _ => false,
+        }
+    }
+
     fn lower_expr_inner(&mut self, e: &Expr) -> Result<mir::Operand> {
         let outer_hint = self.hint_of_expr(e);
         match &e.kind {
@@ -9354,7 +9387,7 @@ impl Lower {
                 }
                 // `HashMap::new()` in an expression position (`Some(HashMap::new())`): the
                 // checker's hint names the map's key and value types.
-                if is_hashmap_ctor(e) {
+                if self.hashmap_ctor(e) {
                     // The checker types the constructor without its arguments (`HashMap`); the
                     // type the context expects (a struct field) then gives them.
                     let want = match self.hint_of_expr(e) {

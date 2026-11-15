@@ -1809,3 +1809,27 @@ fn saturating_integer_methods_run() {
     };
     assert_eq!(out, "-394", "signed saturation goes negative; unsigned `saturating_sub` stops at 0");
 }
+
+#[test]
+fn map_constructed_through_a_type_alias_runs() {
+    let out = match run_src(
+        "use std::collections::HashMap;
+        type Table = HashMap<i64, i64>;
+        fn build() -> Table {
+            let mut t: Table = Table::new();
+            t.insert(1, 5);
+            t
+        }
+        fn main() {
+            let t = build();
+            print_i64(t.len() as i64 * 10 + *t.get(&1).unwrap());
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping alias map run");
+            return;
+        }
+    };
+    assert_eq!(out, "15");
+}
