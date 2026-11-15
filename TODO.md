@@ -719,6 +719,17 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
             lowering agrees. Open items: `thread::scope`, `Command` output types, a
             `TypeHints::new()` alias path, `str::to_string` as a function value, and a name
             clash between a clotho `Stmt` and a `clotho_Stmt` type in the checker.
+          - Status (2026-11-15, checker round 7): lachesis passes the checker; atropos 7
+            checker errors (was 19). Done: `Option::as_ref` is `Option<&T>` (this was the
+            "reference to local escapes" report, now gone); atropos' MIR types renamed to
+            `Mir*` (`MirStmt`, `MirFunction`, `MirBlock`, `MirStructDef`, `MirBinOp`,
+            `MirUnOp`): the checker keys types by bare name, so they collided with clotho's AST
+            types; `use .. as Alias` renames are type aliases in the checker; map lookups are
+            matched with `Some(&x)`; std signatures for `Command`, `Output`, `ExitStatus`,
+            `thread::scope`. Remaining 7: `match` on references whose arms produce
+            `Option`s (lower.rs 2472, 3284, 9897), `&Expr` against `Box<Expr>` (lower.rs 910),
+            `Option<Val>` against `&Option<Operand>` (ssa.rs 219), and two closures over
+            `&mut` references in bundle.rs (222, 334).
           - Status (2026-11-15, checker round 6): lachesis now passes the checker (probe: check
             ok; was 71 errors in round 3). Atropos: 19 checker errors. Done: enum payloads are
             monomorphized (`Pat::Ident(Spanned<String>)` names `Spanned__str`), and `String` and
