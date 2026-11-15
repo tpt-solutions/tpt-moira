@@ -1479,6 +1479,9 @@ struct Lower {
     /// The C type a value is expected to have, when its context decides it (the element
     /// type of a `vec!` item). Consumed by the first tuple lowered under it.
     expect_ty: Option<String>,
+    /// Blocks that follow an explicit `return`: nothing jumps to them, so the function's end
+    /// must not add a second return to them.
+    dead_blocks: Vec<usize>,
     /// The C parameter types of each top-level function and impl method, by C name.
     fn_param_tys: HashMap<String, Vec<String>>,
     /// The methods of every `impl` block: `(type, method) -> (C function name, kind)`,
@@ -1815,6 +1818,7 @@ impl Lower {
             fn_param_tys: HashMap::new(),
             self_ty: None,
             expect_ty: None,
+            dead_blocks: Vec::new(),
             closure_rets: HashMap::new(),
             arm_counter: 0,
             var_renames: HashMap::new(),
@@ -1858,15 +1862,19 @@ impl Lower {
             self.func.locals.push((name, Some(ty)));
         }
         self.new_block(); // entry = block 0, current = 0
-        let value = self.lower_block_value(&f.body)?;
-        // Terminate the function with a return of the tail value.
+        let ret_ty = self.func.ret.clone();
+        let value = self.lower_block_with_tail(&f.body, ret_ty)?;
+        // Terminate the function with a return of the tail value (a block after an explicit
+        // `return` is dead, and keeps its `Unreachable` terminator).
         if let mir::Terminator::Unreachable = self.func.blocks[self.current].term {
-            let ret = if self.func.ret.is_some() {
-                Some(value)
-            } else {
-                None
-            };
-            self.set_term(mir::Terminator::Return(ret));
+            if !self.dead_blocks.contains(&self.current) {
+                let ret = if self.func.ret.is_some() {
+                    Some(value)
+                } else {
+                    None
+                };
+                self.set_term(mir::Terminator::Return(ret));
+            }
         }
         // Publish the inferred SSA temporary types so the MIR carries them
         // (`temp_types` is what the SSA builder and the C backend read for each
@@ -2156,6 +2164,12 @@ impl Lower {
     /// Lower a block, returning the operand holding its value (tail expression
     /// or `()` when there is none).
     fn lower_block_value(&mut self, b: &ast::Block) -> Result<mir::Operand> {
+        self.lower_block_with_tail(b, None)
+    }
+
+    /// [`Lower::lower_block_value`] with the type the block's tail expression is expected to
+    /// have (a function body's tail has the function's return type).
+    fn lower_block_with_tail(&mut self, b: &ast::Block, tail_ty: Option<String>) -> Result<mir::Operand> {
         // A `let` in the block scopes its names to the block.
         let saved = self.var_renames.clone();
         let mut result = Ok(());
@@ -2172,7 +2186,12 @@ impl Lower {
         let value = match result {
             Err(e) => Err(e),
             Ok(()) => match &b.tail {
-                Some(tail) => self.lower_expr(tail),
+                Some(tail) => {
+                    self.expect_ty = tail_ty;
+                    let v = self.lower_expr(tail);
+                    self.expect_ty = None;
+                    v
+                }
                 None => Ok(mir::Operand::Unit),
             },
         };
@@ -6827,8 +6846,11 @@ impl Lower {
             ),
         );
         if method == "push" {
-            let v = self.lower_expr(&args[0])?;
-            self.emit_vec_push(&cur, &elem, v);
+            // The pushed value has the element type (`push(HashMap::new())` takes its map type).
+            self.expect_ty = Some(elem.clone());
+            let v = self.lower_expr(&args[0]);
+            self.expect_ty = None;
+            self.emit_vec_push(&cur, &elem, v?);
         } else {
             // `extend(v)`: every item of the vector `v`, in order.
             let (src, src_elem, src_ptr) = self.chain_sequence(drain_inner)?;
@@ -10260,7 +10282,11 @@ impl Lower {
                     // `None` as an `Option<T>` (the checker's type names the instance).
                     let ty = match self.hint_of_expr(e) {
                         Some(h) if mir::split_generic(&h).is_some_and(|(b, _)| b == ename) => h,
-                        _ => ename.clone(),
+                        // Without a checker hint, the type the context expects (a tuple component).
+                        _ => match self.expect_ty.clone() {
+                            Some(x) if mir::split_generic(&x).is_some_and(|(b, _)| b == ename) => x,
+                            _ => ename.clone(),
+                        },
                     };
                     let t = self.fresh_temp(ty);
                     self.emit(
@@ -10665,7 +10691,11 @@ impl Lower {
                 // struct field, an argument): the checker's hint gives the element type.
                 if let Some(vec_ty) = vec_constructor(e) {
                     // The checker's hint, or the type the context expects (a tuple component).
-                    let want = self.hint_of_expr(e).or_else(|| self.expect_ty.clone());
+                    // A checker hint that names a vector wins; otherwise the context's type does.
+                    let want = self
+                        .hint_of_expr(e)
+                        .filter(|h| mir::vec_elem(h).is_some())
+                        .or_else(|| self.expect_ty.clone());
                     if let Some(elem) = want.as_deref().and_then(mir::vec_elem) {
                         let elem = elem.to_string();
                         let t = self.fresh_temp(mir::vec_type(&elem));
@@ -11357,13 +11387,21 @@ impl Lower {
                 }
             }
             ExprKind::Return(opt) => {
+                // The returned value has the function's return type (a tuple or a `Vec::new()`
+                // component takes its element types from it).
                 let v = match opt {
-                    Some(e) => Some(self.lower_expr(e)?),
+                    Some(e) => {
+                        self.expect_ty = self.func.ret.clone();
+                        let r = self.lower_expr(e);
+                        self.expect_ty = None;
+                        Some(r?)
+                    }
                     None => None,
                 };
                 self.set_term(mir::Terminator::Return(v));
                 // Subsequent statements land in a fresh unreachable block.
                 self.current = self.new_block();
+                self.dead_blocks.push(self.current);
                 Ok(mir::Operand::Unit)
             }
             ExprKind::Break => {
