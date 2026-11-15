@@ -793,6 +793,10 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
             and `-Werror=int-conversion` (the `-w` flag does not suppress promoted warnings), and so
             does the probe. The suite and probe found nothing new: a pointer or integer mismatch in
             the emitted C now fails the test instead of running with a wrong value.
+          - Status (2026-11-15, codegen round 17): `and_then` on an option reached through a
+            reference (the receiver hint's pointer suffix is stripped) and with a named function as
+            the adapter (`a.and_then(double)`: the checker takes the function's return type). Probe:
+            atropos 136 → 127; clotho 27, lachesis 105, driver 22 unchanged.
           - Status (2026-11-15, codegen round 10): `append` on a vector field is a draining
             `extend` (the argument is `other` or `&mut other`; the source length is cleared), and
             `remove(&k)` on a map (a new `remove` helper returning `Option<V>`; the last entry fills

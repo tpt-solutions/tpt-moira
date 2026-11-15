@@ -4305,8 +4305,11 @@ impl TypeChecker {
                 };
             }
         }
-        self.infer_expr(arg);
-        Ty::Unknown
+        // A function named as the adapter (`and_then(double)`) gives its return type.
+        match self.infer_expr(arg) {
+            Ty::Fn(_, ret) => *ret,
+            _ => Ty::Unknown,
+        }
     }
 
     /// The item type of iterating a value of type `ty` (see [`Self::for_item_ty`]).

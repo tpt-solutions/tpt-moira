@@ -6581,7 +6581,8 @@ impl Lower {
         method: &str,
         closure: &Expr,
     ) -> Result<Option<mir::Operand>> {
-        let recv_hint = self.hint_of_expr(recv);
+        // A reference to an option is hinted as a pointer to it; the payload is the same.
+        let recv_hint = self.hint_of_expr(recv).map(|h| h.trim_end_matches('*').to_string());
         let Some(("Option", targs)) = recv_hint.as_deref().and_then(mir::split_generic) else {
             return Ok(None);
         };

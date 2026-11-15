@@ -2119,3 +2119,47 @@ fn as_deref_reads_an_option_string_through_a_reference() {
     };
     assert_eq!(out, "33", "as_deref of an Option<String> is the string, through a reference too");
 }
+
+#[test]
+fn and_then_on_an_option_reference_runs_the_closure() {
+    let out = match run_src(
+        "fn half(x: i64) -> Option<i64> {
+            if x % 2 == 0 { Some(x / 2) } else { None }
+        }
+        fn scaled(a: &Option<i64>) -> i64 {
+            a.and_then(|v| Some(v * 3)).unwrap_or(0)
+        }
+        fn main() {
+            let a = Some(2i64);
+            let b: Option<i64> = Some(8);
+            print_i64(scaled(&a) * 10 + b.and_then(|v| half(v)).unwrap_or(-1));
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping and_then run");
+            return;
+        }
+    };
+    assert_eq!(out, "64", "and_then through a reference applies the closure to the payload");
+}
+
+#[test]
+fn and_then_takes_a_named_function() {
+    let out = match run_src(
+        "fn double(v: i64) -> Option<i64> {
+            Some(v * 2)
+        }
+        fn main() {
+            let a: Option<i64> = Some(4);
+            print_i64(a.and_then(double).unwrap_or(0));
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping and_then-by-name run");
+            return;
+        }
+    };
+    assert_eq!(out, "8", "a named function given to and_then is called with the payload");
+}
