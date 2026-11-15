@@ -2641,6 +2641,26 @@ impl TypeChecker {
 
     /// `f(&mut v)` (or `f(&v)`) for a parameter `Vec<T>` with a concrete `T`: an unannotated
     /// `let v = Vec::new();` whose element type is still open takes `T`.
+    /// The expectation for a call under a reference argument: `&mut Vec::new()` passed for a
+    /// `&mut Vec<T>` parameter makes the call take `Vec<T>` (when that type is concrete).
+    fn ref_call_expectation(arg: &Expr, param: &Ty) -> Option<Ty> {
+        let ExprKind::Ref(inner, _) = &arg.kind else {
+            return None;
+        };
+        if !matches!(inner.kind, ExprKind::Call(..)) {
+            return None;
+        }
+        let target = match param {
+            Ty::Ref(t) | Ty::RefMut(t) => &**t,
+            _ => return None,
+        };
+        if has_generic(target) {
+            None
+        } else {
+            Some(target.clone())
+        }
+    }
+
     fn resolve_pending_vec_arg(&mut self, arg: &Expr, param: &Ty) {
         let ExprKind::Ref(inner, _) = &arg.kind else {
             return;
@@ -2727,7 +2747,7 @@ impl TypeChecker {
                     if *en == segments[0]
                         && matches!(
                             segments[0].as_str(),
-                            "HashMap" | "HashSet" | "BTreeMap" | "BTreeSet"
+                            "Vec" | "HashMap" | "HashSet" | "BTreeMap" | "BTreeSet"
                         )
                     {
                         return exp.clone();
@@ -2851,6 +2871,9 @@ impl TypeChecker {
                 // passed as a `Vec<Type>` parameter), when that type is already concrete.
                 if matches!(a.kind, ExprKind::Call(..)) && !has_generic(pt) {
                     self.expected_call_ty = Some(pt.clone());
+                }
+                if let Some(target) = Self::ref_call_expectation(a, pt) {
+                    self.expected_call_ty = Some(target);
                 }
                 self.resolve_pending_vec_arg(a, pt);
                 let at = self.infer_expr(a);
@@ -3016,7 +3039,11 @@ impl TypeChecker {
         } else {
             for (a, pt) in args.iter().zip(sig.params.iter()) {
                 self.resolve_pending_vec_arg(a, pt);
+                if let Some(target) = Self::ref_call_expectation(a, pt) {
+                    self.expected_call_ty = Some(target);
+                }
                 let at = self.infer_expr(a);
+                self.expected_call_ty = None;
                 self.expect(&at, pt, a.span);
             }
             sig.ret.clone()
@@ -3347,7 +3374,7 @@ impl TypeChecker {
         for a in args {
             // An unsuffixed literal argument's type is not decided here: the context (the
             // function's return type) decides it.
-            if matches!(a.kind, ExprKind::Lit(Lit::Int(..))) {
+            if matches!(a.kind, ExprKind::Lit(Lit::Int(_, None))) {
                 return;
             }
             let t = self.infer_expr(a);
@@ -3429,7 +3456,7 @@ impl TypeChecker {
                         if matches!(&recv_ty, Ty::Apply(v, a) if v == "Vec" && matches!(a.as_slice(), [Ty::Unknown]))
                         {
                             // A literal's element type is decided by the context (see `check_function`).
-                            let literal = matches!(args[0].kind, ExprKind::Lit(Lit::Int(..)));
+                            let literal = matches!(args[0].kind, ExprKind::Lit(Lit::Int(_, None)));
                             let et = self.infer_expr(&args[0]);
                             // An element type that still has unknown parts (`Vec<Unknown>`) is not yet
                             // the element type: keep waiting for a later push.

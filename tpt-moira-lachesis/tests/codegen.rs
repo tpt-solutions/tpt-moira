@@ -1940,3 +1940,42 @@ fn hashset_in_a_struct_field_takes_insert_and_contains() {
     };
     assert_eq!(out, "11", "a set in a struct field takes insert and contains through its pointer");
 }
+
+#[test]
+fn fresh_vec_passed_by_mut_reference_takes_the_parameter_type() {
+    let out = match run_src(
+        "fn walk(acc: &mut Vec<String>, n: i64) -> i64 {
+            acc.push(n.to_string());
+            acc.len() as i64
+        }
+        fn main() {
+            print_i64(walk(&mut Vec::new(), 4));
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping fresh vec run");
+            return;
+        }
+    };
+    assert_eq!(out, "1", "`&mut Vec::new()` takes the element type of the `&mut Vec<T>` parameter");
+}
+
+#[test]
+fn suffixed_literal_arguments_type_an_unannotated_map() {
+    let out = match run_src(
+        "use std::collections::HashMap;
+        fn main() {
+            let mut m = HashMap::new();
+            m.insert(1i64, 2i64);
+            print_i64(m.len() as i64);
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping suffixed literal run");
+            return;
+        }
+    };
+    assert_eq!(out, "1", "a suffixed literal has its own type, so the map's element types are known");
+}

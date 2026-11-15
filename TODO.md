@@ -756,6 +756,13 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
             (`field_map_pointer` accepts the set and sorted hints; `map_args` already reads a set
             as a map to `bool`). Probe: clotho 40 → 35, atropos 172 → 163, lachesis 134 → 120,
             driver 22 (unchanged). Not yet handled: `std::process::exit` (a path call).
+          - Status (2026-11-15, codegen round 9): three untyped-constructor fixes. A `Vec::new()`
+            passed as `&mut Vec::new()` takes the parameter's element type (`ref_call_expectation`;
+            `Vec` joins the constructors that take the expected type). Literal deferral applies only
+            to unsuffixed literals (`1i64` is typed, so `HashMap::new()` with `insert(1i64, ..)` in a
+            `use`d form now lowers). Probe: clotho 35 → 34, atropos 163 → 162, lachesis 120,
+            driver 22. Still open: `let w = Vec::new(); let x: Vec<i64> = w;` (the element type comes
+            from a later annotation; needs inference variables).
           - Status (2026-11-15, codegen round 7): `push` on a vector reached through an
             expression (`stack.last_mut().unwrap().push(x)`, a `Vec<Vec<T>>` element) lowers
             to the vector helper when the receiver's hint is a pointer to a vector; a receiver
