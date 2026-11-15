@@ -735,6 +735,15 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
             `BTreeSet` (sorted sets need rank order, not the key array); `vec![..]` as a map
             value is passed with the wrong C type (`m.insert(k, vec![..])`, found while writing a
             test). Atropos 89 blocked functions, lachesis 75, clotho 28, driver 9.
+          - Status (2026-11-15, codegen round 5): a map constructor named through a type alias
+            (`TypeHints::new()`). Open, found while testing: (a) the checker types `HashMap::get`
+            by value, so valid `*map.get(&k).unwrap()` is rejected ("cannot dereference a
+            non-reference"); the `copied()` form works. Fixing it needs the lowering to agree
+            with `Option<&V>`. (b) Literal element types do not take their type from a later
+            use: `let mut t = Table::new(); t.insert(1, 5);` with `fn build() -> Table` makes
+            `i32` keys and values, which then mismatch the declared type (vectors too, for
+            `push(1)` returned as `Vec<i64>`). Unannotated literals should unify with the
+            function's return type.
           - Status (2026-11-15, codegen round 4): the probe counts every blocked construct, not
             only the first per function. Lowering continues after a skipped statement (in blocks
             and closures) and reports them together. Blocked constructs: atropos 171, lachesis
