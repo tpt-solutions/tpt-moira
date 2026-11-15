@@ -3282,11 +3282,17 @@ impl TypeChecker {
             None
         };
         let recv_ty = self.infer_expr(recv);
-        // `Option<T>::as_ref()` is `Option<&T>` (`as_mut`: `Option<&mut T>`).
-        if args.is_empty() && matches!(method.node.as_str(), "as_ref" | "as_mut") {
+        // `Option<T>::as_ref()` is `Option<&T>` (`as_mut`: `Option<&mut T>`); `as_deref()` views a
+        // box's contents (`Option<Box<T>>` is `Option<&T>`).
+        if args.is_empty() && matches!(method.node.as_str(), "as_ref" | "as_mut" | "as_deref") {
             if let Ty::Apply(n, targs) = self.strip_refs(&recv_ty) {
                 if n == "Option" && targs.len() == 1 {
-                    let inner = targs[0].clone();
+                    let inner = match (&targs[0], method.node.as_str()) {
+                        (Ty::Apply(b, bargs), "as_deref") if b == "Box" && bargs.len() == 1 => {
+                            bargs[0].clone()
+                        }
+                        (t, _) => t.clone(),
+                    };
                     let view = if method.node == "as_ref" {
                         Ty::Ref(Box::new(inner))
                     } else {
@@ -5491,6 +5497,17 @@ impl TypeChecker {
         if let Ty::Apply(n, args) = b {
             if n == "Box" && args.len() == 1 && !matches!(a, Ty::Apply(m, _) if m == "Box") {
                 return self.compatible(a, &args[0]);
+            }
+        }
+        // A `dyn Fn(..)` / `impl Fn(..)` parameter (named `Fn` here) takes any function type.
+        let is_fn_name = |t: &Ty| matches!(t, Ty::Struct(n) if n == "Fn");
+        let is_fn = |t: &Ty| matches!(t, Ty::Fn(..));
+        if (is_fn_name(a) && is_fn(b)) || (is_fn(a) && is_fn_name(b)) {
+            return true;
+        }
+        if let (Ty::Ref(x) | Ty::RefMut(x), Ty::Ref(y) | Ty::RefMut(y)) = (a, b) {
+            if (is_fn_name(x) && is_fn(y)) || (is_fn(x) && is_fn_name(y)) {
+                return true;
             }
         }
         // Deref coercion through a box: `&Box<T>` is accepted where `&T` is expected.

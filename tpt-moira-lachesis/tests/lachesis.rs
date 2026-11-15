@@ -891,3 +891,23 @@ fn none_pattern_is_the_variant_not_a_binding() {
     ))
     .is_ok());
 }
+
+#[test]
+fn dyn_fn_parameters_and_as_deref_are_accepted() {
+    assert!(check(&parse(
+        "struct Node { tail: Option<Box<Node>>, v: i64 }
+        fn depth(n: &Node) -> i64 {
+            match n.tail.as_deref() {
+                Some(inner) => 1 + depth(inner),
+                None => 0,
+            }
+        }
+        fn apply(f: &dyn Fn(i64) -> i64, x: i64) -> i64 { f(x) }
+        fn main() {
+            let n = Node { tail: None, v: 1 };
+            let _ = depth(&n);
+            let _ = apply(&|x: i64| x + 1, 2);
+        }"
+    ))
+    .is_ok());
+}

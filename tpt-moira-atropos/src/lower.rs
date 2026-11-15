@@ -1077,7 +1077,7 @@ fn rename_block(block: &mut mir::MirBlock, map: &HashMap<String, String>) {
         if let Some(n) = map.get(&stmt.place) {
             stmt.place = n.clone();
         }
-        rename_rvalue(&mut stmt.rvalue, map);
+        rename_rvalue_map(&mut stmt.rvalue, map);
     }
     match &mut block.term {
         mir::Terminator::If(op, _, _) | mir::Terminator::Switch(op, _, _) => rename_op(op, map),
@@ -1094,7 +1094,7 @@ fn rename_op(op: &mut mir::Operand, map: &HashMap<String, String>) {
     }
 }
 
-fn rename_rvalue(rv: &mut mir::Rvalue, map: &HashMap<String, String>) {
+fn rename_rvalue_map(rv: &mut mir::Rvalue, map: &HashMap<String, String>) {
     match rv {
         mir::Rvalue::Use(a)
         | mir::Rvalue::Unary(_, a)
