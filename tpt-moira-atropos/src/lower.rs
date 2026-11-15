@@ -2770,7 +2770,7 @@ impl Lower {
             }
         };
         let err_tag = match self.variants.get(err_variant) {
-            Some((_, tag, _)) => *tag,
+            Some(&(_, tag, _)) => tag,
             None => {
                 return Err(LowerError(format!(
                     "`?` needs the `{err_variant}` variant of the prelude enum"
@@ -2954,7 +2954,7 @@ impl Lower {
                     }
                 };
                 let n = match self.array_lens.get(&name) {
-                    Some(n) => *n,
+                    Some(&n) => n,
                     None => {
                         return Err(LowerError(format!(
                             "cannot slice `{name}`: not a Vec, slice or array"
@@ -4841,7 +4841,7 @@ impl Lower {
         };
         let lty = self.temp_type_of(&ln);
         let ty = lty.trim_end_matches('*').to_string();
-        if let Some(elem) = mir::vec_elem(&ty).map(str::to_string) {
+        if let Some(elem) = mir::vec_elem(&ty).map(|e| e.to_string()) {
             return self.lower_vec_eq(l, r, &elem, negate);
         }
         if let Some((base, args)) = mir::split_generic(&ty) {
@@ -8835,8 +8835,8 @@ impl Lower {
                 // A literal top-level constant folds to its value; only fall
                 // back to a variable read when it is not a known const (the
                 // C backend would otherwise see an undeclared identifier).
-                if let Some(v) = self.const_values.get(&name) {
-                    return Ok(mir::Operand::Const(*v));
+                if let Some(&v) = self.const_values.get(&name) {
+                    return Ok(mir::Operand::Const(v));
                 }
                 // A nullary variant (`None`) is the enum's tagged struct with
                 // just the tag set.

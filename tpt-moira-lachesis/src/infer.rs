@@ -4509,10 +4509,20 @@ impl TypeChecker {
             ("Command".into(), "args".into()),
             sig(vec![Unknown], std("Command")),
         );
+        // `arg` takes any `AsRef<OsStr>`: a string, a path, or an owned string.
         self.methods.insert(
             ("Command".into(), "arg".into()),
-            sig(vec![Str], std("Command")),
+            sig(vec![Unknown], std("Command")),
         );
+        self.methods
+            .entry(("Output".into(), "is_ok".into()))
+            .or_insert_with(|| sig(vec![], Bool));
+        self.methods
+            .entry(("ExitStatus".into(), "map_err".into()))
+            .or_insert_with(|| sig(vec![Unknown], Unknown));
+        self.assoc_fns
+            .entry(("thread".into(), "scope".into()))
+            .or_insert_with(|| sig(vec![Unknown], Unknown));
         self.methods.insert(
             ("Command".into(), "status".into()),
             sig(vec![], std("ExitStatus")),
