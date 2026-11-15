@@ -669,7 +669,7 @@ fn match_lowers_to_conditional_chain() {
         b.stmts.iter().any(|s| {
             matches!(
                 s.rvalue,
-                tpt_moira_atropos::mir::Rvalue::Binary(tpt_moira_atropos::mir::BinOp::Eq, _, _)
+                tpt_moira_atropos::mir::Rvalue::Binary(tpt_moira_atropos::mir::MirBinOp::Eq, _, _)
             )
         })
     });
