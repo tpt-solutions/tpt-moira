@@ -1822,7 +1822,7 @@ fn map_constructed_through_a_type_alias_runs() {
         }
         fn main() {
             let t = build();
-            print_i64(t.len() as i64 * 10 + *t.get(&1).unwrap());
+            print_i64(t.len() as i64 * 10 + t.get(&1).copied().unwrap_or(0));
         }",
     ) {
         Some(o) => o,
