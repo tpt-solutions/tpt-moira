@@ -282,6 +282,9 @@ fn hint_compound(ty: &Ty) -> Option<String> {
             let payload = match &args[0] {
                 Ty::Ref(inner) | Ty::RefMut(inner) => match &**inner {
                     Ty::Struct(n) if n != "String" && n != "Vec" => Some(format!("{n}*")),
+                    // A reference to a string is the string (its C value is the same `char*`).
+                    Ty::Struct(n) if n == "String" || n == "PathBuf" => Some("str".to_string()),
+                    Ty::Str => Some("str".to_string()),
                     // A reference to a box is the box's pointer (a `Box<T>` is already one).
                     Ty::Apply(n, _) if n == "Box" => hint_elem_name(inner),
                     // A reference to a scalar is a pointer to it (`Option<&i64>`).
@@ -504,6 +507,8 @@ pub fn hint_of_ty(ty: &Ty) -> Option<String> {
             Ty::Struct(name) if !matches!(name.as_str(), "Vec" | "Option" | "Result" | "Self") => {
                 Some(format!("{name}*"))
             }
+            // A reference to an option is a pointer to the option's value.
+            Ty::Apply(name, _) if name == "Option" => hint_compound(inner).map(|h| format!("{h}*")),
             _ => None,
         },
         _ => None,
@@ -3451,10 +3456,11 @@ impl TypeChecker {
                         }
                         (t, _) => t.clone(),
                     };
-                    let view = if method.node == "as_ref" {
-                        Ty::Ref(Box::new(inner))
-                    } else {
+                    // `as_mut` views mutably; `as_ref` and `as_deref` views are shared.
+                    let view = if method.node == "as_mut" {
                         Ty::RefMut(Box::new(inner))
+                    } else {
+                        Ty::Ref(Box::new(inner))
                     };
                     return Ty::Apply("Option".to_string(), vec![view]);
                 }

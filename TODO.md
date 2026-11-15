@@ -780,6 +780,14 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
             the element type. An `else` that is only a call takes the `then` branch's type as its
             expectation (`if c { v.clone() } else { Vec::new() }`). Probe: clotho 33 → 29, atropos
             146 → 145, lachesis 109 → 106, driver 22.
+          - Status (2026-11-15, codegen round 15): `as_deref` / `as_ref` / `copied` / `cloned` on an
+            `Option` reached through a reference (`&Option<String>`) read the option out of the pointer.
+            Two checker/hint fixes: a reference to an option is hinted `Option<..>*`, and the payload
+            of `Option<&String>` / `Option<&str>` is `str` (it had `str*`). The second fixes a silent
+            miscompile: `n.as_deref().unwrap_or("").len()` on an owned `Option<String>` printed 1 for
+            "abc" (the C had a `char**` from `char*`; the build's warnings were suppressed). The
+            `as_deref` view is shared (`Ref`), not mutable. Probe: clotho 29 → 27, atropos 145 → 136,
+            lachesis 106 → 105.
           - Status (2026-11-15, codegen round 10): `append` on a vector field is a draining
             `extend` (the argument is `other` or `&mut other`; the source length is cleared), and
             `remove(&k)` on a map (a new `remove` helper returning `Option<V>`; the last entry fills

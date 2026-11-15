@@ -7856,7 +7856,8 @@ impl Lower {
             return Ok(None);
         }
         let hint = match self.hint_of_expr(recv) {
-            Some(h) => h,
+            // A reference to an option is hinted as a pointer to it.
+            Some(h) => h.trim_end_matches('*').to_string(),
             None => return Ok(None),
         };
         let (_base, targs) = match mir::split_generic(&hint) {
@@ -7924,7 +7925,16 @@ impl Lower {
                 );
                 Ok(Some(mir::Operand::var(r)))
             }
-            "as_deref" | "as_ref" | "copied" | "cloned" => Ok(Some(op)),
+            // Through a reference the view is the option's value: read it out.
+            "as_deref" | "as_ref" | "copied" | "cloned" => {
+                if ptr {
+                    let v = self.fresh_temp(hint.clone());
+                    self.emit(v.clone(), mir::Rvalue::Unary(mir::MirUnOp::Deref, op));
+                    Ok(Some(mir::Operand::var(v)))
+                } else {
+                    Ok(Some(op))
+                }
+            }
             "is_some" | "is_ok" => Ok(Some(test(self, ok_tag))),
             "is_none" | "is_err" => Ok(Some(test(self, 1 - ok_tag))),
             "is_some_and" if args.len() == 1 => {

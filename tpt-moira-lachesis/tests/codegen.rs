@@ -2092,3 +2092,26 @@ fn clone_of_a_vector_reference_types_an_if_with_a_new_else() {
     };
     assert_eq!(out, "10", "clone of `&Vec<T>` is a Vec<T>, so the else branch's Vec::new takes that type");
 }
+
+#[test]
+fn as_deref_reads_an_option_string_through_a_reference() {
+    let out = match run_src(
+        "fn len_of(name: &Option<String>) -> i64 {
+            name.as_deref().unwrap_or(\"\").len() as i64
+        }
+        fn owned(name: Option<String>) -> i64 {
+            name.as_deref().unwrap_or(\"\").len() as i64
+        }
+        fn main() {
+            let n: Option<String> = Some(\"abc\".to_string());
+            print_i64(len_of(&n) * 10 + owned(n.clone()));
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping as_deref run");
+            return;
+        }
+    };
+    assert_eq!(out, "33", "as_deref of an Option<String> is the string, through a reference too");
+}
