@@ -710,6 +710,18 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
             the checker types it so; test `option_as_ref_over_string_and_integer_runs`.)
             `Arc<TypeHints>` fields in the compiler's own lowering (cross-crate smart pointer),
             and `Hasher::finish`.
+          - Status (2026-11-16, closure ABI, non-capturing part): a closure passed for an
+            `impl Fn(A) -> R` (or `&mut impl FnMut`, `fn`) parameter lowers with the declared
+            struct and result types: the checker gives the closure the parameter's result type,
+            a `f(None)` call argument takes the parameter type of a function-valued local, and
+            a closure that captures variables and is passed as a value is reported as a
+            lowering error. Test: `closure_parameters_take_the_declared_struct_and_result_types`.
+            Still open, and needs a design decision: capturing closures passed as values. A
+            function pointer cannot carry the captured variables, so they need an environment
+            object (a closure value as a struct of a function pointer and an environment, with
+            every function-typed value using that representation). The compiler's own
+            `for_each_use_path` closure captures `found`, so the self-host blockers there wait
+            on this.
           - Status (2026-11-16, closure parameters): the checker types a closure passed for a
             function-typed parameter (`impl Fn(A)`, `&mut impl FnMut(A)`, `fn(A)`) from that
             type, and `Fn`/`FnMut`/`FnOnce` path types are function types. Lowering is still

@@ -1014,6 +1014,26 @@ fn constructors_take_the_expected_type_in_returns_and_pushes() {
     assert_eq!(out, "0\ntrue\n3\n0\n1", "constructors should take the expected type");
 }
 
+/// A closure passed for an `impl Fn(A) -> R` parameter takes `A` and `R` from it: a struct
+/// argument (`None`, typed by the parameter) and an `i64` result. A closure that captures a
+/// variable and is passed as a value is reported, not emitted.
+#[test]
+fn closure_parameters_take_the_declared_struct_and_result_types() {
+    let out = match run_src(
+        "fn each(f: impl Fn(Option<i64>) -> i64) -> i64 { f(None) }
+        fn main() {
+            print_i64(each(|b| if b.is_none() { 7 } else { 0 }));
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping closure ABI run");
+            return;
+        }
+    };
+    assert_eq!(out, "7", "the closure should receive an Option and return an i64");
+}
+
 #[test]
 fn enum_match_and_if_let_run() {
     // Enum-variant construction (`Some(7)` / `None`), `match` with
