@@ -1913,3 +1913,30 @@ fn push_through_last_mut_reaches_the_inner_vector() {
     };
     assert_eq!(out, "2", "a push on `last_mut().unwrap()` goes into the last inner vector");
 }
+
+#[test]
+fn hashset_in_a_struct_field_takes_insert_and_contains() {
+    let out = match run_src(
+        "use std::collections::HashSet;
+        struct Scope { defines: HashSet<String> }
+        fn has(s: &Scope, name: &str) -> bool {
+            s.defines.contains(name)
+        }
+        fn main() {
+            let mut s = Scope { defines: HashSet::new() };
+            s.defines.insert(\"a\".to_string());
+            let n = if has(&s, \"a\") { 1 } else { 0 };
+            let mut set: HashSet<i64> = HashSet::new();
+            set.insert(3);
+            let m = if set.contains(&3) { 10 } else { 0 };
+            print_i64(n + m);
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping set field run");
+            return;
+        }
+    };
+    assert_eq!(out, "11", "a set in a struct field takes insert and contains through its pointer");
+}

@@ -4176,8 +4176,16 @@ impl Lower {
         ) {
             return Ok(None);
         }
+        // A set in a field is a map to `bool` (`map_args`), so it takes the same path.
         let hint = match self.hint_of_expr(recv) {
-            Some(h) if h.starts_with("Map<") => h,
+            Some(h)
+                if h.starts_with("Map<")
+                    || h.starts_with("Set<")
+                    || h.starts_with("Sorted<")
+                    || h.starts_with("SortedSet<") =>
+            {
+                h
+            }
             _ => return Ok(None),
         };
         let Some((k, v)) = map_args(&hint) else {

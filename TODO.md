@@ -751,6 +751,11 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
             (e.g. `i % 3` from a literal counter) still take their default. Remaining open: a
             literal element with no return-type context keeps the `i32` default, and a `Vec`
             literal that is not the tail value is not resolved from later uses.
+          - Status (2026-11-15, codegen round 8): a `HashSet`/`BTreeSet` in a struct field takes
+            `insert` and `contains` through a pointer to the field, as maps in fields already did
+            (`field_map_pointer` accepts the set and sorted hints; `map_args` already reads a set
+            as a map to `bool`). Probe: clotho 40 → 35, atropos 172 → 163, lachesis 134 → 120,
+            driver 22 (unchanged). Not yet handled: `std::process::exit` (a path call).
           - Status (2026-11-15, codegen round 7): `push` on a vector reached through an
             expression (`stack.last_mut().unwrap().push(x)`, a `Vec<Vec<T>>` element) lowers
             to the vector helper when the receiver's hint is a pointer to a vector; a receiver
