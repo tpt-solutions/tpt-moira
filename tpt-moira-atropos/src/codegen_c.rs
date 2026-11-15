@@ -791,11 +791,56 @@ fn slice_helpers(elem: &str, struct_names: &std::collections::HashSet<&str>) -> 
     let name = mir::slice_c_name(elem);
     let ec = c_type(elem, struct_names);
     let sub = mir::slice_fn_name(elem, "sub");
+    let contains = contains_helper(&name, &ec, &mir::slice_fn_name(elem, "contains")).unwrap_or_default();
     format!(
         "static {name} {sub}({ec}* data, long long len, long long a, long long b) {{ {name} s; s.data = data + a; s.len = b - a; (void)len; return s; }}
-
+{contains}
 "
     )
+}
+
+/// The `contains(v, x)` helper of a sequence struct `name` (a vector or a slice: both hold
+/// `data` and `len`), for elements that compare: strings by content, scalars with `==`.
+fn contains_helper(name: &str, ec: &str, fn_name: &str) -> Option<String> {
+    if ec == "char*" {
+        return Some(format!(
+            "static long long {fn_name}({name}* v, char* x) {{ for (long long i = 0; i < v->len; i++) if (strcmp(v->data[i], x) == 0) return 1; return 0; }}
+"
+        ));
+    }
+    // Only C arithmetic types compare with `==`: a struct (a vector, an enum) does not.
+    let scalar = matches!(
+        ec,
+        "long long"
+            | "unsigned long long"
+            | "int"
+            | "unsigned int"
+            | "short"
+            | "unsigned short"
+            | "char"
+            | "unsigned char"
+            | "signed char"
+            | "_Bool"
+            | "bool"
+            | "double"
+            | "float"
+            | "int64_t"
+            | "uint64_t"
+            | "int32_t"
+            | "uint32_t"
+            | "int16_t"
+            | "uint16_t"
+            | "int8_t"
+            | "uint8_t"
+            | "size_t"
+    );
+    if !scalar {
+        return None;
+    }
+    Some(format!(
+        "static long long {fn_name}({name}* v, {ec} x) {{ for (long long i = 0; i < v->len; i++) if (v->data[i] == x) return 1; return 0; }}
+"
+    ))
 }
 
 /// The typedef of the generated `Vec<elem>` struct.
@@ -843,12 +888,10 @@ fn vec_helpers(elem: &str, struct_names: &std::collections::HashSet<&str>) -> St
         "static {name} {copy_n}({ec}* data, long long n) {{ {name} v = {new}(); for (long long i = 0; i < n; i++) {push}(&v, {elem_copy}); return v; }}
 "
     ));
-    // `contains` compares strings by content; other element types have no `==` helper yet.
-    if ec == "char*" {
-        let contains = mir::vec_fn_name(elem, "contains");
-        s.push_str(&format!(
-            "static long long {contains}({name}* v, char* x) {{ for (long long i = 0; i < v->len; i++) if (strcmp(v->data[i], x) == 0) return 1; return 0; }}\n"
-        ));
+    // `contains`: strings compare by content, scalars with `==`; other element types have no
+    // equality helper yet.
+    if let Some(body) = contains_helper(&name, &ec, &mir::vec_fn_name(elem, "contains")) {
+        s.push_str(&body);
     }
     s.push('\n');
     s

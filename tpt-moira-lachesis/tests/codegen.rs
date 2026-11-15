@@ -2163,3 +2163,31 @@ fn and_then_takes_a_named_function() {
     };
     assert_eq!(out, "8", "a named function given to and_then is called with the payload");
 }
+
+#[test]
+fn contains_on_const_and_local_slices() {
+    let out = match run_src(
+        "const N: &[i64] = &[1, 2];
+        const RESERVED: &[&str] = &[\"fn\", \"let\"];
+        fn has(x: i64) -> i64 {
+            if N.contains(&x) { 1 } else { 0 }
+        }
+        fn is_reserved(name: &str) -> i64 {
+            if RESERVED.contains(&name) { 1 } else { 0 }
+        }
+        fn local(name: &str) -> i64 {
+            let r: &[&str] = &[\"fn\", \"let\"];
+            if r.contains(&name) { 1 } else { 0 }
+        }
+        fn main() {
+            print_i64(has(2) * 100 + is_reserved(\"let\") * 10 + local(\"let\") + has(5) * 1000);
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping slice contains run");
+            return;
+        }
+    };
+    assert_eq!(out, "111", "contains on a const slice of integers or strings, and on a local slice");
+}

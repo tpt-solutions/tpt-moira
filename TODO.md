@@ -797,6 +797,14 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
             reference (the receiver hint's pointer suffix is stripped) and with a named function as
             the adapter (`a.and_then(double)`: the checker takes the function's return type). Probe:
             atropos 136 → 127; clotho 27, lachesis 105, driver 22 unchanged.
+          - Status (2026-11-15, codegen round 18): `contains` on slices and scalars, and three silent
+            miscompiles the stricter C check exposed. (a) A `const` whose value is not a literal (`const
+            N: &[i64] = &[..]`) was an uninitialized local at each use; it is now inlined from its
+            initializer (`const_exprs`), with the declared slice type. (b) `let r: &[&str] = &[..]`
+            built a pointer where the slice struct belongs; it now converts the array (`same_c_elem`
+            treats `char*` and `str` alike). (c) `contains` on a slice local used the vector helper;
+            slices have their own `contains` helper (`contains_helper`, emitted for strings and C
+            arithmetic types only). Probe: clotho 27 → 24, atropos 127 → 124.
           - Status (2026-11-15, codegen round 10): `append` on a vector field is a draining
             `extend` (the argument is `other` or `&mut other`; the source length is cleared), and
             `remove(&k)` on a map (a new `remove` helper returning `Option<V>`; the last entry fills

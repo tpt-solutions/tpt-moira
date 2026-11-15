@@ -204,6 +204,24 @@ fn lower_program_impl(
             _ => None,
         })
         .collect();
+    // Constants that are not literals (`const N: &[i64] = &[..];`): their initializer is
+    // lowered at each use, with the declared slice type where there is one.
+    let const_exprs: std::sync::Arc<std::collections::HashMap<String, (ast::Expr, Option<String>)>> =
+        std::sync::Arc::new(
+            prog.items
+                .iter()
+                .filter_map(|it| match &it.kind {
+                    ItemKind::Const(c) if const_literal(&c.value).is_none() => Some((
+                        c.name.node.clone(),
+                        (
+                            c.value.clone(),
+                            c.ty.as_ref().map(|t| type_to_c(t, &aliases)),
+                        ),
+                    )),
+                    _ => None,
+                })
+                .collect(),
+        );
     // Enum layout registry. The prelude `std` enums are modeled even when the
     // source declares no `enum` items; user `enum` definitions register their
     // own variants below.
@@ -456,6 +474,7 @@ fn lower_program_impl(
                     l.async_fns = async_names.clone();
                     l.all_fn_names = all_fn_names.clone();
                     l.const_values = const_values.clone();
+                    l.const_exprs = const_exprs.clone();
                     l.variants = variants.clone();
                     l.qualified_variants = qualified.clone();
                     l.payload_tys = payload_tys.clone();
@@ -498,6 +517,7 @@ fn lower_program_impl(
                     l.async_fns = async_names.clone();
                     l.all_fn_names = all_fn_names.clone();
                     l.const_values = const_values.clone();
+                    l.const_exprs = const_exprs.clone();
                     l.aliases = aliases.clone();
                     let ad = match l.lower_async_function(f) {
                         Ok(ad) => ad,
@@ -523,6 +543,7 @@ fn lower_program_impl(
                     l.async_fns = async_names.clone();
                     l.all_fn_names = all_fn_names.clone();
                     l.const_values = const_values.clone();
+                    l.const_exprs = const_exprs.clone();
                     l.variants = variants.clone();
                     l.qualified_variants = qualified.clone();
                     l.payload_tys = payload_tys.clone();
@@ -703,6 +724,9 @@ fn is_iter_terminal(name: &str) -> bool {
 /// Whether an array's C element type (`long long` for the default integer) is the element type
 /// `elem` of a slice parameter (a Rust name such as `i64`, or the C name itself).
 fn same_c_elem(ct: &str, elem: &str) -> bool {
+    // A string is `char*` in C, and a slice of strings names its element `str`.
+    let ct = if ct == "char*" { "str" } else { ct };
+    let elem = if elem == "char*" { "str" } else { elem };
     ct == elem || (ct == "long long" && matches!(elem, "i64" | "int64_t" | "isize"))
 }
 
@@ -1372,6 +1396,8 @@ struct Lower {
     /// Literal top-level constants (`const X: i32 = 3;`) folded into uses:
     /// `lower_expr` substitutes the constant operand for the path.
     const_values: HashMap<String, i128>,
+    /// Non-literal constants: the initializer and the declared slice type, if any.
+    const_exprs: std::sync::Arc<HashMap<String, (ast::Expr, Option<String>)>>,
     /// Enum-variant registry: variant constructor name -> (enum struct name,
     /// tag index, payload arity). Enums are represented as tagged structs
     /// `{ long long tag; long long f0; }`; construction lowers to a struct
@@ -1729,6 +1755,7 @@ impl Lower {
             deferred: Vec::new(),
             array_elems: HashMap::new(),
             const_values: HashMap::new(),
+            const_exprs: std::sync::Arc::new(HashMap::new()),
             variants: HashMap::new(),
             qualified_variants: HashMap::new(),
             payload_tys: HashMap::new(),
@@ -2146,6 +2173,7 @@ impl Lower {
         sub.self_ty = self.self_ty.clone();
         sub.struct_names = self.struct_names.clone();
         sub.const_values = self.const_values.clone();
+        sub.const_exprs = self.const_exprs.clone();
         sub.closure_counter = self.closure_counter;
         sub.fn_asts = self.fn_asts.clone();
         sub.spec_done = self.spec_done.clone();
@@ -2398,6 +2426,7 @@ impl Lower {
         l.closure_rets = self.closure_rets.clone();
         l.struct_names = self.struct_names.clone();
         l.const_values = self.const_values.clone();
+        l.const_exprs = self.const_exprs.clone();
         l.closure_captures = self.closure_captures.clone();
         l.closure_bindings.insert(param_name, lifted.to_string());
         l.fn_asts = self.fn_asts.clone();
@@ -2642,6 +2671,20 @@ impl Lower {
                         );
                         self.emit(name.clone(), mir::Rvalue::Use(mir::Operand::var(t)));
                         return Ok(());
+                    }
+                    // `let r: &[T] = &[..];`: the slice of the array, as a call argument gets.
+                    if let ExprKind::Ref(inner, _) = &init.kind {
+                        let slice_pt = local
+                            .ty
+                            .as_ref()
+                            .map(|t| type_to_c(t, &self.aliases).trim_end_matches('*').to_string())
+                            .filter(|h| mir::slice_elem(h).is_some());
+                        if let Some(pt) = slice_pt {
+                            if let Some(v) = self.array_arg_as_slice(inner, &pt)? {
+                                self.emit(name.clone(), mir::Rvalue::Use(v));
+                                return Ok(());
+                            }
+                        }
                     }
                     let v = self.lower_expr(init)?;
                     // `let f = |..| ..;` binds a closure value: remember the
@@ -9138,6 +9181,14 @@ impl Lower {
                 if let Some(&v) = self.const_values.get(&name) {
                     return Ok(mir::Operand::Const(v));
                 }
+                if let Some((value, slice_ty)) = self.const_exprs.get(&name).cloned() {
+                    if let (Some(st), ExprKind::Ref(inner, _)) = (&slice_ty, &value.kind) {
+                        if let Some(v) = self.array_arg_as_slice(inner, st)? {
+                            return Ok(v);
+                        }
+                    }
+                    return self.lower_expr(&value);
+                }
                 // A nullary variant (`None`) is the enum's tagged struct with
                 // just the tag set.
                 if let Some((ename, tag, 0)) = self.variant_info(p) {
@@ -10474,10 +10525,15 @@ impl Lower {
                         return Ok(mir::Operand::var(t));
                     }
                     let (vname, elem, is_ptr) = self.vec_local(recv).unwrap();
+                    // A slice has its own `contains` helper; its other methods are read directly.
+                    let slice_local = self.local_is_slice(&vname);
                     let helper = match method.node.as_str() {
-                        "push" | "len" | "is_empty" => Some(method.node.clone()),
-                        // Only string elements have a `contains` helper (content comparison).
-                        "contains" if args.len() == 1 && elem == "str" => {
+                        "push" | "len" | "is_empty" if !slice_local => Some(method.node.clone()),
+                        // Strings compare by content; scalars with `==`.
+                        "contains"
+                            if args.len() == 1
+                                && (elem == "str" || is_scalar_c_type(&elem)) =>
+                        {
                             Some(method.node.clone())
                         }
                         _ => None,
@@ -10486,7 +10542,8 @@ impl Lower {
                         let recv_ptr = if is_ptr {
                             mir::Operand::var(vname)
                         } else {
-                            let p = self.fresh_temp(format!("{}*", mir::vec_type(&elem)));
+                            let base = if slice_local { mir::slice_type(&elem) } else { mir::vec_type(&elem) };
+                            let p = self.fresh_temp(format!("{base}*"));
                             self.emit(p.clone(), mir::Rvalue::Ref(mir::Operand::var(vname), true));
                             mir::Operand::var(p)
                         };
@@ -10507,7 +10564,11 @@ impl Lower {
                         self.emit(
                             t.clone(),
                             mir::Rvalue::Call(
-                                mir::Operand::Func(mir::vec_fn_name(&elem, &helper)),
+                                mir::Operand::Func(if slice_local {
+                                    mir::slice_fn_name(&elem, &helper)
+                                } else {
+                                    mir::vec_fn_name(&elem, &helper)
+                                }),
                                 operands,
                             ),
                         );
@@ -10560,42 +10621,49 @@ impl Lower {
                 // A read-only vector method on any receiver (a field, `self.items.len()`): the
                 // receiver's vector value is read and its helper takes a pointer to that value.
                 if matches!(method.node.as_str(), "len" | "is_empty" | "contains") {
-                    let elem = self
-                        .hint_of_expr(recv)
-                        .as_deref()
-                        .and_then(mir::vec_elem)
+                    // A vector, or a slice (a `const` array is a slice of its elements). A slice
+                    // has its own helpers, and only `contains` goes through them.
+                    let hint = self.hint_of_expr(recv).unwrap_or_default();
+                    let slice = mir::slice_elem(&hint).is_some();
+                    let elem = mir::vec_elem(&hint)
+                        .or_else(|| mir::slice_elem(&hint))
                         .map(|e| e.to_string());
-                    if let Some(elem) = elem {
-                        if method.node != "contains" || (args.len() == 1 && elem == "str") {
-                            let v = self.lower_expr(recv)?;
-                            let mir::Operand::Var(vn) = &v else {
-                                return Err(LowerError("a vector method needs a named receiver".into()));
+                    let contains_ok = method.node != "contains"
+                        || (args.len() == 1 && (elem.as_deref() == Some("str") || elem.as_deref().is_some_and(is_scalar_c_type)));
+                    if let Some(elem) = elem.filter(|_| contains_ok && (!slice || method.node == "contains")) {
+                        let v = self.lower_expr(recv)?;
+                        let mir::Operand::Var(vn) = &v else {
+                            return Err(LowerError("a vector method needs a named receiver".into()));
+                        };
+                        let recv_ptr = if self.temp_type_of(vn).ends_with('*') {
+                            mir::Operand::var(vn.clone())
+                        } else {
+                            let base = if slice { mir::slice_type(&elem) } else { mir::vec_type(&elem) };
+                            let p = self.fresh_temp(format!("{base}*"));
+                            self.emit(p.clone(), mir::Rvalue::Ref(mir::Operand::var(vn.clone()), true));
+                            mir::Operand::var(p)
+                        };
+                        let mut operands = vec![recv_ptr];
+                        for a in args {
+                            // `contains(&x)` takes the element itself: the helper compares values.
+                            let value: &Expr = match &a.kind {
+                                ExprKind::Ref(inner, _) if method.node == "contains" => inner,
+                                _ => a,
                             };
-                            let recv_ptr = if self.temp_type_of(vn).ends_with('*') {
-                                mir::Operand::var(vn.clone())
-                            } else {
-                                let p = self.fresh_temp(format!("{}*", mir::vec_type(&elem)));
-                                self.emit(p.clone(), mir::Rvalue::Ref(mir::Operand::var(vn.clone()), true));
-                                mir::Operand::var(p)
-                            };
-                            let mut operands = vec![recv_ptr];
-                            for a in args {
-                                self.expect_ty = Some(elem.clone());
-                                let o = self.lower_expr(a);
-                                self.expect_ty = None;
-                                operands.push(o?);
-                            }
-                            let result_ty = if method.node == "len" { "long long" } else { "bool" };
-                            let t = self.fresh_temp(result_ty);
-                            self.emit(
-                                t.clone(),
-                                mir::Rvalue::Call(
-                                    mir::Operand::Func(mir::vec_fn_name(&elem, &method.node)),
-                                    operands,
-                                ),
-                            );
-                            return Ok(mir::Operand::var(t));
+                            self.expect_ty = Some(elem.clone());
+                            let o = self.lower_expr(value);
+                            self.expect_ty = None;
+                            operands.push(o?);
                         }
+                        let result_ty = if method.node == "len" { "long long" } else { "bool" };
+                        let helper_fn = if slice {
+                            mir::slice_fn_name(&elem, &method.node)
+                        } else {
+                            mir::vec_fn_name(&elem, &method.node)
+                        };
+                        let t = self.fresh_temp(result_ty);
+                        self.emit(t.clone(), mir::Rvalue::Call(mir::Operand::Func(helper_fn), operands));
+                        return Ok(mir::Operand::var(t));
                     }
                 }
                 // `to_vec()` of a vector or a slice: a copy of its elements as a new vector.
