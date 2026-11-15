@@ -2901,6 +2901,13 @@ impl TypeChecker {
                         self.closure_expected = Some(ps.clone());
                     }
                 }
+                // A closure passed for a function-typed parameter (`impl Fn(A) -> R`, `&mut
+                // impl FnMut(A)`, `fn(A) -> R`) takes that type's parameter types.
+                if let ExprKind::Closure { .. } = a.kind {
+                    if let Ty::Fn(ps, _) = self.strip_refs(pt) {
+                        self.closure_expected = Some(ps);
+                    }
+                }
                 // A call argument takes its parameter's type as its expectation (`Vec::new()`
                 // passed as a `Vec<Type>` parameter), when that type is already concrete.
                 if matches!(a.kind, ExprKind::Call(..)) && !has_generic(pt) {
@@ -3076,8 +3083,19 @@ impl TypeChecker {
                 if let Some(target) = Self::ref_call_expectation(a, pt) {
                     self.expected_call_ty = Some(target);
                 }
+                // A closure passed for a function-typed parameter takes its parameter types.
+                let closure_arg = match &a.kind {
+                    ExprKind::Ref(inner, _) => &**inner,
+                    _ => a,
+                };
+                if let ExprKind::Closure { .. } = closure_arg.kind {
+                    if let Ty::Fn(ps, _) = self.strip_refs(pt) {
+                        self.closure_expected = Some(ps);
+                    }
+                }
                 let at = self.infer_expr(a);
                 self.expected_call_ty = None;
+                self.closure_expected = None;
                 self.expect(&at, pt, a.span);
             }
             sig.ret.clone()
@@ -5692,7 +5710,7 @@ impl TypeChecker {
                 }
                 // A function-pointer type `fn(A, B) -> R` is a path `fn` whose arguments are
                 // the parameter types followed by the return type: a function type.
-                if name == "fn" && !args.is_empty() {
+                if matches!(name.as_str(), "fn" | "Fn" | "FnMut" | "FnOnce") && !args.is_empty() {
                     let (ret, params) = args.split_last().expect("non-empty");
                     return Ty::Fn(
                         params.iter().map(|a| self.type_to_ty(a)).collect(),
