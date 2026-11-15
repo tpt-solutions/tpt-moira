@@ -856,3 +856,19 @@ fn collect_into_a_partly_written_vec_takes_the_item_type() {
     ))
     .is_ok());
 }
+
+#[test]
+fn option_as_ref_is_an_option_of_a_reference() {
+    assert!(check(&parse(
+        "struct E { kind: i64 }
+        fn first(e: Option<E>) -> i64 {
+            let r = e.as_ref().map(|x| x.kind);
+            match r {
+                Some(v) => v,
+                None => 0,
+            }
+        }
+        fn main() { let _ = first(None); }"
+    ))
+    .is_ok());
+}

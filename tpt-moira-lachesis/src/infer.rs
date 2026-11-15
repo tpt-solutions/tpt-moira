@@ -3279,6 +3279,20 @@ impl TypeChecker {
             None
         };
         let recv_ty = self.infer_expr(recv);
+        // `Option<T>::as_ref()` is `Option<&T>` (`as_mut`: `Option<&mut T>`).
+        if args.is_empty() && matches!(method.node.as_str(), "as_ref" | "as_mut") {
+            if let Ty::Apply(n, targs) = self.strip_refs(&recv_ty) {
+                if n == "Option" && targs.len() == 1 {
+                    let inner = targs[0].clone();
+                    let view = if method.node == "as_ref" {
+                        Ty::Ref(Box::new(inner))
+                    } else {
+                        Ty::RefMut(Box::new(inner))
+                    };
+                    return Ty::Apply("Option".to_string(), vec![view]);
+                }
+            }
+        }
         if let Some(Ty::Apply(target, targs)) = &collect_target {
             if target == "Vec" && targs.len() == 1 && matches!(targs.first(), Some(Ty::Unknown)) {
                 let item = self.item_of(recv.span, &recv_ty);
