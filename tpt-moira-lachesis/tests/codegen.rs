@@ -1635,3 +1635,27 @@ fn tuple_struct_constructor_and_positional_fields_run() {
     };
     assert_eq!(out, "7", "`Pair(3, 4)` builds the struct; `p.0` reads its first field");
 }
+
+#[test]
+fn unannotated_hashset_takes_its_element_type_from_insert() {
+    let out = match run_src(
+        "use std::collections::HashSet;
+        fn reach(n: usize) -> usize {
+            let mut seen = HashSet::new();
+            let mut i = 0;
+            while i < n {
+                seen.insert(i % 3);
+                i += 1;
+            }
+            seen.len()
+        }
+        fn main() { print_i64(reach(10) as i64); }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping HashSet run");
+            return;
+        }
+    };
+    assert_eq!(out, "3");
+}

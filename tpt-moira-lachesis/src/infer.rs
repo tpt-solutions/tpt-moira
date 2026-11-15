@@ -115,6 +115,9 @@ pub struct TypeChecker {
     /// Locals bound (without an annotation) to `Vec::new()`, by name, with the span of the
     /// initializer: the first `push` onto one gives the vector its element type.
     pending_vec: HashMap<String, Span>,
+    /// Unannotated `let s = HashSet::new();` / `HashMap::new();` locals whose key and value types
+    /// come from a later `insert` (the span of the initializer; `true` for a map).
+    pending_coll: HashMap<String, (Span, bool)>,
     /// Locals bound (without an annotation) to a `None` of unknown payload, by name, with the
     /// span of the initializer: the first assignment of a `Some(..)` to one gives the
     /// payload type, which the initializer's hint then carries (`let mut sep = None;`).
@@ -588,6 +591,7 @@ impl Default for TypeChecker {
             own_enums: std::collections::HashSet::new(),
             env: Vec::new(),
             pending_vec: HashMap::new(),
+            pending_coll: HashMap::new(),
             pending_option: HashMap::new(),
             block_tail_expected: None,
             generic_scope: Vec::new(),
@@ -1314,6 +1318,16 @@ impl TypeChecker {
                                 self.pending_vec.insert(n.node.clone(), init.span);
                             } else {
                                 self.pending_vec.remove(&n.node);
+                            }
+                            // A bare `HashSet`/`HashMap` (the constructor's type without its arguments).
+                            match &it {
+                                Ty::Struct(c) if c == "HashSet" || c == "HashMap" => {
+                                    self.pending_coll
+                                        .insert(n.node.clone(), (init.span, c == "HashMap"));
+                                }
+                                _ => {
+                                    self.pending_coll.remove(&n.node);
+                                }
                             }
                             if matches!(&it, Ty::Apply(v, a) if v == "Option" && matches!(a.as_slice(), [Ty::Unknown]))
                             {
@@ -3267,6 +3281,54 @@ impl TypeChecker {
     /// Type-check a method call `receiver.method(args)`. The receiver's type is
     /// resolved and the method is looked up in the prelude's method table keyed
     /// by `(receiver_type_name, method_name)`.
+    /// `s.insert(k)` / `m.insert(k, v)` on a collection whose key and value types are still open
+    /// takes them from the arguments; the local and its initializer then carry them.
+    fn resolve_pending_coll(&mut self, recv: &Expr, method: &str, args: &[Expr]) {
+        if method != "insert" {
+            return;
+        }
+        let ExprKind::Path(p) = &recv.kind else {
+            return;
+        };
+        if p.segments.len() != 1 {
+            return;
+        }
+        let name = p.segments[0].node.clone();
+        let Some((init_span, is_map)) = self.pending_coll.get(&name).copied() else {
+            return;
+        };
+        let want_args = if is_map { 2 } else { 1 };
+        if args.len() != want_args {
+            return;
+        }
+        let mut tys: Vec<Ty> = Vec::new();
+        for a in args {
+            let t = self.infer_expr(a);
+            let t = match t {
+                Ty::Ref(inner) | Ty::RefMut(inner) => *inner,
+                other => other,
+            };
+            if has_unknown(&t) {
+                return;
+            }
+            tys.push(t);
+        }
+        let new_ty = if is_map {
+            Ty::Apply("HashMap".to_string(), tys)
+        } else {
+            Ty::Apply("HashSet".to_string(), tys)
+        };
+        for scope in self.env.iter_mut().rev() {
+            if let Some(slot) = scope.get_mut(&name) {
+                *slot = new_ty.clone();
+                break;
+            }
+        }
+        self.expr_types
+            .insert((init_span.start, init_span.end), new_ty);
+        self.pending_coll.remove(&name);
+    }
+
     fn check_method(
         &mut self,
         span: Span,
@@ -3281,6 +3343,7 @@ impl TypeChecker {
         } else {
             None
         };
+        self.resolve_pending_coll(recv, &method.node, args);
         let recv_ty = self.infer_expr(recv);
         // `Option<T>::as_ref()` is `Option<&T>` (`as_mut`: `Option<&mut T>`); `as_deref()` views a
         // box's contents (`Option<Box<T>>` is `Option<&T>`).
