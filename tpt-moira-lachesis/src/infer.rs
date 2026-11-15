@@ -477,6 +477,8 @@ pub fn hint_of_ty(ty: &Ty) -> Option<String> {
         }
         // A slice `[T]` (length 0 in the type) is a value; so is a reference to one.
         Ty::Array(elem, 0) => hint_elem_name(elem).map(|e| format!("Slice<{e}>")),
+        // A fixed-size array `[T; N]`: its length is part of the hint, so `len()` is known.
+        Ty::Array(elem, n) => hint_elem_name(elem).map(|e| format!("Array<{e},{n}>")),
         Ty::Ref(inner) | Ty::RefMut(inner) => match &**inner {
             // A reference to a scalar is a pointer to it.
             Ty::Int
@@ -500,6 +502,9 @@ pub fn hint_of_ty(ty: &Ty) -> Option<String> {
             Ty::Str => Some("str".to_string()),
             Ty::Struct(name) if name == "String" || name == "PathBuf" => Some("str".to_string()),
             Ty::Array(elem, 0) => hint_elem_name(elem).map(|e| format!("Slice<{e}>")),
+            // A reference to a map or set is named as the map or set itself: the lowering reads
+            // whether it is a pointer from the value's C type.
+            Ty::Apply(name, _) if name == "HashMap" || name == "HashSet" => hint_elem_name(inner),
             Ty::Apply(name, args) if name == "Vec" && args.len() == 1 => {
                 hint_elem_name(&args[0]).map(|e| format!("Vec<{e}>*"))
             }
@@ -3551,6 +3556,18 @@ impl TypeChecker {
                 return Ty::Unknown;
             }
         }
+        // `v.split_last()` on a vector: a reference to the last element and a slice of the rest.
+        if method.node == "split_last" && args.is_empty() {
+            if let Some(elem) = seq_elem_ty(&self.strip_refs(&recv_ty)) {
+                return Ty::Apply(
+                    "Option".into(),
+                    vec![Ty::Tuple(vec![
+                        Ty::Ref(Box::new(elem.clone())),
+                        Ty::Ref(Box::new(Ty::Array(Box::new(elem), 0))),
+                    ])],
+                );
+            }
+        }
         // `cond.then_some(v)` on a bool is `Option<T>` of the argument's type.
         if method.node == "then_some"
             && args.len() == 1
@@ -3558,6 +3575,30 @@ impl TypeChecker {
         {
             let v = self.infer_expr(&args[0]);
             return Ty::Apply("Option".into(), vec![v]);
+        }
+        // `n.max(m)` / `n.min(m)` on an integer: both operands and the result have its type.
+        if matches!(method.node.as_str(), "max" | "min") && args.len() == 1 {
+            let rt = self.strip_refs(&recv_ty);
+            if matches!(
+                rt,
+                Ty::Int
+                    | Ty::I8
+                    | Ty::I16
+                    | Ty::I32
+                    | Ty::I64
+                    | Ty::I128
+                    | Ty::Isize
+                    | Ty::U8
+                    | Ty::U16
+                    | Ty::U32
+                    | Ty::U64
+                    | Ty::U128
+                    | Ty::Usize
+            ) {
+                let a = self.infer_expr(&args[0]);
+                self.expect(&a, &rt, args[0].span);
+                return rt;
+            }
         }
         // `map.entry(k).or_insert(v)` / `.or_default()` is a mutable reference to the value.
         if let Ty::Apply(n, targs) = self.strip_refs(&recv_ty) {
@@ -3620,11 +3661,30 @@ impl TypeChecker {
                     _ => {}
                 }
             }
+            // `Result<T, E>::map(|x| body)` maps the success type and keeps the error.
+            if n == "Result" && targs.len() == 2 && args.len() == 1 && method.node == "map" {
+                // `r.map(Some)` wraps the payload in an `Option`.
+                if matches!(&args[0].kind, ExprKind::Path(p) if p.segments.len() == 1 && p.segments[0].node == "Some") {
+                    return Ty::Apply(
+                        "Result".into(),
+                        vec![Ty::Apply("Option".into(), vec![targs[0].clone()]), targs[1].clone()],
+                    );
+                }
+                let payload = targs[0].clone();
+                let mapped = self.closure_result(&args[0], &payload);
+                return Ty::Apply("Result".into(), vec![mapped, targs[1].clone()]);
+            }
             // `Result<T, E>::map_err(|e| body)` keeps the success type and maps the error.
             if n == "Result" && targs.len() == 2 && args.len() == 1 && method.node == "map_err" {
                 let err = targs[1].clone();
                 let mapped = self.closure_result(&args[0], &err);
                 return Ty::Apply("Result".into(), vec![targs[0].clone(), mapped]);
+            }
+            // `Option<T>::or(other)` is the receiver's type: the receiver, or `other`.
+            if n == "Option" && targs.len() == 1 && args.len() == 1 && method.node == "or" {
+                let other = self.infer_expr(&args[0]);
+                self.expect(&other, &Ty::Apply("Option".into(), targs.clone()), args[0].span);
+                return Ty::Apply("Option".into(), targs.clone());
             }
             // `Option<T>::map(|x| body)` binds `x` to the payload and is `Option<body>`.
             if n == "Option" && targs.len() == 1 && args.len() == 1 && method.node == "map" {
@@ -3678,6 +3738,20 @@ impl TypeChecker {
                 return Ty::Apply("Option".into(), vec![targs[0].clone()]);
             }
         }
+        // `set.intersection(&other)` / `set.union(&other)`: an iterator of the keys, by reference.
+        if let Ty::Apply(n, targs) = self.strip_refs(&recv_ty) {
+            if n == "HashSet" && targs.len() == 1 && args.len() == 1 {
+                if matches!(method.node.as_str(), "intersection" | "union") {
+                    let other = self.infer_expr(&args[0]);
+                    let elem = targs[0].clone();
+                    let expected = self.strip_refs(&other);
+                    if !matches!(expected, Ty::Unknown) {
+                        self.expect(&expected, &Ty::Apply("HashSet".into(), vec![elem.clone()]), args[0].span);
+                    }
+                    return Ty::Apply("Iter".into(), vec![Ty::Ref(Box::new(elem))]);
+                }
+            }
+        }
         // A `HashMap<K, V>` method gives its value type: `get` and `insert` are `Option<V>`.
         if let Ty::Apply(n, targs) = self.strip_refs(&recv_ty) {
             if (n == "HashMap" || n == "BTreeMap") && targs.len() == 2 {
@@ -3687,7 +3761,18 @@ impl TypeChecker {
                     // of map lookups produces the value, so the checker keeps that shape.)
                     // `get` views the value: `Option<&V>`. `remove` takes it: `Option<V>`.
                     ("get", 1) => Some(Ty::Apply("Option".to_string(), vec![Ty::Ref(Box::new(v))])),
+                    // `get_mut` views the value mutably: `Option<&mut V>`.
+                    ("get_mut", 1) => Some(Ty::Apply(
+                        "Option".to_string(),
+                        vec![Ty::RefMut(Box::new(v))],
+                    )),
                     ("remove", 1) => Some(Ty::Apply("Option".to_string(), vec![v])),
+                    // `values()` / `keys()` iterate references to the values / keys.
+                    ("values", 0) => Some(Ty::Apply("Iter".to_string(), vec![Ty::Ref(Box::new(v))])),
+                    ("keys", 0) => Some(Ty::Apply(
+                        "Iter".to_string(),
+                        vec![Ty::Ref(Box::new(targs[0].clone()))],
+                    )),
                     ("insert", 2) => Some(Ty::Apply("Option".to_string(), vec![v])),
                     ("entry", 1) => Some(Ty::Apply(
                         "Entry".to_string(),
@@ -4223,6 +4308,12 @@ impl TypeChecker {
             ("find", 1) => {
                 self.closure_result(&args[0], &Ty::Ref(Box::new(item.clone())));
                 Some(Ty::Apply("Option".to_string(), vec![item]))
+            }
+            // `nth(i)`: the `i`-th item by value, if there is one.
+            ("nth", 1) => {
+                let i = self.infer_expr(&args[0]);
+                self.expect(&i, &Ty::Usize, args[0].span);
+                Some(Ty::Apply("Option".to_string(), vec![deref_item(item)]))
             }
             // `max` / `min` / `last` give the element by value (the lowering copies it), so the
             // option is of the element's value type, not a reference to it.
@@ -5146,6 +5237,22 @@ impl TypeChecker {
             ("str", "is_empty", vec![], Bool),
             ("str", "to_string", vec![], Str),
             ("str", "to_owned", vec![], Str),
+            // `split_at(i)` is the pair of the two halves, each a string.
+            ("str", "split_at", vec![Usize], Ty::Tuple(vec![Str, Str])),
+            // `split_once(pat)`: the halves around the first match, if there is one.
+            (
+                "str",
+                "split_once",
+                vec![Unknown],
+                Ty::Apply("Option".into(), vec![Ty::Tuple(vec![Str, Str])]),
+            ),
+            // `as_bytes` views the string's bytes as a `&[u8]` slice.
+            (
+                "str",
+                "as_bytes",
+                vec![],
+                Ty::Ref(Box::new(Ty::Array(Box::new(Ty::U8), 0))),
+            ),
             ("str", "to_ascii_lowercase", vec![], Str),
             ("str", "replace", vec![Unknown, Unknown], Str),
             ("str", "replacen", vec![Unknown, Unknown, Unknown], Str),
