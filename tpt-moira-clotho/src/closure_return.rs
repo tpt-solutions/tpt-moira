@@ -40,12 +40,14 @@ use std::collections::HashMap;
 /// A candidate function: its parameters and the closure its body returns.
 struct Candidate {
     params: Vec<Param>,
+    /// Leading `let name = <pure>;` bindings of the function body, in order.
+    lets: Vec<Local>,
     closure: Expr,
 }
 
 /// Rewrite the closure-returning call sites of `prog` (see the module docs).
 pub fn inline_returned_closures(mut prog: Program) -> Program {
-    let (cands, capturing) = collect_candidates(&prog);
+    let (cands, capturing, capturing_methods) = collect_candidates(&prog);
     if cands.is_empty() {
         return prog;
     }
@@ -76,14 +78,37 @@ pub fn inline_returned_closures(mut prog: Program) -> Program {
                 prog.items.push(it);
             }
         }
+        // Same for capturing methods: drop them from their impl once no call remains.
+        let removable_methods: Vec<String> = capturing_methods
+            .into_iter()
+            .filter(|n| count_method_refs(&prog, n) == 0)
+            .collect();
+        if !removable_methods.is_empty() {
+            for item in &mut prog.items {
+                if let ItemKind::Impl(imp) = &mut item.kind {
+                    imp.items.retain(|it| match &it.kind {
+                        ItemKind::Function(f) => !removable_methods.contains(&f.name.node),
+                        _ => true,
+                    });
+                }
+            }
+        }
     }
     prog
 }
 
-/// The closure-returning top-level functions, and the names of those that capture.
-fn collect_candidates(prog: &Program) -> (HashMap<String, Candidate>, Vec<String>) {
+/// Candidate-map key of the method `name`. A dot cannot start an identifier, so a method
+/// never collides with a free function of the same name.
+fn method_key(name: &str) -> String {
+    format!(".{name}")
+}
+
+/// The closure-returning functions and inherent methods, the names of the free functions
+/// that capture, and the names of the methods that capture.
+fn collect_candidates(prog: &Program) -> (HashMap<String, Candidate>, Vec<String>, Vec<String>) {
     let mut out: HashMap<String, Candidate> = HashMap::new();
     let mut capturing: Vec<String> = Vec::new();
+    let mut capturing_methods: Vec<String> = Vec::new();
     for item in &prog.items {
         let ItemKind::Function(f) = &item.kind else {
             continue;
@@ -91,56 +116,142 @@ fn collect_candidates(prog: &Program) -> (HashMap<String, Candidate>, Vec<String
         if f.is_async || !f.generics.params.is_empty() || f.name.node == "main" {
             continue;
         }
-        if !f.body.stmts.is_empty() {
+        if let Some((cand, captures)) = candidate_of(f) {
+            if captures {
+                capturing.push(f.name.node.clone());
+            }
+            out.insert(f.name.node.clone(), cand);
+        }
+    }
+    // A method is only inlined when its name is unique across all impls: without type
+    // information, a call `x.name(..)` could otherwise be a different type's method.
+    let counts = method_name_counts(prog);
+    for item in &prog.items {
+        let ItemKind::Impl(imp) = &item.kind else {
+            continue;
+        };
+        if !imp.trait_name.node.is_empty() || !imp.generics.params.is_empty() {
             continue;
         }
-        let Some(tail) = &f.body.tail else {
-            continue;
-        };
-        let ExprKind::Closure { params, body, .. } = &tail.kind else {
-            continue;
-        };
-        let name_opts: Option<Vec<String>> = f
-            .params
-            .iter()
-            .map(|p| match &p.pat {
-                Pat::Ident(s) => Some(s.node.clone()),
-                _ => None,
-            })
-            .collect();
-        let names: Vec<String> = match name_opts {
-            Some(n) => n,
-            None => continue,
-        };
-        // A closure parameter that shadows a function parameter would change what the
-        // body refers to; leave such functions alone.
-        let mut shadows = false;
-        for p in params {
-            if let Pat::Ident(s) = &p.pat {
-                if names.contains(&s.node) {
-                    shadows = true;
+        for it in &imp.items {
+            let ItemKind::Function(f) = &it.kind else {
+                continue;
+            };
+            let has_self = matches!(
+                f.params.first(),
+                Some(Param { pat: Pat::Ident(s), .. }) if s.node == "self"
+            );
+            if f.is_async
+                || !f.generics.params.is_empty()
+                || !has_self
+                || counts.get(&f.name.node) != Some(&1)
+            {
+                continue;
+            }
+            if let Some((cand, captures)) = candidate_of(f) {
+                if captures {
+                    capturing_methods.push(f.name.node.clone());
+                }
+                out.insert(method_key(&f.name.node), cand);
+            }
+        }
+    }
+    (out, capturing, capturing_methods)
+}
+
+/// How many impl items (of any impl) carry each function name.
+fn method_name_counts(prog: &Program) -> HashMap<String, usize> {
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    for item in &prog.items {
+        if let ItemKind::Impl(imp) = &item.kind {
+            for it in &imp.items {
+                if let ItemKind::Function(f) = &it.kind {
+                    *counts.entry(f.name.node.clone()).or_insert(0) += 1;
                 }
             }
         }
-        if shadows {
-            continue;
-        }
-        let mut body = (**body).clone();
-        if !rename_safe(&mut body) {
-            continue;
-        }
-        if mentions_any(&mut body, &names) {
-            capturing.push(f.name.node.clone());
-        }
-        out.insert(
-            f.name.node.clone(),
-            Candidate {
-                params: f.params.clone(),
-                closure: (**tail).clone(),
-            },
-        );
     }
-    (out, capturing)
+    counts
+}
+
+/// The candidate for a function whose body is pure `let`s followed by a closure over its
+/// identifier parameters, and whether that closure captures (mentions a parameter or a
+/// `let`). `None` when the shape or the renaming rules do not allow inlining.
+fn candidate_of(f: &Function) -> Option<(Candidate, bool)> {
+    let lets = candidate_lets(f)?;
+    let tail = f.body.tail.as_ref()?;
+    let ExprKind::Closure { params, body, .. } = &tail.kind else {
+        return None;
+    };
+    let names: Vec<String> = f
+        .params
+        .iter()
+        .map(|p| match &p.pat {
+            Pat::Ident(s) => Some(s.node.clone()),
+            _ => None,
+        })
+        .collect::<Option<Vec<String>>>()?;
+    let let_names: Vec<String> = lets
+        .iter()
+        .filter_map(|l| match &l.pat {
+            Pat::Ident(s) => Some(s.node.clone()),
+            _ => None,
+        })
+        .collect();
+    // A closure parameter that shadows a function parameter or `let` would change what
+    // the body refers to; leave such functions alone.
+    for p in params {
+        if let Pat::Ident(s) = &p.pat {
+            if names.contains(&s.node) || let_names.contains(&s.node) {
+                return None;
+            }
+        }
+    }
+    let mut body = (**body).clone();
+    if !rename_safe(&mut body) {
+        return None;
+    }
+    let mut captured_names = names;
+    captured_names.extend(let_names);
+    let captures = mentions_any(&mut body, &captured_names);
+    Some((
+        Candidate {
+            params: f.params.clone(),
+            lets,
+            closure: (**tail).clone(),
+        },
+        captures,
+    ))
+}
+
+/// The leading `let` bindings of a candidate body, when every statement is a plain
+/// `let name = <pure expression>;` with a distinct name not used by a parameter.
+/// Returns `None` if the body has any other statement.
+fn candidate_lets(f: &Function) -> Option<Vec<Local>> {
+    let mut lets: Vec<Local> = Vec::new();
+    let mut seen: Vec<String> = f
+        .params
+        .iter()
+        .filter_map(|p| match &p.pat {
+            Pat::Ident(s) => Some(s.node.clone()),
+            _ => None,
+        })
+        .collect();
+    for st in &f.body.stmts {
+        let StmtKind::Local(l) = &st.kind else {
+            return None;
+        };
+        let Pat::Ident(name) = &l.pat else {
+            return None;
+        };
+        let init = l.init.as_ref()?;
+        if !is_pure(init) || seen.contains(&name.node) {
+            return None;
+        }
+        seen.push(name.node.clone());
+        lets.push(l.clone());
+    }
+    Some(lets)
 }
 
 /// True when the expression binds no names of its own and contains no macro, so that
@@ -539,13 +650,14 @@ fn is_pure(e: &Expr) -> bool {
     match &e.kind {
         ExprKind::Lit(_) => true,
         ExprKind::Path(p) => p.segments.len() == 1,
-        ExprKind::Unary(_, a) => is_pure(a),
+        ExprKind::Unary(_, a) | ExprKind::Field(a, _) => is_pure(a),
         ExprKind::Binary(a, _, b) => is_pure(a) && is_pure(b),
         _ => false,
     }
 }
 
-/// If `local` is `let name = candidate(args);`, push the argument bindings and then
+/// If `local` is `let name = candidate(args);` or `let name = recv.method(args);`, push the
+/// argument bindings (a method's receiver is bound to `self`) and then the lets and
 /// `let name = <closure with captured parameters renamed>;` onto `out` and return true.
 fn emit_let(
     local: &Local,
@@ -559,25 +671,59 @@ fn emit_let(
     let Some(init) = &local.init else {
         return false;
     };
-    let ExprKind::Call(callee, args) = &init.kind else {
-        return false;
+    // The candidate, the name used for fresh bindings, and the value of each parameter.
+    let is_method = matches!(init.kind, ExprKind::MethodCall(..));
+    let (name, cand, inits): (String, &Candidate, Vec<Expr>) = match &init.kind {
+        ExprKind::Call(callee, args) => {
+            let ExprKind::Path(p) = &callee.kind else {
+                return false;
+            };
+            if p.segments.len() != 1 {
+                return false;
+            }
+            let name = p.segments[0].node.clone();
+            let Some(cand) = cands.get(&name) else {
+                return false;
+            };
+            if args.len() != cand.params.len() {
+                return false;
+            }
+            (name, cand, args.clone())
+        }
+        ExprKind::MethodCall(recv, mname, args) => {
+            let ExprKind::Path(rp) = &recv.kind else {
+                return false;
+            };
+            if rp.segments.len() != 1 {
+                return false;
+            }
+            let Some(cand) = cands.get(&method_key(&mname.node)) else {
+                return false;
+            };
+            if args.len() + 1 != cand.params.len() {
+                return false;
+            }
+            // `&self` and `&mut self` bind a reference to the receiver; `self` binds a copy.
+            let self_init = match &cand.params[0].ty.kind {
+                TypeKind::Ref(_) => Expr {
+                    kind: ExprKind::Ref(recv.clone(), false),
+                    span: recv.span,
+                },
+                TypeKind::RefMut(_) => Expr {
+                    kind: ExprKind::Ref(recv.clone(), true),
+                    span: recv.span,
+                },
+                _ => (**recv).clone(),
+            };
+            let mut inits = vec![self_init];
+            inits.extend(args.iter().cloned());
+            (mname.node.clone(), cand, inits)
+        }
+        _ => return false,
     };
-    let ExprKind::Path(p) = &callee.kind else {
-        return false;
-    };
-    if p.segments.len() != 1 {
-        return false;
-    }
-    let name = p.segments[0].node.clone();
-    let Some(cand) = cands.get(&name) else {
-        return false;
-    };
-    if args.len() != cand.params.len() {
-        return false;
-    }
     let mut renames: HashMap<String, String> = HashMap::new();
     let mut k = 0;
-    while k < args.len() {
+    while k < inits.len() {
         let param = &cand.params[k];
         let Pat::Ident(pname) = &param.pat else {
             return false;
@@ -585,22 +731,62 @@ fn emit_let(
         let new_name = format!("__ret_{}_{}_{}", name, pname.node, *fresh);
         *fresh += 1;
         renames.insert(pname.node.clone(), new_name.clone());
+        // The receiver's type is left to inference: the checker sees the receiver directly.
+        let self_arg = is_method && k == 0;
         out.push(Stmt {
             kind: StmtKind::Local(Local {
                 pat: Pat::Ident(Spanned {
                     node: new_name,
                     span: pname.span,
                 }),
-                ty: Some(param.ty.clone()),
-                init: Some(args[k].clone()),
+                ty: if self_arg { None } else { Some(param.ty.clone()) },
+                init: Some(inits[k].clone()),
                 mutable: false,
             }),
         });
         k += 1;
     }
+    for l in &cand.lets {
+        let Pat::Ident(lname) = &l.pat else {
+            return false;
+        };
+        let new_name = format!("__ret_{}_{}_{}", name, lname.node, *fresh);
+        *fresh += 1;
+        let Some(init0) = &l.init else {
+            return false;
+        };
+        let mut init = init0.clone();
+        rename_paths(&mut init, &renames);
+        out.push(Stmt {
+            kind: StmtKind::Local(Local {
+                pat: Pat::Ident(Spanned {
+                    node: new_name.clone(),
+                    span: lname.span,
+                }),
+                ty: l.ty.clone(),
+                init: Some(init),
+                mutable: false,
+            }),
+        });
+        renames.insert(lname.node.clone(), new_name);
+    }
     let mut closure = cand.closure.clone();
+    rename_paths(&mut closure, &renames);
+    out.push(Stmt {
+        kind: StmtKind::Local(Local {
+            pat: local.pat.clone(),
+            ty: local.ty.clone(),
+            init: Some(closure),
+            mutable: local.mutable,
+        }),
+    });
+    true
+}
+
+/// Rename every single-segment path in `e` that `renames` maps.
+fn rename_paths(e: &mut Expr, renames: &HashMap<String, String>) {
     visit_expr(
-        &mut closure,
+        e,
         &mut |x: &mut Expr| {
             if let ExprKind::Path(p) = &mut x.kind {
                 if p.segments.len() == 1 {
@@ -612,15 +798,30 @@ fn emit_let(
         },
         &mut |_| {},
     );
-    out.push(Stmt {
-        kind: StmtKind::Local(Local {
-            pat: local.pat.clone(),
-            ty: local.ty.clone(),
-            init: Some(closure),
-            mutable: local.mutable,
-        }),
-    });
-    true
+}
+
+/// Count the references to the method `name`: method calls, path expressions whose last
+/// segment is `name` (`Type::name`), and identifier tokens inside macros.
+fn count_method_refs(prog: &Program, name: &str) -> usize {
+    let mut count = 0usize;
+    let mut prog = prog.clone();
+    for item in &mut prog.items {
+        visit_item_exprs(item, &mut |e: &mut Expr| match &e.kind {
+            ExprKind::MethodCall(_, m, _) if m.node == name => count += 1,
+            ExprKind::Path(p) if p.segments.last().map(|s| s.node == name) == Some(true) => {
+                count += 1
+            }
+            ExprKind::Macro(m) => {
+                count += m
+                    .tokens
+                    .iter()
+                    .filter(|t| matches!(&t.kind, TokenKind::Ident(s) if s == name))
+                    .count();
+            }
+            _ => {}
+        });
+    }
+    count
 }
 
 /// Count the references to the function `name` anywhere in the program: as a path
