@@ -383,12 +383,20 @@ pub fn builtin_solver() -> Solver {
 /// `type Assoc = Val;` inside the impl becomes an associated-type projection
 /// `Proj(Trait, Assoc, SelfTerm) -> ValTerm`.
 pub fn program_with_impls(prog: &tpt_moira_clotho::ast::Program) -> ClauseProgram {
+    program_with_impls_of(&[prog])
+}
+
+/// [`program_with_impls`] for several programs: the impls of a crate's extern dependencies
+/// count too (their derived `PartialEq`, `Clone`, .. are impls of those crates).
+pub fn program_with_impls_of(progs: &[&tpt_moira_clotho::ast::Program]) -> ClauseProgram {
     let mut prog2 = builtin_program();
-    for item in &prog.items {
-        if let tpt_moira_clotho::ast::ItemKind::Impl(imp) = &item.kind {
-            let (clause, projections) = impl_to_clause(imp);
-            prog2.clauses.push(clause);
-            prog2.projections.extend(projections);
+    for prog in progs {
+        for item in &prog.items {
+            if let tpt_moira_clotho::ast::ItemKind::Impl(imp) = &item.kind {
+                let (clause, projections) = impl_to_clause(imp);
+                prog2.clauses.push(clause);
+                prog2.projections.extend(projections);
+            }
         }
     }
     prog2

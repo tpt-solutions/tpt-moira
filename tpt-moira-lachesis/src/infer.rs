@@ -740,8 +740,10 @@ impl TypeChecker {
         }
         // Seed the trait solver with the user `impl` clauses so user-defined
         // trait bounds (e.g. `T: Show`) can be enforced at generic call sites.
+        let mut impl_progs: Vec<&tpt_moira_clotho::ast::Program> = vec![prog];
+        impl_progs.extend(externs.iter().map(|(_, e)| *e));
         cx.solver = Some(crate::solver::Solver::new(
-            crate::solver::program_with_impls(prog),
+            crate::solver::program_with_impls_of(&impl_progs),
         ));
         // Pass 1: collect struct and function signatures so callers may refer to
         // functions defined later in the file (forward references). Items
