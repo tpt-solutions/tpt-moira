@@ -719,6 +719,16 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
             lowering agrees. Open items: `thread::scope`, `Command` output types, a
             `TypeHints::new()` alias path, `str::to_string` as a function value, and a name
             clash between a clotho `Stmt` and a `clotho_Stmt` type in the checker.
+          - Status (2026-11-15, checker round 8): every crate passes the checker (probe:
+            check ok for moira-alloc, clotho, atropos, lachesis, driver). Done: `None` in a
+            pattern is the variant (it was bound as a name); `dyn Fn(..)` parameters take
+            function types; `Option<Box<T>>::as_deref()` is `Option<&T>`; a helper name
+            collision in atropos (`rename_rvalue`). Codegen is the remaining gate: blocked
+            functions clotho 30, atropos 116, lachesis 78, driver 9. Checker keys functions and
+            types by bare name, so same-named items in different modules still collide; the
+            known cases were renamed (MIR types, `rename_rvalue_map`), others (for example
+            `new`/`fmt`/`main` across modules) are not yet a checker error only because the
+            uses resolve to the right one.
           - Status (2026-11-15, checker round 7): lachesis passes the checker; atropos 7
             checker errors (was 19). Done: `Option::as_ref` is `Option<&T>` (this was the
             "reference to local escapes" report, now gone); atropos' MIR types renamed to
