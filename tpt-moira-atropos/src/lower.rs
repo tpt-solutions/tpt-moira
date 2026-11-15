@@ -378,7 +378,7 @@ fn lower_program_impl(
                 fields: s
                     .fields
                     .iter()
-                    .map(|f| (f.name.node.clone(), type_to_c(&f.ty, &aliases)))
+                    .enumerate().map(|(i, f)| (tuple_field_name(i, &f.name.node), type_to_c(&f.ty, &aliases)))
                     .collect(),
             });
         }
@@ -397,7 +397,8 @@ fn lower_program_impl(
                         fields: s
                             .fields
                             .iter()
-                            .map(|f| (f.name.node.clone(), type_to_c(&f.ty, &extern_aliases)))
+                            .enumerate()
+                            .map(|(i, f)| (tuple_field_name(i, &f.name.node), type_to_c(&f.ty, &extern_aliases)))
                             .collect(),
                     });
                 }
@@ -419,7 +420,7 @@ fn lower_program_impl(
                 let fields = s
                     .fields
                     .iter()
-                    .map(|f| (f.name.node.clone(), type_to_c(&f.ty, &aliases)))
+                    .enumerate().map(|(i, f)| (tuple_field_name(i, &f.name.node), type_to_c(&f.ty, &aliases)))
                     .collect();
                 out.structs.push(mir::MirStructDef {
                     name: s.name.node.clone(),
@@ -900,6 +901,16 @@ fn is_hashmap_ctor(e: &Expr) -> bool {
         }
     }
     false
+}
+
+/// The C name of a struct field: a tuple struct's fields are unnamed in the source and take the
+/// positional names `f0`, `f1`, .. (the names the field accesses `s.0` use).
+fn tuple_field_name(index: usize, name: &str) -> String {
+    if name.is_empty() {
+        format!("f{index}")
+    } else {
+        name.to_string()
+    }
 }
 
 /// The expression inside parentheses: the parser reads `(e)` as a block whose
@@ -9263,6 +9274,25 @@ impl Lower {
                         return Ok(mir::Operand::var(t));
                     }
                 }
+                // `Pair(3, 4)` for a tuple struct: a struct literal with the positional fields.
+                if let ExprKind::Path(p) = &callee.kind {
+                    if p.segments.len() == 1 {
+                        let sname = p.segments[0].node.clone();
+                        let tuple_like = self.structs.iter().find(|d| d.name == sname).is_some_and(|d| {
+                            !d.fields.is_empty()
+                                && d.fields.iter().enumerate().all(|(i, (n, _))| *n == format!("f{i}"))
+                        });
+                        if tuple_like && self.variants.get(&sname).is_none() {
+                            let mut fvals = Vec::new();
+                            for (i, a) in args.iter().enumerate() {
+                                fvals.push((format!("f{i}"), self.lower_expr(a)?));
+                            }
+                            let t = self.fresh_temp(sname.clone());
+                            self.emit(t.clone(), mir::Rvalue::StructLit(sname, fvals));
+                            return Ok(mir::Operand::var(t));
+                        }
+                    }
+                }
                 // A tuple-variant constructor (`Some(5)`, `Ok(v)`, user
                 // `MyEnum::Var(x)`) lowers to a tagged-struct literal, not a
                 // function call.
@@ -9441,9 +9471,16 @@ impl Lower {
                 }
                 // A numeric field is a tuple index even when the base's type is
                 // not known here: tuples are `fN` structs in the backend.
+                // A tuple struct's field `p.0` is its positional field `f0`, through a pointer
+                // when the base is one.
                 if let Ok(idx) = field.node.parse::<usize>() {
-                    let t = self.fresh_temp("long long");
-                    self.emit(t.clone(), mir::Rvalue::Field(o, format!("f{idx}"), false));
+                    let fname = format!("f{idx}");
+                    let deref = base_ty.ends_with('*');
+                    let struct_ty = base_ty.trim_end_matches('*');
+                    let field_ty = lookup_field_type(&self.structs, struct_ty, &fname)
+                        .unwrap_or_else(|| "long long".to_string());
+                    let t = self.fresh_temp(field_ty);
+                    self.emit(t.clone(), mir::Rvalue::Field(o, fname, deref));
                     return Ok(mir::Operand::var(t));
                 }
                 // A field of a reference (`item.attributes` with `item: &Item`) is read

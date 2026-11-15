@@ -1616,3 +1616,22 @@ fn extern_generic_struct_literal_in_generic_impl_runs() {
     };
     assert_eq!(out, "7", "the generic struct literal takes the instance's arguments");
 }
+
+#[test]
+fn tuple_struct_constructor_and_positional_fields_run() {
+    let out = match run_src(
+        "struct Pair(i64, i64);
+        fn sum(p: &Pair) -> i64 { p.0 + p.1 }
+        fn main() {
+            let p = Pair(3, 4);
+            print_i64(sum(&p));
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping tuple struct run");
+            return;
+        }
+    };
+    assert_eq!(out, "7", "`Pair(3, 4)` builds the struct; `p.0` reads its first field");
+}
