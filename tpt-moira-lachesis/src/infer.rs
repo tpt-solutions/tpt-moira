@@ -4493,8 +4493,9 @@ impl TypeChecker {
         self.assoc_fns.insert(
             ("fs".into(), "write".into()),
             sig(
-                // `P: AsRef<Path>`: a path, a string or a `PathBuf` reference.
-                vec![Unknown, Ref(Box::new(Str))],
+                // `P: AsRef<Path>`: a path, a string or a `PathBuf` reference. The data is any
+                // `AsRef<[u8]>`: a string, a byte slice or a vector.
+                vec![Unknown, Unknown],
                 Apply("Result".to_string(), vec![Unit]),
             ),
         );
@@ -5392,7 +5393,12 @@ impl TypeChecker {
         }
         // `String` and `str` are one type to the checker (the owned/borrowed split is
         // a codegen detail here): `String` values pass where `str` is expected and back.
-        let is_strlike = |t: &Ty| matches!(t, Ty::Str | Ty::Struct(_) if matches!(t, Ty::Str) || matches!(t, Ty::Struct(n) if n == "String"));
+        // (`Cow<str>` is one as well: its borrowed and owned forms are both strings here.)
+        let is_strlike = |t: &Ty| {
+            matches!(t, Ty::Str)
+                || matches!(t, Ty::Struct(n) if n == "String" || n == "Cow")
+                || matches!(t, Ty::Apply(n, _) if n == "Cow")
+        };
         if is_strlike(a) && is_strlike(b) {
             return true;
         }
