@@ -164,6 +164,8 @@ fn end_to_end_runs() {
 /// hints (the untyped `lower_program` path is not what `moira` runs).
 fn lower_src(src: &str) -> tpt_moira_atropos::MirProgram {
     let prog = tpt_moira_clotho::compile_source(src).expect("source should parse");
+    // The driver specializes generic functions and structs before checking; so do the tests.
+    let prog = tpt_moira_lachesis::mono::monomorphize(&prog, &[]);
     let (res, hints) = tpt_moira_lachesis::type_check_typed(&prog, &[]);
     assert!(res.is_ok(), "type-check: {:?}", res.err());
     tpt_moira_atropos::lower_program_typed(&prog, &hints).expect("source should lower")
@@ -1079,7 +1081,6 @@ fn compound_assignment_as_match_arm_runs() {
 }
 
 #[test]
-#[ignore = "known gap: the generic struct instance `Spanned<i64>` used as a Vec element of another struct is not monomorphized (mono.rs); C references an undeclared Spanned__i64"]
 fn generic_struct_literal_inside_vec_macro_runs() {
     // `vec![Spanned { .. }]`: the struct literal lives in macro tokens, so monomorphization
     // must rename it to its instance as well.
@@ -1586,4 +1587,32 @@ fn ref_bindings_bind_the_place_and_run() {
         }
     };
     assert_eq!(out, "8\n4", "`ref` binds a reference to the matched place");
+}
+
+#[test]
+fn extern_generic_struct_literal_in_generic_impl_runs() {
+    // A struct literal of a generic struct inside an instance of a generic impl method
+    // (`Spanned { node, span }` for `T = i64`) must name that instance.
+    let out = match run_src(
+        "struct Spanned<T> {
+            node: T,
+            span: i64,
+        }
+        impl<T> Spanned<T> {
+            fn new(node: T, span: i64) -> Spanned<T> {
+                Spanned { node, span }
+            }
+        }
+        fn main() {
+            let s = Spanned::new(5i64, 2);
+            print_i64(s.node + s.span);
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping generic impl run");
+            return;
+        }
+    };
+    assert_eq!(out, "7", "the generic struct literal takes the instance's arguments");
 }

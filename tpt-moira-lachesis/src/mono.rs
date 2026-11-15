@@ -87,6 +87,15 @@ pub fn monomorphize(prog: &Program, externs: &[(&str, &Program)]) -> Program {
         }
     }
     let generic_struct_names: HashSet<String> = generic_structs.keys().cloned().collect();
+    let generic_struct_params: HashMap<String, Vec<String>> = generic_structs
+        .iter()
+        .map(|(k, st)| {
+            (
+                k.clone(),
+                st.generics.params.iter().map(|p| p.name.node.clone()).collect(),
+            )
+        })
+        .collect();
     if generic_fns.is_empty() && generic_structs.is_empty() && !generic_methods_exist(prog) {
         return prog.clone();
     }
@@ -119,6 +128,7 @@ pub fn monomorphize(prog: &Program, externs: &[(&str, &Program)]) -> Program {
         inline: Vec::new(),
         closure_locals: HashMap::new(),
         generic_fns,
+        generic_struct_params,
         generic_structs,
         generic_struct_names,
         generic_impls,
@@ -418,6 +428,8 @@ struct Mono {
     generic_fns: HashMap<String, Function>,
     generic_structs: HashMap<String, StructDef>,
     generic_struct_names: HashSet<String>,
+    /// The type parameter names of each generic struct (its instances take them in order).
+    generic_struct_params: HashMap<String, Vec<String>>,
     generic_impls: Vec<ImplDef>,
     /// Methods with their own type parameters, by (owner, name).
     generic_methods: HashMap<(String, String), Function>,
@@ -895,6 +907,21 @@ impl Mono {
                         if let Some(instance) = self.request_struct(&call.callee, &params) {
                             if let Some(last) = path.segments.last_mut() {
                                 last.node = instance;
+                            }
+                        }
+                    }
+                } else if let Some(name) = path.segments.last().map(|s| s.node.clone()) {
+                    // A literal of a generic struct inside an instantiated generic body (an
+                    // impl's `Spanned { node, span }` with `T` substituted) takes its arguments
+                    // from the substitution of the struct's own parameter names.
+                    if let Some(params) = self.generic_struct_params.get(&name).cloned() {
+                        let args: Option<Vec<Ty>> =
+                            params.iter().map(|p| sub.get(p).cloned()).collect();
+                        if let (Some(args), false) = (args, params.is_empty()) {
+                            if let Some(instance) = self.request_struct(&name, &args) {
+                                if let Some(last) = path.segments.last_mut() {
+                                    last.node = instance;
+                                }
                             }
                         }
                     }
