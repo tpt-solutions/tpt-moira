@@ -771,6 +771,10 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
             else `None`. The `iter` blockers were this terminal, not `iter` itself: `slice.iter()`
             with `position` was reported as an `iter` failure. Probe: clotho 34 → 33, atropos 147 →
             146, lachesis 113 → 110, driver 22.
+          - Status (2026-11-15, codegen round 13): an untyped `BTreeMap::new()` / `BTreeSet::new()`
+            takes its element types from a later `insert` (the pending collection keeps its
+            constructor name), and `v.extend(w)` fixes an open vector's element type from `w` (a
+            `vec![..]` of literals waits, as `push` does). Probe: lachesis 110 → 109; the rest unchanged.
           - Status (2026-11-15, codegen round 10): `append` on a vector field is a draining
             `extend` (the argument is `other` or `&mut other`; the source length is cleared), and
             `remove(&k)` on a map (a new `remove` helper returning `Option<V>`; the last entry fills

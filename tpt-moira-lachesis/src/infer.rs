@@ -117,7 +117,7 @@ pub struct TypeChecker {
     pending_vec: HashMap<String, Span>,
     /// Unannotated `let s = HashSet::new();` / `HashMap::new();` locals whose key and value types
     /// come from a later `insert` (the span of the initializer; `true` for a map).
-    pending_coll: HashMap<String, (Span, bool)>,
+    pending_coll: HashMap<String, (Span, String)>,
     /// Locals bound (without an annotation) to a `None` of unknown payload, by name, with the
     /// span of the initializer: the first assignment of a `Some(..)` to one gives the
     /// payload type, which the initializer's hint then carries (`let mut sep = None;`).
@@ -1259,11 +1259,12 @@ impl TypeChecker {
                 if p.segments.len() == 1 {
                     let name = p.segments[0].node.clone();
                     if let Ty::Apply(ret_name, ret_args) = self.ret.clone() {
-                        if let Some((init_span, is_map)) = self.pending_coll.get(&name).copied() {
+                        if let Some((init_span, ctor)) = self.pending_coll.get(&name).cloned() {
+                            let is_map = ctor.ends_with("Map");
                             let fits = if is_map {
-                                ret_name == "HashMap" && ret_args.len() == 2
+                                ret_name == ctor && ret_args.len() == 2
                             } else {
-                                ret_name == "HashSet" && ret_args.len() == 1
+                                ret_name == ctor && ret_args.len() == 1
                             };
                             if fits && !ret_args.iter().any(has_unknown) {
                                 let t = self.ret.clone();
@@ -1368,9 +1369,14 @@ impl TypeChecker {
                             }
                             // A bare `HashSet`/`HashMap` (the constructor's type without its arguments).
                             match &it {
-                                Ty::Struct(c) if c == "HashSet" || c == "HashMap" => {
+                                Ty::Struct(c)
+                                    if matches!(
+                                        c.as_str(),
+                                        "HashSet" | "HashMap" | "BTreeSet" | "BTreeMap"
+                                    ) =>
+                                {
                                     self.pending_coll
-                                        .insert(n.node.clone(), (init.span, c == "HashMap"));
+                                        .insert(n.node.clone(), (init.span, c.clone()));
                                 }
                                 _ => {
                                     self.pending_coll.remove(&n.node);
@@ -3368,9 +3374,10 @@ impl TypeChecker {
             return;
         }
         let name = p.segments[0].node.clone();
-        let Some((init_span, is_map)) = self.pending_coll.get(&name).copied() else {
+        let Some((init_span, ctor)) = self.pending_coll.get(&name).cloned() else {
             return;
         };
+        let is_map = ctor.ends_with("Map");
         let want_args = if is_map { 2 } else { 1 };
         if args.len() != want_args {
             return;
@@ -3392,11 +3399,7 @@ impl TypeChecker {
             }
             tys.push(t);
         }
-        let new_ty = if is_map {
-            Ty::Apply("HashMap".to_string(), tys)
-        } else {
-            Ty::Apply("HashSet".to_string(), tys)
-        };
+        let new_ty = Ty::Apply(ctor, tys);
         for scope in self.env.iter_mut().rev() {
             if let Some(slot) = scope.get_mut(&name) {
                 *slot = new_ty.clone();
@@ -3452,17 +3455,30 @@ impl TypeChecker {
                 }
             }
         }
-        // `v.push(x)` on a vector whose element type is still open: `x` is its element type.
-        if method.node == "push" && args.len() == 1 {
+        // `v.push(x)` / `v.extend(w)` on a vector whose element type is still open: `x` (or the
+        // element of `w`) is its element type.
+        if (method.node == "push" || method.node == "extend") && args.len() == 1 {
             if let ExprKind::Path(p) = &recv.kind {
                 if p.segments.len() == 1 {
                     let name = p.segments[0].node.clone();
                     if let Some(init_span) = self.pending_vec.get(&name).copied() {
                         if matches!(&recv_ty, Ty::Apply(v, a) if v == "Vec" && matches!(a.as_slice(), [Ty::Unknown]))
                         {
-                            // A literal's element type is decided by the context (see `check_function`).
-                            let literal = matches!(args[0].kind, ExprKind::Lit(Lit::Int(_, None)));
-                            let et = self.infer_expr(&args[0]);
+                            let et = if method.node == "push" {
+                                self.infer_expr(&args[0])
+                            } else {
+                                match self.infer_expr(&args[0]) {
+                                    Ty::Apply(v, a) if v == "Vec" && a.len() == 1 => a[0].clone(),
+                                    _ => Ty::Unknown,
+                                }
+                            };
+                            // A literal's element type is decided by the context (see `check_function`);
+                            // so is a `vec![..]` of literals (`Vec<Int>`) passed to `extend`.
+                            let literal = if method.node == "push" {
+                                matches!(args[0].kind, ExprKind::Lit(Lit::Int(_, None)))
+                            } else {
+                                matches!(et, Ty::Int)
+                            };
                             // An element type that still has unknown parts (`Vec<Unknown>`) is not yet
                             // the element type: keep waiting for a later push.
                             if !has_unknown(&et) && !literal {

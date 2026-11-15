@@ -2051,3 +2051,24 @@ fn position_counts_the_items_that_reach_it() {
     };
     assert_eq!(out, "1109", "position is the index among the items the chain yields; a miss is None");
 }
+
+#[test]
+fn untyped_extend_and_btree_constructors_take_their_element_types() {
+    let out = match run_src(
+        "use std::collections::BTreeMap;
+        fn main() {
+            let mut v = Vec::new();
+            v.extend(vec![1i64, 2]);
+            let mut m = BTreeMap::new();
+            m.insert(2i64, 3i64);
+            print_i64(v.len() as i64 * 10 + m.len() as i64);
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping extend/BTreeMap run");
+            return;
+        }
+    };
+    assert_eq!(out, "21", "extend takes the element type of its argument; BTreeMap::new takes it from insert");
+}
