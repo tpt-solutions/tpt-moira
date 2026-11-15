@@ -10853,6 +10853,27 @@ impl Lower {
                 }
                 let param_tys = match &callee_operand {
                     mir::Operand::Func(f) => self.fn_param_tys.get(f).cloned(),
+                    // A function value held in a local is typed `Fn<params..,result>`.
+                    mir::Operand::Var(n) => {
+                        let ty = self
+                            .types
+                            .get(n)
+                            .cloned()
+                            .or_else(|| {
+                                self.func
+                                    .locals
+                                    .iter()
+                                    .find(|(l, _)| l == n)
+                                    .and_then(|(_, t)| t.clone())
+                            })
+                            .unwrap_or_default();
+                        match mir::split_generic(&ty) {
+                            Some(("Fn", parts)) => parts
+                                .split_last()
+                                .map(|(_, params)| params.iter().map(|s| s.to_string()).collect()),
+                            _ => None,
+                        }
+                    }
                     _ => None,
                 };
                 for a in args {
@@ -10873,7 +10894,27 @@ impl Lower {
                             continue;
                         }
                     }
-                    let v = self.lower_expr(a)?;
+                    // A non-closure argument takes its parameter's type (`f(None)` is that option).
+                    if !matches!(a.kind, ExprKind::Closure { .. }) {
+                        self.expect_ty = pt_hint.clone();
+                    }
+                    let v = self.lower_expr(a);
+                    self.expect_ty = None;
+                    let v = v?;
+                    // A capturing closure passed as a value needs its environment, which a plain
+                    // function pointer cannot carry: this is reported, not emitted as invalid C.
+                    let closure_arg: &Expr = match &a.kind {
+                        ExprKind::Ref(inner, _) => inner,
+                        _ => a,
+                    };
+                    if let (ExprKind::Closure { .. }, mir::Operand::Func(name)) = (&closure_arg.kind, &v) {
+                        if self.closure_captures.get(name).is_some_and(|c| !c.is_empty()) {
+                            return Err(LowerError(format!(
+                                "a closure that captures variables cannot be passed as a value yet (bytes {}..{})",
+                                a.span.start, a.span.end
+                            )));
+                        }
+                    }
                     self.closure_param_hint = None;
                     let pt = pt_hint;
                     let v = match pt {
