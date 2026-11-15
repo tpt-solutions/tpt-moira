@@ -766,6 +766,11 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
           - Status (2026-11-15, codegen round 11): the open `vec![..]` literal from round 10 is
             fixed. An unannotated `vec![3, 4]` local (`Vec<Int>`) is pending like `Vec::new()`, so
             passing `&mut v` to a `&mut Vec<i64>` parameter fixes its element type to `i64`.
+          - Status (2026-11-15, codegen round 12): `position(f)` is an iterator terminal: `Some(n)`
+            for the n-th item (counted after any `filter`/`map` before it) that the closure accepts,
+            else `None`. The `iter` blockers were this terminal, not `iter` itself: `slice.iter()`
+            with `position` was reported as an `iter` failure. Probe: clotho 34 → 33, atropos 147 →
+            146, lachesis 113 → 110, driver 22.
           - Status (2026-11-15, codegen round 10): `append` on a vector field is a draining
             `extend` (the argument is `other` or `&mut other`; the source length is cleared), and
             `remove(&k)` on a map (a new `remove` helper returning `Option<V>`; the last entry fills

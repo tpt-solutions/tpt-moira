@@ -681,7 +681,18 @@ struct ZipSeq {
 fn is_iter_terminal(name: &str) -> bool {
     matches!(
         name,
-        "collect" | "any" | "all" | "find" | "count" | "sum" | "for_each" | "max" | "min" | "last" | "next"
+        "collect"
+            | "any"
+            | "all"
+            | "find"
+            | "position"
+            | "count"
+            | "sum"
+            | "for_each"
+            | "max"
+            | "min"
+            | "last"
+            | "next"
     )
 }
 
@@ -3380,7 +3391,7 @@ impl Lower {
             }
             None => None,
         };
-        if matches!(terminal, "any" | "all" | "find") && term_callee.is_none() {
+        if matches!(terminal, "any" | "all" | "find" | "position") && term_callee.is_none() {
             return Err(LowerError(format!("`{terminal}` needs a closure")));
         }
 
@@ -3400,6 +3411,8 @@ impl Lower {
             .unwrap_or_else(|| elem.clone());
         let mut out: Option<String> = None;
         let mut res: Option<String> = None;
+        // `position`: the number of items that reached the terminal before the hit.
+        let mut position_count: Option<String> = None;
         match terminal {
             "collect" if map_collect.is_some() => {
                 let (k, v) = map_collect.clone().unwrap();
@@ -3453,6 +3466,25 @@ impl Lower {
             "count" | "sum" => {
                 let r = self.fresh_temp("long long");
                 self.emit(r.clone(), mir::Rvalue::Use(mir::Operand::Const(0)));
+                res = Some(r);
+            }
+            // `position(f)`: `Some(n)` for the first item (the n-th to reach here) that `f`
+            // accepts, else `None`.
+            "position" => {
+                let r = self.fresh_temp("Option<long long>");
+                self.emit(
+                    r.clone(),
+                    mir::Rvalue::StructLit(
+                        "Option".to_string(),
+                        vec![
+                            ("tag".to_string(), mir::Operand::Const(1)),
+                            ("f0".to_string(), mir::Operand::Const(0)),
+                        ],
+                    ),
+                );
+                let n = self.fresh_temp("long long");
+                self.emit(n.clone(), mir::Rvalue::Use(mir::Operand::Const(0)));
+                position_count = Some(n);
                 res = Some(r);
             }
             // `max` / `min` / `last`: an `Option` of the element, `None` until an item arrives.
@@ -3862,6 +3894,40 @@ impl Lower {
                 let args = self.chain_args(caps, &pos, &item, arg)?;
                 let t = self.fresh_temp("long long");
                 self.emit(t, mir::Rvalue::Call(mir::Operand::Func(f), args));
+                self.set_term(mir::Terminator::Goto(step));
+            }
+            "position" => {
+                let (f, caps) = term_callee.clone().expect("checked above");
+                let arg = term_args.first().expect("checked above");
+                let args = self.chain_args(caps, &pos, &item, arg)?;
+                let c = self.fresh_temp("long long");
+                self.emit(c.clone(), mir::Rvalue::Call(mir::Operand::Func(f), args));
+                let r = res.clone().expect("has a result");
+                let n = position_count.clone().expect("has a counter");
+                let early = self.new_block();
+                let miss = self.new_block();
+                self.set_term(mir::Terminator::If(mir::Operand::var(c), early, miss));
+                self.current = early;
+                self.emit(
+                    r,
+                    mir::Rvalue::StructLit(
+                        "Option".to_string(),
+                        vec![
+                            ("tag".to_string(), mir::Operand::Const(0)),
+                            ("f0".to_string(), mir::Operand::var(n.clone())),
+                        ],
+                    ),
+                );
+                self.set_term(mir::Terminator::Goto(exit));
+                self.current = miss;
+                self.emit(
+                    n.clone(),
+                    mir::Rvalue::Binary(
+                        mir::MirBinOp::Add,
+                        mir::Operand::var(n),
+                        mir::Operand::Const(1),
+                    ),
+                );
                 self.set_term(mir::Terminator::Goto(step));
             }
             _ => {

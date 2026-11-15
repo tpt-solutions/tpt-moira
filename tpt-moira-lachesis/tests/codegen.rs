@@ -2028,3 +2028,26 @@ fn vec_literal_passed_by_mut_reference_takes_the_parameter_element_type() {
     };
     assert_eq!(out, "3", "an unannotated `vec![..]` takes the element type of the `&mut Vec<T>` parameter");
 }
+
+#[test]
+fn position_counts_the_items_that_reach_it() {
+    let out = match run_src(
+        "fn find(keys: &[i64], want: i64) -> i64 {
+            keys.iter().position(|k| *k == want).unwrap_or(9) as i64
+        }
+        fn main() {
+            let v = vec![1i64, 2, 3, 4];
+            let hit = find(&v, 2);
+            let filtered = v.iter().filter(|x| **x > 1).position(|x| *x == 3).unwrap_or(9) as i64;
+            let miss = v.iter().position(|x| *x == 7).unwrap_or(9) as i64;
+            print_i64(hit * 1000 + filtered * 100 + miss);
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping position run");
+            return;
+        }
+    };
+    assert_eq!(out, "1109", "position is the index among the items the chain yields; a miss is None");
+}
