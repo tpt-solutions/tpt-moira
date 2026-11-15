@@ -1893,3 +1893,23 @@ fn literal_elements_take_the_returned_collections_types() {
     };
     assert_eq!(out, "215", "unsuffixed literals take the element types of the returned collection");
 }
+
+#[test]
+fn push_through_last_mut_reaches_the_inner_vector() {
+    let out = match run_src(
+        "fn main() {
+            let mut stack: Vec<Vec<i64>> = vec![Vec::new()];
+            stack.last_mut().unwrap().push(4);
+            stack.last_mut().unwrap().push(5);
+            let n = stack.last().unwrap().len();
+            print_i64(n as i64);
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping last_mut push run");
+            return;
+        }
+    };
+    assert_eq!(out, "2", "a push on `last_mut().unwrap()` goes into the last inner vector");
+}

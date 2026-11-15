@@ -751,6 +751,13 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
             (e.g. `i % 3` from a literal counter) still take their default. Remaining open: a
             literal element with no return-type context keeps the `i32` default, and a `Vec`
             literal that is not the tail value is not resolved from later uses.
+          - Status (2026-11-15, codegen round 7): `push` on a vector reached through an
+            expression (`stack.last_mut().unwrap().push(x)`, a `Vec<Vec<T>>` element) lowers
+            to the vector helper when the receiver's hint is a pointer to a vector; a receiver
+            that is a vector value rather than a pointer is a named error, not a push to a copy.
+            Probe: clotho 44 → 40 blocked functions; atropos, lachesis and driver unchanged.
+            Next: `new` in untyped positions and `contains` on non-vector receivers are still the
+            largest groups.
           - Status (2026-11-15, codegen round 4): the probe counts every blocked construct, not
             only the first per function. Lowering continues after a skipped statement (in blocks
             and closures) and reports them together. Blocked constructs: atropos 171, lachesis

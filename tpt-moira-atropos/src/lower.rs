@@ -10421,6 +10421,39 @@ impl Lower {
                 // prelude programs (e.g. `v.push(1)`, `x.is_some()`) lower to MIR
                 // and pass the borrow checker. Real method resolution / receiver
                 // adjustment is a documented codegen follow-up.
+                // `push` on a vector reached through an expression (`stack.last_mut().unwrap()`):
+                // the receiver must be a pointer to the vector, or the push would go to a copy.
+                if method.node == "push" && args.len() == 1 {
+                    let hint = self.hint_of_expr(recv).unwrap_or_default();
+                    let elem = mir::vec_ptr_elem(&hint)
+                        .or_else(|| mir::vec_elem(&hint))
+                        .map(|e| e.to_string());
+                    if let Some(elem) = elem {
+                        let v = self.lower_expr(recv)?;
+                        let mir::Operand::Var(vn) = &v else {
+                            return Err(LowerError("a vector method needs a named receiver".into()));
+                        };
+                        if !self.temp_type_of(vn).ends_with('*') {
+                            return Err(LowerError(format!(
+                                "`push` on a vector value that is not behind a pointer (`{}`)",
+                                self.temp_type_of(vn)
+                            )));
+                        }
+                        self.expect_ty = Some(elem.clone());
+                        let o = self.lower_expr(&args[0]);
+                        self.expect_ty = None;
+                        let o = o?;
+                        let t = self.fresh_temp("long long");
+                        self.emit(
+                            t.clone(),
+                            mir::Rvalue::Call(
+                                mir::Operand::Func(mir::vec_fn_name(&elem, "push")),
+                                vec![mir::Operand::var(vn.clone()), o],
+                            ),
+                        );
+                        return Ok(mir::Operand::var(t));
+                    }
+                }
                 let recv_op = self.lower_expr(recv)?;
                 let mut operands = vec![recv_op];
                 for a in args {
