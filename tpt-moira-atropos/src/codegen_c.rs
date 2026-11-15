@@ -1317,6 +1317,15 @@ fn map_helpers(
     s.push_str(&format!(
         "static long long {contains}({name}* m, {kc} k) {{ return {find}(m, k) >= 0; }}\n"
     ));
+    // `remove(k)`: the removed value as an `Option<V>`; the last entry fills the freed slot.
+    let remove = mir::map_fn_name(k, v, "remove");
+    s.push_str(&format!("static {opt} {remove}({name}* m, {kc} k) {{\n"));
+    s.push_str(&format!("    {opt} r;\n    memset(&r, 0, sizeof(r));\n"));
+    s.push_str(&format!("    long long i = {find}(m, k);\n"));
+    s.push_str("    r.tag = (i < 0) ? 1 : 0;\n");
+    s.push_str("    if (i >= 0) {\n        r.f0 = m->vals[i];\n        m->len--;\n");
+    s.push_str("        m->keys[i] = m->keys[m->len];\n        m->vals[i] = m->vals[m->len];\n    }\n");
+    s.push_str("    return r;\n}\n");
     // `entry(k).or_insert(v)`: a pointer to the value of `k`, inserting `v` first if absent.
     let entry = mir::map_fn_name(k, v, "entry_or_insert");
     s.push_str(&format!(

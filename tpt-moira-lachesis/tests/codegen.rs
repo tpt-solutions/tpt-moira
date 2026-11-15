@@ -1979,3 +1979,31 @@ fn suffixed_literal_arguments_type_an_unannotated_map() {
     };
     assert_eq!(out, "1", "a suffixed literal has its own type, so the map's element types are known");
 }
+
+#[test]
+fn append_and_map_remove_work_through_struct_fields() {
+    let out = match run_src(
+        "use std::collections::HashMap;
+        struct Store { items: Vec<i64>, index: HashMap<i64, i64> }
+        fn drain_into(s: &mut Store, other: &mut Vec<i64>) -> i64 {
+            s.items.append(other);
+            let removed = s.index.remove(&1).unwrap_or(0);
+            removed + s.items.len() as i64
+        }
+        fn main() {
+            let mut s = Store { items: vec![1, 2], index: HashMap::new() };
+            s.index.insert(1, 7);
+            let mut extra: Vec<i64> = vec![3, 4];
+            print_i64(drain_into(&mut s, &mut extra));
+            print_i64(extra.len() as i64);
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping append/remove run");
+            return;
+        }
+    };
+    assert_eq!(out, "11
+0", "append moves the items and empties the source; remove takes the entry out");
+}

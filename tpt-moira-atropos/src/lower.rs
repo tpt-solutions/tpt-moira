@@ -4172,7 +4172,7 @@ impl Lower {
         };
         if !matches!(
             method,
-            "insert" | "get" | "contains_key" | "contains" | "len" | "is_empty"
+            "insert" | "get" | "contains_key" | "contains" | "remove" | "len" | "is_empty"
         ) {
             return Ok(None);
         }
@@ -4241,6 +4241,8 @@ impl Lower {
             // an option.
             ("get", 1) => ("get_ptr", format!("{v}*")),
             ("contains" | "contains_key", 1) => ("contains_key", "long long".to_string()),
+            // `remove(&k)` takes the entry out: the removed value as an `Option<V>`.
+            ("remove", 1) => ("remove", format!("Option<{v}>")),
             ("len", 0) => ("len", "long long".to_string()),
             ("is_empty", 0) => ("is_empty", "bool".to_string()),
             _ => return Ok(None),
@@ -4268,7 +4270,9 @@ impl Lower {
                     ops.push(mir::Operand::Const(1));
                 }
             }
-            "get" | "get_ptr" | "contains_key" => ops.push(self.lower_key_arg(&args[0], &k)?),
+            "get" | "get_ptr" | "contains_key" | "remove" => {
+                ops.push(self.lower_key_arg(&args[0], &k)?)
+            }
             _ => {}
         }
         if helper == "get_ptr" {
@@ -6026,7 +6030,7 @@ impl Lower {
         let ExprKind::Field(base, field) = &recv.kind else {
             return Ok(None);
         };
-        if !(method == "push" || method == "extend") || args.len() != 1 {
+        if !(method == "push" || method == "extend" || method == "append") || args.len() != 1 {
             return Ok(None);
         }
         //  takes a named vector or field (an iterator chain stays on its own path).
@@ -6039,6 +6043,15 @@ impl Lower {
                 drain_inner = r;
                 draining = true;
             }
+        }
+        // `append(other)` / `append(&mut other)` moves every item of `other` and empties it: a
+        // draining `extend`. The argument is a `&mut Vec` either as written or as a reference.
+        if method == "append" {
+            drain_inner = match &arg0.kind {
+                ExprKind::Ref(inner, true) => inner,
+                _ => arg0,
+            };
+            draining = true;
         }
         if method == "extend"
             && !draining

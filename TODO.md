@@ -763,6 +763,13 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
             `use`d form now lowers). Probe: clotho 35 → 34, atropos 163 → 162, lachesis 120,
             driver 22. Still open: `let w = Vec::new(); let x: Vec<i64> = w;` (the element type comes
             from a later annotation; needs inference variables).
+          - Status (2026-11-15, codegen round 10): `append` on a vector field is a draining
+            `extend` (the argument is `other` or `&mut other`; the source length is cleared), and
+            `remove(&k)` on a map (a new `remove` helper returning `Option<V>`; the last entry fills
+            the freed slot). Both work through struct fields. Probe: atropos 162 → 147, lachesis
+            120 → 113, clotho 34, driver 22. Open: `let mut v = vec![3, 4];` with no annotation, passed
+            as `&mut v` to a `&mut Vec<i64>` parameter, keeps the `i32` default, so the C call has
+            the wrong type (the checker does not take the parameter type for a `vec!` local).
           - Status (2026-11-15, codegen round 7): `push` on a vector reached through an
             expression (`stack.last_mut().unwrap().push(x)`, a `Vec<Vec<T>>` element) lowers
             to the vector helper when the receiver's hint is a pointer to a vector; a receiver
