@@ -744,6 +744,13 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
             `i32` keys and values, which then mismatch the declared type (vectors too, for
             `push(1)` returned as `Vec<i64>`). Unannotated literals should unify with the
             function's return type.
+          - Status (2026-11-15, codegen round 6): literal element types now take their type from
+            the function's return type. `let mut t = Table::new(); t.insert(1, 5); t` in a
+            `-> Table` function, and `push(1)` returned as `Vec<i64>`, resolve to the declared
+            element types. Only unsuffixed literal arguments defer; other `Int`-typed arguments
+            (e.g. `i % 3` from a literal counter) still take their default. Remaining open: a
+            literal element with no return-type context keeps the `i32` default, and a `Vec`
+            literal that is not the tail value is not resolved from later uses.
           - Status (2026-11-15, codegen round 4): the probe counts every blocked construct, not
             only the first per function. Lowering continues after a skipped statement (in blocks
             and closures) and reports them together. Blocked constructs: atropos 171, lachesis

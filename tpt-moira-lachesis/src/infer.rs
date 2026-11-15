@@ -1249,7 +1249,41 @@ impl TypeChecker {
             .unwrap_or(Ty::Unit);
         self.ret_span = f.ret.as_ref().map(|t| t.span).unwrap_or(f.name.span);
         self.block_tail_expected = Some(self.ret.clone()).filter(|r| !matches!(r, Ty::Unit));
+        self.pending_vec.clear();
+        self.pending_coll.clear();
         let body_ty = self.infer_block(&f.body);
+        // A local collection returned as the tail takes the return type's key and element types
+        // (`let mut t = Table::new(); t.insert(1, 5); t` in a `-> Table` function).
+        if let Some(tail) = &f.body.tail {
+            if let ExprKind::Path(p) = &tail.kind {
+                if p.segments.len() == 1 {
+                    let name = p.segments[0].node.clone();
+                    if let Ty::Apply(ret_name, ret_args) = self.ret.clone() {
+                        if let Some((init_span, is_map)) = self.pending_coll.get(&name).copied() {
+                            let fits = if is_map {
+                                ret_name == "HashMap" && ret_args.len() == 2
+                            } else {
+                                ret_name == "HashSet" && ret_args.len() == 1
+                            };
+                            if fits && !ret_args.iter().any(has_unknown) {
+                                let t = self.ret.clone();
+                                self.expr_types
+                                    .insert((init_span.start, init_span.end), t.clone());
+                                self.expr_types.insert((tail.span.start, tail.span.end), t);
+                            }
+                        }
+                        if let Some(init_span) = self.pending_vec.get(&name).copied() {
+                            if ret_name == "Vec" && ret_args.len() == 1 && !has_unknown(&ret_args[0]) {
+                                let t = self.ret.clone();
+                                self.expr_types
+                                    .insert((init_span.start, init_span.end), t.clone());
+                                self.expr_types.insert((tail.span.start, tail.span.end), t);
+                            }
+                        }
+                    }
+                }
+            }
+        }
         // A tail whose type the context decides (`collect()`, an unsuffixed literal) takes
         // the return type.
         if let Some(tail) = &f.body.tail {
@@ -3311,6 +3345,11 @@ impl TypeChecker {
         }
         let mut tys: Vec<Ty> = Vec::new();
         for a in args {
+            // An unsuffixed literal argument's type is not decided here: the context (the
+            // function's return type) decides it.
+            if matches!(a.kind, ExprKind::Lit(Lit::Int(..))) {
+                return;
+            }
             let t = self.infer_expr(a);
             let t = match t {
                 Ty::Ref(inner) | Ty::RefMut(inner) => *inner,
@@ -3389,10 +3428,12 @@ impl TypeChecker {
                     if let Some(init_span) = self.pending_vec.get(&name).copied() {
                         if matches!(&recv_ty, Ty::Apply(v, a) if v == "Vec" && matches!(a.as_slice(), [Ty::Unknown]))
                         {
+                            // A literal's element type is decided by the context (see `check_function`).
+                            let literal = matches!(args[0].kind, ExprKind::Lit(Lit::Int(..)));
                             let et = self.infer_expr(&args[0]);
-                            // An element type that still has unknown parts (`Vec<Unknown>`) is
-                            // not yet the element type: keep waiting for a later push.
-                            if !has_unknown(&et) {
+                            // An element type that still has unknown parts (`Vec<Unknown>`) is not yet
+                            // the element type: keep waiting for a later push.
+                            if !has_unknown(&et) && !literal {
                                 let vt = Ty::Apply("Vec".to_string(), vec![et]);
                                 for scope in self.env.iter_mut().rev() {
                                     if let Some(slot) = scope.get_mut(&name) {

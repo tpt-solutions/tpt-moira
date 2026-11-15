@@ -1862,3 +1862,34 @@ fn map_get_forms_run() {
     };
     assert_eq!(out, "5575", "`get` yields a reference: unwrap, copied, match and if-let all read it");
 }
+
+#[test]
+fn literal_elements_take_the_returned_collections_types() {
+    let out = match run_src(
+        "use std::collections::HashMap;
+        type Table = HashMap<i64, i64>;
+        fn build() -> Table {
+            let mut t = Table::new();
+            t.insert(1, 5);
+            t
+        }
+        fn nums() -> Vec<i64> {
+            let mut v = Vec::new();
+            v.push(1);
+            v.push(2);
+            v
+        }
+        fn main() {
+            let t = build();
+            let v = nums();
+            print_i64(t.len() as i64 * 10 + *t.get(&1).unwrap() + v.len() as i64 * 100);
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping return-type inference run");
+            return;
+        }
+    };
+    assert_eq!(out, "215", "unsuffixed literals take the element types of the returned collection");
+}
