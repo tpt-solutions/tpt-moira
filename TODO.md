@@ -501,13 +501,13 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
              `exclusive_and_open_range_patterns_run`).
             Output is cross-process byte-identical
             (`tests/determinism.rs`).
-           - **Caveat:** enum-variant destructuring patterns (`Some(x)`,
-             `Ok(x)`) are not yet supported (the `Pat::Path` node is treated as an
-             irrefutable binder, not a variant test) — that remains the enum
-             destructuring follow-up; struct/tuple-variant field patterns are
-             rejected. A `match` may also be a tail/return expression (the parser
-             was fixed to treat a trailing `match` like an `if`-as-tail rather than
-             always forcing a `;` statement).
+           - **Enum-variant payload patterns (2026-11-16):** a literal or nested variant
+             inside a payload (`Some(1)`, `Some(Some(v))`, `Shape::Rect(3, h)`) is now a
+             test ANDed into the tag test. Previously the sub-pattern guards were discarded,
+             so `Some(1)` matched `Some(9)`: a silent miscompile. Locked in by
+             `lachesis/tests/codegen.rs::variant_payload_literal_and_nested_patterns_are_tested`.
+             A `match` may also be a tail/return expression (the parser was fixed to treat a
+             trailing `match` like an `if`-as-tail rather than always forcing a `;` statement).
     - [x] `if let` / `while let` in the type checker and MIR (parser support already landed — see Phase-2 "Resolved" note above)
           - **Status: Resolved (identifier patterns).** `tpt_moira_lachesis::infer` now detects
             the `If(Block{Local})` / `While(Block{Local})` shape (how the parser
@@ -522,8 +522,16 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
             `atropos/tests/codegen.rs` (`if_let_identifier_pattern_runs`,
             `while_let_identifier_pattern_runs` — both compile + run via a real C
             compiler).
-          - **Caveat:** enum-variant patterns (`Some(x)`, `Ok(x)`) are not yet
-            supported — that is the `match`/enum destructuring task below.
+          - **Caveat resolved (2026-11-16):** enum-variant patterns are supported in
+            `if let`/`while let` as well as `match`, including nested payloads (see the
+            `match` entry above).
+          - **`let ... else` (2026-11-16):** `let P = E else { B }; rest` was parsed and
+            the `else` block dropped, so a failing pattern read garbage (a silent
+            miscompile). The parser now desugars it to `let tmp = E; match tmp { P => { rest },
+            _ => { B } }`. Locked in by
+            `lachesis/tests/codegen.rs::let_else_runs_the_else_block_when_the_pattern_fails`.
+            Not checked: that `B` diverges (rustc rejects a non-diverging `else`), and an
+            attributed `#[..] let .. else` statement still drops the `else` block.
      - [ ] Closures: parsing, capture typing, and MIR/codegen lowering
             - **Parsing resolved (2026-08-21).** The parser did *not* actually
               recognize closure bodies: `parse_pat` folded the closure's closing `|`
@@ -594,10 +602,26 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
                `atropos/tests/codegen.rs::returned_capturing_closure_inside_assert_runs`.
                User `macro_rules!` and `matches!` are still not hoisted (lazy or repeated
                evaluation is not known statically).
-               **Still open:** (c) closures returned from impl methods,
-               from functions with statements or generics, or through a struct field or
-               `Vec` are not inlined, and a remaining capturing `make` call in those
-               positions still emits uncompilable C.
+               **Pure leading `let`s (2026-11-15):** a returned closure whose function body
+               starts with pure `let j = k * 2;` bindings is inlined too: the lets are
+               copied to the call site with the parameters renamed, and the closure captures
+               the let-bound name. Locked in by
+               `lachesis/tests/codegen.rs::returned_capturing_closure_with_pure_lets_runs_when_bound_by_let`.
+               **Methods returning capturing closures (2026-11-16):** `let f = a.make(..);`
+               inlines a closure returned from an inherent method. The receiver is bound to
+               `self` (`&a` for `&self`/`&mut self`, a copy for `self`), and the method's pure
+               lets and closure follow the free-function rules. Only methods whose name is
+               unique across all impls are inlined, since the pass runs before type checking
+               and cannot tell receiver types apart. A capturing method is removed from its
+               impl once no reference remains. Locked in by
+               `lachesis/tests/codegen.rs::returned_capturing_closure_from_method_runs_when_bound_by_let`.
+               **Still open:** (c) a call that is not a `let` initializer (`apply(a.make(), 1)`
+               is hoisted only for free functions), a method whose name is shared with another
+               impl, and a call written as `Type::make(&a)` keep the method, so it still emits
+               uncompilable C (verified: `gcc` rejects the returned pointer type). Functions with
+               impure or non-`let` statements or generics are not inlined either. A closure
+               stored through a struct field (`Holder { f: make(4) }`) is rejected with a
+               lowering error instead, which is clean but not yet supported.
     - [x] Full generics + `where`-clause solving wired into `infer` for real (non-toy) generic code
       - **Status: Resolved for the type-checking layer (2026-08-22).** `infer`
         now handles, end to end: multi-parameter generics on structs and
@@ -660,6 +684,109 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
       Probe now: clotho C 230, atropos 1215 (check 143, up 4 from an untraced cause), lachesis
       1250 (check 88), driver 209 (check ok).
     - [ ] Re-run `x.py self-host` after each milestone above; update the crate-by-crate self-hostable count (the `mod` and generics-`<` parse gaps are resolved — remaining blockers are type-check depth: `match`/closures/generics-in-`infer`/tuple-destructure)
+          - Status (2026-11-16): `x.py self-host` still reports `1/5`. This pass added
+            `str::as_bytes` (checker signature `&str -> &[u8]`, lowered to a `Slice<u8>`
+            aliasing the string's bytes via a generated `from_str` helper), so a `&[u8]`
+            struct field or local works. The report's receiver-type blockers went from 205
+            to 201 (the `Lexer::new` blocker is gone). Remaining classes, both needed before
+            a crate self-hosts: (a) methods on receivers whose type the codegen does not
+            model (`to_string`, `iter`, `retain`, `as_str` on fields and call results), and
+            (b) path calls in untyped positions (`Vec::new()`, `mem::take`, `String::new()`
+            without an annotation). Verified with probes: the same methods on named locals
+            already compile, so the gap is receiver typing, not the method set.
+          - Status (2026-11-16, hint-less receivers): receiver-type blockers 158 -> 154; still `1/5`.
+            * `HashMap::get_mut(&k)` is `Option<&mut V>` (checker) and reuses the `get` pointer
+              lowering, so a write through it persists.
+            * `Iterator::nth(i)` is a chain terminal (checker: `Option` of the item; lowering
+              counts items up to `i`). `chars().nth(i)` and vector chains both work.
+            Test: `map_get_mut_writes_through_and_iterator_nth_indexes`.
+            (Sets reached through a reference parameter (`&HashSet<T>`) are named in the hints now,
+            so the set operations work on them too; test `set_operation_through_a_reference_parameter`.
+            Receiver-type blockers 154 -> 152.)
+            (`HashSet::intersection`/`union` are done: counts, chains and `for` loops over the
+            materialised keys; test `hashset_intersection_and_union_count_and_iterate`.)
+            Still open (probed):
+            (`Option::as_ref` over a `String` is fixed: a string payload is its own reference, and
+            the checker types it so; test `option_as_ref_over_string_and_integer_runs`.)
+            `Arc<TypeHints>` fields in the compiler's own lowering (cross-crate smart pointer),
+            and `Hasher::finish`.
+          - Status (2026-11-16, split batch): receiver-type blockers 140 -> 134; still `1/5`.
+            * `str::split_once(pat)` (char or string pattern) as `Option<(str, str)>`.
+            * `Vec::split_last()` as `Option<(&T, &[T])>`: the element is a pointer
+              (`IndexRef`), matching the checker's reference. String elements are rejected
+              explicitly (a string reference is the string itself, not formed here).
+            Tests: `split_once_and_vec_split_last_run`.
+            Still open: `rsplit`, `Path` methods (`parent`, `exists`), and `as_deref` on a boxed
+            payload.
+          - Status (2026-11-16, later batches): receiver-type blockers 152 -> 140; still `1/5`.
+            * `Vec::clear`, and `Vec::dedup` for string and scalar elements (test
+              `vec_clear_and_dedup_run`).
+            * `Option::as_mut` (checker already typed it) lowers like `as_ref` (test
+              `option_as_mut_writes_through`).
+            * `HashMap::keys()` and `values()` are chain sources and `for` loops: the walk over
+              a map's `keys` or `vals` array is shared with the set operations (test
+              `map_values_and_keys_are_iterator_sources`).
+            Still open: `split_once`, `rsplit`, `split_last`, `Path` methods (`parent`, `exists`),
+            and `Option::as_deref` on a boxed payload.
+          - Status (2026-11-16, checker gaps): receiver-type blockers 163 -> 158; still `1/5`.
+            * Fixed-size arrays are named in the checker's hint as `Array<elem,N>`, so
+              `arr.len()` / `arr.is_empty()` fold to constants (locals and `const` arrays).
+            * Integer `max`/`min` are typed by the checker (same type for both operands) and
+              lower to a compare and select.
+            * `to_string()` through a reference to a string (a `HashMap::get` payload) reads the
+              string through the pointer; before, it passed the pointer and failed to build.
+            Tests: `fixed_array_len_and_integer_max_min_run`,
+            `to_string_through_a_string_reference_copies_the_string`.
+            Still open: `chars().take(n)` (no iterator adapter for a `chars` source), and the
+            hint-less receivers that remain in the report.
+          - Status (2026-11-16, parse): `let x: T = s.parse().unwrap()` and `.unwrap_or(d)`
+            lower for numeric `T` (signed/unsigned by bit width, `f64`), with C helpers
+            `moira_parse_{s,u,f}` that reject trailing text, range-check the width and panic
+            like `unwrap`. Receiver-type blockers 164 -> 163; still `1/5`. Test:
+            `let_parse_unwrap_takes_the_annotated_numeric_type`.
+            Still open: the turbofish `s.parse::<T>()`, which the parser discards (the
+            `MethodCall` node has no slot for type arguments); adding one touches every match
+            on `MethodCall`. Also `parse` in a bare `match` with no annotation.
+          - Status (2026-11-16, latest): `s.split(sep)` is also an iterator-chain source, so
+            `collect` into `Vec<&str>`, `map(..).sum()` and `count()` work. The chain materialises
+            the pieces into a `Vec<str>` (`split_to_vec`), then iterates it. Receiver-type
+            blockers 168 -> 164; still `1/5`. Test: `split_chain_collects_maps_and_counts_pieces`.
+          - Status (2026-11-16, newest): `for part in s.split(sep)` lowers (char or string
+            separator, empty pieces included, as Rust yields them), via `moira_split_*` C
+            helpers. The self-host count did not move (168): the compiler's own `split` calls
+            are chain forms (`split(..).collect()`), which still need a chain source for
+            strings. Still open: `split` chains and `collect` into `Vec<&str>`, `split_whitespace`,
+            `str::parse`, `Map::values`/`keys` as chain sources (the `for` forms work), and
+            `Vec::split_last`, `Option::as_mut`/`as_deref`, `Vec::with_capacity` untyped.
+          - Status (2026-11-16, latest): receiver-type blockers 180 -> 168; still `1/5`.
+            Added, each with a test in `lachesis/tests/codegen.rs`:
+            * `Vec::reverse`, `Vec::remove(i)` (returns the element; out of range panics) and
+              `Vec::append(&mut w)` on named vectors, as per-element C helpers.
+            * `Option::or(other)` (checker and lowering; the argument is evaluated first).
+            * `str::split_at(i)` as a `Tuple<str,str>` of two substrings.
+            * C-name escaping now renames a call target only when the program defines that
+              function. Before, every reserved-name call (`strlen`, `exit`) was renamed, which
+              broke library calls the lowering emits. Definitions and calls of a user function
+              named like a C function are still renamed together.
+            Still open on plain locals (probed): `str::split` and `parse`, `Map::values`,
+            `keys` and `entry` (on non-`or_insert` forms), `Vec::split_last`, `Option::as_mut`
+            and `as_deref`, `Vec::with_capacity` in untyped positions.
+          - Status (2026-11-16, later): receiver-type blockers 205 -> 180; still `1/5`.
+            Fixed in this pass, each with a regression test in `lachesis/tests/codegen.rs`:
+            * **`Vec`/slice `contains(&x)` on scalars** passed the `&` to the C helper, so
+              `Vec<usize>::contains(&x)` did not compile (silently wrong only in that it
+              failed to build). The argument is now the element itself.
+            * **`vec![..]` as a map value** (`m.insert(k, vec![..])`) took the checker's
+              default element type; it now takes the expected vector type from the context.
+            * **`Option::is_none_or`** lowered (the checker already typed it).
+            * **`filter_map`** in iterator chains: the `Some` payloads flow to the terminal.
+            * **`Result::map` / `Result::map_err`**, including `r.map(Some)`, with the
+              checker typing `map` (it typed only `map_err`).
+            * Blocker messages now carry the byte span and the checker hint of the receiver.
+              Spans are relative to each parsed file, so map them with the crate's own file.
+            Still open: `to_string` on `&i128`, `str::split`/`parse`/`split_at`, `Vec`
+            `reverse`/`retain`/`remove`/`split_last`/`append`, `Map::values`/`keys`/`entry`,
+            `Option::as_mut`/`as_deref`/`or`, and path calls such as `Vec::with_capacity`.
           - Status (2026-11-15, re-run): `x.py self-host` reports `1/5` self-hostable
             (`tpt-moira-alloc` only). Clotho's C had 234 `gcc -fsyntax-only` errors at the
             start of the session and 229 after these fixes: `is_some_and` on `Option`,
