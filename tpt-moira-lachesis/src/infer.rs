@@ -175,6 +175,21 @@ fn same_base_refined(result: &Ty, arm: &Ty) -> bool {
 }
 
 /// Whether a type still has an unknown part anywhere inside it.
+/// The initializer's type when it has no unknown parts, else the annotation: a `_` in an
+/// annotation is filled in from the value.
+fn return_ty_or_init(ann: &Ty, init: &Ty) -> Ty {
+    match (ann, init) {
+        (Ty::Apply(a, aa), Ty::Apply(b, ba)) if a == b && aa.len() == ba.len() => Ty::Apply(
+            a.clone(),
+            aa.iter()
+                .zip(ba)
+                .map(|(x, y)| if matches!(x, Ty::Unknown) { y.clone() } else { x.clone() })
+                .collect(),
+        ),
+        _ => ann.clone(),
+    }
+}
+
 fn has_unknown(t: &Ty) -> bool {
     match t {
         Ty::Unknown => true,
@@ -793,12 +808,28 @@ impl TypeChecker {
                             continue;
                         }
                         if let tpt_moira_clotho::ast::ItemKind::Function(f) = &m.kind {
-                            let params = f.params.iter().map(|p| cx.type_to_ty(&p.ty)).collect();
+                            let params: Vec<Ty> = f.params.iter().map(|p| cx.type_to_ty(&p.ty)).collect();
                             let ret = f.ret.as_ref().map(|t| cx.type_to_ty(t)).unwrap_or(Ty::Unit);
                             cx.method_own_generics.insert(
                                 (self_name.clone(), f.name.node.clone()),
                                 f.generics.clone(),
                             );
+                            // An associated function (no receiver) is also an associated function
+                            // value: `unwrap_or_else(Span::default)`.
+                            let has_receiver = f
+                                .params
+                                .first()
+                                .is_some_and(|p| matches!(&p.pat, Pat::Ident(n) if n.node == "self"));
+                            if !has_receiver {
+                                cx.assoc_fns
+                                    .entry((self_name.clone(), f.name.node.clone()))
+                                    .or_insert_with(|| FnSig {
+                                        params: params.clone(),
+                                        ret: ret.clone(),
+                                        is_async: f.is_async,
+                                        generics: imp.generics.clone(),
+                                    });
+                            }
                             cx.user_methods.insert(
                                 (self_name.clone(), f.name.node.clone()),
                                 FnSig {
@@ -1149,7 +1180,7 @@ impl TypeChecker {
                                 .where_clause
                                 .extend(f.generics.where_clause.clone());
                             cx.generic_scope.push(f.generics.clone());
-                            let params = f.params.iter().map(|p| cx.type_to_ty(&p.ty)).collect();
+                            let params: Vec<Ty> = f.params.iter().map(|p| cx.type_to_ty(&p.ty)).collect();
                             let ret = f.ret.as_ref().map(|t| cx.type_to_ty(t)).unwrap_or(Ty::Unit);
                             cx.generic_scope.pop();
                             let sig = FnSig {
@@ -1158,6 +1189,16 @@ impl TypeChecker {
                                 is_async: f.is_async,
                                 generics,
                             };
+                            // An associated function of an extern impl is an associated value too.
+                            let has_receiver = f
+                                .params
+                                .first()
+                                .is_some_and(|p| matches!(&p.pat, Pat::Ident(n) if n.node == "self"));
+                            if !has_receiver {
+                                cx.assoc_fns
+                                    .entry((self_name.clone(), f.name.node.clone()))
+                                    .or_insert_with(|| sig.clone());
+                            }
                             cx.user_methods
                                 .insert((self_name.clone(), f.name.node.clone()), sig);
                         }
@@ -1242,7 +1283,11 @@ impl TypeChecker {
                     let ty = if let Some(ann) = &l.ty {
                         let ann_ty = self.type_to_ty(ann);
                         if let Some(init) = &l.init {
-                            if matches!(init.kind, ExprKind::Call(..) | ExprKind::Struct(..)) {
+                            let collects = match &init.kind {
+                                ExprKind::MethodCall(_, m, a) => m.node == "collect" && a.is_empty(),
+                                _ => false,
+                            };
+                            if matches!(init.kind, ExprKind::Call(..) | ExprKind::Struct(..)) || collects {
                                 self.expected_call_ty = Some(ann_ty.clone());
                             }
                             let it = self.infer_expr(init);
@@ -1250,8 +1295,16 @@ impl TypeChecker {
                             let span = init.span;
                             self.expect(&it, &ann_ty, span);
                             self.refine_closure_result(init, &ann_ty);
+                            // A partly written annotation (`Vec<_>`) takes the parts the
+                            // initializer determined.
+                            if has_unknown(&ann_ty) && !has_unknown(&it) {
+                                return_ty_or_init(&ann_ty, &it)
+                            } else {
+                                ann_ty
+                            }
+                        } else {
+                            ann_ty
                         }
-                        ann_ty
                     } else if let Some(init) = &l.init {
                         let it = self.infer_expr(init);
                         if let Pat::Ident(n) = &l.pat {
@@ -3218,7 +3271,22 @@ impl TypeChecker {
         method: &tpt_moira_clotho::ast::Spanned<String>,
         args: &[Expr],
     ) -> Ty {
+        // `collect()` takes the target a `let` annotation gives (`Vec<_>`); its element type is the
+        // iterator's item.
+        let collect_target = if method.node == "collect" && args.is_empty() {
+            self.expected_call_ty.take()
+        } else {
+            None
+        };
         let recv_ty = self.infer_expr(recv);
+        if let Some(Ty::Apply(target, targs)) = &collect_target {
+            if target == "Vec" && targs.len() == 1 && matches!(targs.first(), Some(Ty::Unknown)) {
+                let item = self.item_of(recv.span, &recv_ty);
+                if !has_unknown(&item) {
+                    return Ty::Apply("Vec".to_string(), vec![item]);
+                }
+            }
+        }
         // `v.push(x)` on a vector whose element type is still open: `x` is its element type.
         if method.node == "push" && args.len() == 1 {
             if let ExprKind::Path(p) = &recv.kind {
@@ -4921,6 +4989,23 @@ impl TypeChecker {
                 .or_insert_with(|| sig(params.clone(), ret.clone()));
         }
 
+        // `f64::max` / `f64::min` (also as function values: `fold(0.0, f64::max)`).
+        for m in ["max", "min"] {
+            self.assoc_fns
+                .entry(("f64".into(), m.into()))
+                .or_insert_with(|| sig(vec![F64, F64], F64));
+        }
+        // `std::cmp::max` / `min` imported by name.
+        for m in ["max", "min"] {
+            self.fns
+                .entry(m.to_string())
+                .or_insert_with(|| FnSig {
+                    params: vec![Unknown, Unknown],
+                    ret: Unknown,
+                    is_async: false,
+                    generics: Default::default(),
+                });
+        }
         // Hashing and buffered IO constructors (their results are not modeled beyond `Unknown`).
         self.assoc_fns
             .entry(("DefaultHasher".into(), "new".into()))
@@ -5263,6 +5348,10 @@ impl TypeChecker {
                     .last()
                     .map(|s| s.node.clone())
                     .unwrap_or_default();
+                // The placeholder `_` (`Vec<_>`) is a type the context fills in.
+                if name == "_" && args.is_empty() {
+                    return Ty::Unknown;
+                }
                 // `impl Into<String>` / `impl AsRef<str>` (the trait's arguments are not kept): any
                 // argument that converts (a `String`, a `&str`, a `&String`) is accepted, so the
                 // type is not checked beyond that.

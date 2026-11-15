@@ -836,3 +836,23 @@ fn return_inside_closure_returns_from_the_closure() {
     ))
     .is_ok());
 }
+
+#[test]
+fn collect_into_a_partly_written_vec_takes_the_item_type() {
+    assert!(check(&parse(
+        "use std::collections::HashSet;
+        fn word_set(s: &String) -> HashSet<String> {
+            let mut h = HashSet::new();
+            h.insert(s.clone());
+            h
+        }
+        fn score(a: &HashSet<String>) -> usize { a.len() }
+        fn main() {
+            let words: Vec<String> = vec![String::from(\"x\")];
+            let sets: Vec<_> = words.iter().map(|m| word_set(m)).collect();
+            let n: usize = sets.iter().map(|s| score(s)).sum();
+            let _ = n;
+        }"
+    ))
+    .is_ok());
+}
