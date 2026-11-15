@@ -1678,3 +1678,25 @@ fn trim_matches_with_char_and_string_patterns_run() {
     };
     assert_eq!(out, "22");
 }
+
+#[test]
+fn read_only_vec_methods_on_a_field_receiver_run() {
+    let out = match run_src(
+        "struct Scan { names: Vec<String>, items: Vec<i64> }
+        fn has(sc: &Scan, n: &String) -> bool {
+            sc.names.contains(n)
+        }
+        fn main() {
+            let sc = Scan { names: vec![String::from(\"a\"), String::from(\"b\")], items: vec![1, 2, 3] };
+            let k = String::from(\"b\");
+            print_i64(has(&sc, &k) as i64 * 100 + sc.items.len() as i64);
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping field vec method run");
+            return;
+        }
+    };
+    assert_eq!(out, "103");
+}

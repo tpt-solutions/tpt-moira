@@ -10228,6 +10228,47 @@ impl Lower {
                 for a in args {
                     operands.push(self.lower_expr(a)?);
                 }
+                // A read-only vector method on any receiver (a field, `self.items.len()`): the
+                // receiver's vector value is read and its helper takes a pointer to that value.
+                if matches!(method.node.as_str(), "len" | "is_empty" | "contains") {
+                    let elem = self
+                        .hint_of_expr(recv)
+                        .as_deref()
+                        .and_then(mir::vec_elem)
+                        .map(|e| e.to_string());
+                    if let Some(elem) = elem {
+                        if method.node != "contains" || (args.len() == 1 && elem == "str") {
+                            let v = self.lower_expr(recv)?;
+                            let mir::Operand::Var(vn) = &v else {
+                                return Err(LowerError("a vector method needs a named receiver".into()));
+                            };
+                            let recv_ptr = if self.temp_type_of(vn).ends_with('*') {
+                                mir::Operand::var(vn.clone())
+                            } else {
+                                let p = self.fresh_temp(format!("{}*", mir::vec_type(&elem)));
+                                self.emit(p.clone(), mir::Rvalue::Ref(mir::Operand::var(vn.clone()), true));
+                                mir::Operand::var(p)
+                            };
+                            let mut operands = vec![recv_ptr];
+                            for a in args {
+                                self.expect_ty = Some(elem.clone());
+                                let o = self.lower_expr(a);
+                                self.expect_ty = None;
+                                operands.push(o?);
+                            }
+                            let result_ty = if method.node == "len" { "long long" } else { "bool" };
+                            let t = self.fresh_temp(result_ty);
+                            self.emit(
+                                t.clone(),
+                                mir::Rvalue::Call(
+                                    mir::Operand::Func(mir::vec_fn_name(&elem, &method.node)),
+                                    operands,
+                                ),
+                            );
+                            return Ok(mir::Operand::var(t));
+                        }
+                    }
+                }
                 // `to_vec()` of a vector or a slice: a copy of its elements as a new vector.
                 if method.node == "to_vec" && args.is_empty() {
                     let op = self.lower_expr(recv)?;
