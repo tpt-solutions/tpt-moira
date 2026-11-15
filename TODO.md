@@ -735,6 +735,14 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
             `BTreeSet` (sorted sets need rank order, not the key array); `vec![..]` as a map
             value is passed with the wrong C type (`m.insert(k, vec![..])`, found while writing a
             test). Atropos 89 blocked functions, lachesis 75, clotho 28, driver 9.
+          - Status (2026-11-15, codegen round 3): sorted sets (`BTreeSet` is hinted as
+            `Sorted<K,bool>`; chains read keys in rank order); `saturating_add/sub/mul` on
+            integers. Atropos blocked functions 89 → 88 this round. The remaining atropos
+            entries are a long tail of single std methods (`to_string` on values, `split`,
+            `remove`, `retain`, `split_last`, `split_at`, `then`, `parse`, `to_bits`, ..), one
+            per function, so each addition retires about one function. Next step worth taking:
+            make the probe list every blocked construct in a function (not only the first), so
+            the common ones can be counted and handled together.
           - Status (2026-11-15, codegen round 1): blocked functions atropos 116 → 89, lachesis
             78 → 75, clotho 30 → 29 (driver 9). Done: tuple structs (`Pair(3, 4)`, `p.0` through
             a pointer); unannotated `HashSet`/`HashMap` take their types from a later `insert`;
