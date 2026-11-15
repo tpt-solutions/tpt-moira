@@ -661,8 +661,10 @@ struct IterChain<'a> {
     chars: Option<&'a Expr>,
     /// A range source `lo..hi` (or `lo..=hi`): its items are the integers.
     range: Option<(&'a Expr, &'a Expr, bool)>,
-    /// A `HashSet` source: its items are its keys (the `keys` array, not `data`).
+    /// A `HashSet` or `BTreeSet` source: its items are its keys (the `keys` array, not `data`).
     keyed: bool,
+    /// A sorted set (`BTreeSet`): its items come in ascending key order, read through `rank`.
+    sorted: bool,
     stages: Vec<(String, Option<&'a Expr>)>,
 }
 
@@ -3046,6 +3048,7 @@ impl Lower {
                     chars: None,
                     range: Some((lo, hi, inclusive)),
                     keyed: false,
+                    sorted: false,
                     stages,
                 });
             }
@@ -3064,14 +3067,19 @@ impl Lower {
                             chars: None,
                             range: None,
                             keyed: false,
+                            sorted: false,
                             stages,
                         })
-                    } else if self.is_hash_set(seq) && !stages.iter().any(|(n, _)| n == "zip") {
+                    } else if let Some(sorted) = self.set_source_kind(seq) {
+                        if stages.iter().any(|(n, _)| n == "zip") {
+                            return None;
+                        }
                         Some(IterChain {
                             seq: Some(seq),
                             chars: None,
                             range: None,
                             keyed: true,
+                            sorted,
                             stages,
                         })
                     } else {
@@ -3105,6 +3113,7 @@ impl Lower {
                         chars: Some(&**r),
                         range: None,
                         keyed: false,
+                        sorted: false,
                         stages,
                     });
                 }
@@ -3130,10 +3139,15 @@ impl Lower {
         chain.range.is_some() || chain.chars.is_some()
     }
 
-    /// Whether `seq` is an unsorted `HashSet` (its hint is `Set<K>`): its items are its keys.
-    fn is_hash_set(&self, seq: &Expr) -> bool {
-        self.hint_of_expr(seq)
-            .is_some_and(|h| matches!(mir::split_generic(&h), Some(("Set", a)) if a.len() == 1))
+    /// A set's kind from its hint: `Some(false)` for an unsorted `HashSet` (`Set<K>`), `Some(true)`
+    /// for a sorted `BTreeSet` (`Sorted<K,bool>`), `None` for anything else.
+    fn set_source_kind(&self, seq: &Expr) -> Option<bool> {
+        let h = self.hint_of_expr(seq)?;
+        match mir::split_generic(&h) {
+            Some(("Set", a)) if a.len() == 1 => Some(false),
+            Some(("Sorted", a)) if a.len() == 2 && a[1] == "bool" => Some(true),
+            _ => None,
+        }
     }
 
     /// Whether `seq` is a vector, slice or array value the chain can index.
@@ -3158,6 +3172,7 @@ impl Lower {
         };
         let set_key = match mir::split_generic(&hint) {
             Some(("Set", a)) if a.len() == 1 => Some(a[0].to_string()),
+            Some(("Sorted", a)) if a.len() == 2 && a[1] == "bool" => Some(a[0].to_string()),
             _ => None,
         };
         let (elem, hinted_ptr) = match set_key
@@ -3257,6 +3272,7 @@ impl Lower {
         term_args: &[Expr],
     ) -> Result<mir::Operand> {
         let keyed = chain.keyed;
+        let sorted = chain.sorted;
         // The source: a sequence's name, element type and pointer-ness, or a range's
         // bounds (lowered now, before the loop).
         let source = match (chain.seq, chain.range) {
@@ -3453,8 +3469,20 @@ impl Lower {
 
         // The loop counter, its bound, and (for a sequence) the data pointer.
         let idx = self.fresh_temp("long long");
+        // A sorted set's items are read at `rank(set, idx)`: its pointer, and its key type.
+        let mut rank_src: Option<(mir::Operand, String)> = None;
         let (bound, data) = match &source {
             Ok((vname, elem, is_ptr)) => {
+                if sorted {
+                    let set_ptr = if *is_ptr {
+                        mir::Operand::var(vname.clone())
+                    } else {
+                        let p = self.fresh_temp(format!("Map<{elem},bool>*"));
+                        self.emit(p.clone(), mir::Rvalue::Ref(mir::Operand::var(vname.clone()), true));
+                        mir::Operand::var(p)
+                    };
+                    rank_src = Some((set_ptr, elem.clone()));
+                }
                 let len = self.fresh_temp("long long");
                 self.emit(
                     len.clone(),
@@ -3495,10 +3523,25 @@ impl Lower {
 
         self.current = body_blk;
         let mut item = self.fresh_temp(elem.clone());
+        // The position of this item in the key array: the loop counter, or a sorted set's rank.
+        let at = match &rank_src {
+            Some((set_ptr, k)) => {
+                let j = self.fresh_temp("long long");
+                self.emit(
+                    j.clone(),
+                    mir::Rvalue::Call(
+                        mir::Operand::Func(mir::map_fn_name(k, "bool", "rank")),
+                        vec![set_ptr.clone(), mir::Operand::var(idx.clone())],
+                    ),
+                );
+                mir::Operand::var(j)
+            }
+            None => mir::Operand::var(idx.clone()),
+        };
         match data {
             Some(data) => self.emit(
                 item.clone(),
-                mir::Rvalue::Index(mir::Operand::var(data), mir::Operand::var(idx.clone())),
+                mir::Rvalue::Index(mir::Operand::var(data), at),
             ),
             None => self.emit(
                 item.clone(),

@@ -315,6 +315,10 @@ fn hint_compound(ty: &Ty) -> Option<String> {
             let parts: Option<Vec<String>> = args.iter().map(hint_elem_name).collect();
             parts.map(|p| format!("Sorted<{}>", p.join(",")))
         }
+        // A sorted set is a sorted map to `bool` (the lowering's `BTreeSet` C type).
+        Ty::Apply(name, args) if name == "BTreeSet" && args.len() == 1 => {
+            hint_elem_name(&args[0]).map(|k| format!("Sorted<{k},bool>"))
+        }
         // A function type is `Fn<params..,result>`: the C backend makes it a function
         // pointer with that signature. A `()` result is a zero value (`long long`).
         Ty::Fn(params, ret) => {

@@ -1762,3 +1762,29 @@ fn hashset_iterator_chains_read_its_keys_and_run() {
     };
     assert_eq!(out, "11");
 }
+
+#[test]
+fn btreeset_iterator_chains_read_in_key_order_and_run() {
+    let out = match run_src(
+        "use std::collections::BTreeSet;
+        fn main() {
+            let mut s: BTreeSet<i64> = BTreeSet::new();
+            s.insert(9);
+            s.insert(4);
+            s.insert(6);
+            let mut first = 0;
+            if let Some(x) = s.iter().next() {
+                first = *x;
+            }
+            let big = s.iter().filter(|x| **x > 5).count() as i64;
+            print_i64(first * 10 + big);
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping BTreeSet chain run");
+            return;
+        }
+    };
+    assert_eq!(out, "42", "the first item of a sorted set is its smallest key");
+}
