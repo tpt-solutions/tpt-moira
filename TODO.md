@@ -729,6 +729,12 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
             known cases were renamed (MIR types, `rename_rvalue_map`), others (for example
             `new`/`fmt`/`main` across modules) are not yet a checker error only because the
             uses resolve to the right one.
+          - Status (2026-11-15, codegen round 2): iterator `next()` (a chain terminal) and
+            iterator chains over a `HashSet` (its `keys` array). Chains over fields, `enumerate`,
+            `count`, `any` and `filter` were verified by runs. Still blocked: `iter` over a
+            `BTreeSet` (sorted sets need rank order, not the key array); `vec![..]` as a map
+            value is passed with the wrong C type (`m.insert(k, vec![..])`, found while writing a
+            test). Atropos 89 blocked functions, lachesis 75, clotho 28, driver 9.
           - Status (2026-11-15, codegen round 1): blocked functions atropos 116 → 89, lachesis
             78 → 75, clotho 30 → 29 (driver 9). Done: tuple structs (`Pair(3, 4)`, `p.0` through
             a pointer); unannotated `HashSet`/`HashMap` take their types from a later `insert`;
