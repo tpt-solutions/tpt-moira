@@ -819,3 +819,20 @@ fn overlapping_mutable_borrows_are_still_rejected() {
     ))
     .is_err());
 }
+
+#[test]
+fn return_inside_closure_returns_from_the_closure() {
+    assert!(check(&parse(
+        "fn f() -> i64 {
+            let g = |x: i64| {
+                if x > 0 {
+                    return;
+                }
+            };
+            g(1);
+            3
+        }
+        fn main() { let _ = f(); }"
+    ))
+    .is_ok());
+}

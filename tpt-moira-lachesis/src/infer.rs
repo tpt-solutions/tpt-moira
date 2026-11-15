@@ -1690,7 +1690,14 @@ impl TypeChecker {
                 self.bind_pattern(&p.pat, &pt);
             }
         }
+        // A `return` in the closure body returns from the closure, not from the enclosing function.
+        let closure_ret = match ret {
+            Some(r) => self.type_to_ty(r),
+            None => Ty::Unknown,
+        };
+        let saved_ret = std::mem::replace(&mut self.ret, closure_ret);
         let body_ty = self.infer_expr(body);
+        self.ret = saved_ret;
         let ret_ty: Ty = match ret {
             Some(r) => self.type_to_ty(r),
             None => body_ty.clone(),
