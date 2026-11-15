@@ -719,6 +719,19 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
             lowering agrees. Open items: `thread::scope`, `Command` output types, a
             `TypeHints::new()` alias path, `str::to_string` as a function value, and a name
             clash between a clotho `Stmt` and a `clotho_Stmt` type in the checker.
+          - Status (2026-11-15, checker round 5): probe now reads: atropos check 19 errors
+            (was 20), lachesis check 10 (was 71 at the start of round 3). Done: `ref` bindings
+            (`Pat::RefIdent`); generic struct literals in instantiated generic bodies name their
+            instance; the solver sees extern impls and derives; tuple and collection equality
+            element by element; `return` in a closure checks against the closure; aliases in
+            associated-function calls (`Subst::new()`); `DefaultHasher`/`BufReader`/`File`
+            constructors; `fs::write` data; `Cow<str>` compares as a string. The borrow check's
+            lowering skips functions whose codegen is a gap instead of failing `--check`.
+            Open: `Spanned<String>` vs `Spanned__String` inside lachesis' own root code (about 6
+            errors: the root's values are not renamed where the extern's signatures are); path
+            values such as `f64::max`, `Span::default` and `cmp::max` as functions; the
+            `&_` element of a closure over `moira_sets`; a `mono.rs` reference mismatch (1).
+            Codegen blocked functions: clotho 29, atropos 116, lachesis 78, driver 9.
           - Status (2026-11-15, checker round 4): `ref` bindings (above). Note the open item
             below about `ref x` is now done.
           - Status (2026-11-15, checker round 3): lachesis checker errors 71 → 32; atropos
