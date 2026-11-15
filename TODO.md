@@ -710,6 +710,13 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
             the checker types it so; test `option_as_ref_over_string_and_integer_runs`.)
             `Arc<TypeHints>` fields in the compiler's own lowering (cross-crate smart pointer),
             and `Hasher::finish`.
+          - Status (2026-11-16, closure parameters): the checker types a closure passed for a
+            function-typed parameter (`impl Fn(A)`, `&mut impl FnMut(A)`, `fn(A)`) from that
+            type, and `Fn`/`FnMut`/`FnOnce` path types are function types. Lowering is still
+            limited: a lifted closure and a function-pointer type take `long long` parameters
+            (`func_ptr_c_type`), so a struct argument such as `Option<T>` does not fit. That
+            ABI is the next blocker for closures over non-scalar values (`is_none` on a closure
+            parameter in the compiler's own `for_each_use_path`).
           - Status (2026-11-16, constructors): path-call blockers (`call to new`) 38 -> 30;
             receiver-type blockers unchanged at 134; still `1/5`. Fixed in this batch:
             * `Vec::new()` / `HashMap::new()` pushed into a field take the element type; a
