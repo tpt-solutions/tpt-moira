@@ -10106,6 +10106,30 @@ impl Lower {
                 }
                 // `x.wrapping_add(y)` and the other wrapping operators on a number: the C
                 // operator (a fixed-width machine integer wraps the same way).
+                // `x.saturating_add(y)` and the other saturating operators: a runtime helper per operator
+                // (`saturating_sub` clamps at zero for an unsigned receiver).
+                if matches!(method.node.as_str(), "saturating_add" | "saturating_sub" | "saturating_mul")
+                    && args.len() == 1
+                    && self.receiver_is_number(recv)
+                {
+                    let unsigned = self.hint_of_expr(recv).as_deref().is_some_and(|h| {
+                        matches!(h, "usize" | "u64" | "u32" | "u16" | "u8" | "unsigned long long")
+                    });
+                    let helper = match method.node.as_str() {
+                        "saturating_add" => "moira_sat_add",
+                        "saturating_mul" => "moira_sat_mul",
+                        _ if unsigned => "moira_sat_sub_unsigned",
+                        _ => "moira_sat_sub",
+                    };
+                    let a = self.lower_expr(recv)?;
+                    let b = self.lower_expr(&args[0])?;
+                    let t = self.fresh_temp("long long");
+                    self.emit(
+                        t.clone(),
+                        mir::Rvalue::Call(mir::Operand::Func(helper.to_string()), vec![a, b]),
+                    );
+                    return Ok(mir::Operand::var(t));
+                }
                 if let Some(op) = wrapping_binop(&method.node) {
                     if args.len() == 1 && self.receiver_is_number(recv) {
                         let a = self.lower_expr(recv)?;

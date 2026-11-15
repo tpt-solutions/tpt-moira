@@ -1788,3 +1788,24 @@ fn btreeset_iterator_chains_read_in_key_order_and_run() {
     };
     assert_eq!(out, "42", "the first item of a sorted set is its smallest key");
 }
+
+#[test]
+fn saturating_integer_methods_run() {
+    let out = match run_src(
+        "fn main() {
+            let a: i64 = 5;
+            let b: usize = 2;
+            let s = a.saturating_sub(9);
+            let u = b.saturating_sub(7);
+            let m = (a * 4).saturating_mul(3);
+            print_i64(s * 100 + u * 10 + m / 10);
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping saturating run");
+            return;
+        }
+    };
+    assert_eq!(out, "-394", "signed saturation goes negative; unsigned `saturating_sub` stops at 0");
+}
