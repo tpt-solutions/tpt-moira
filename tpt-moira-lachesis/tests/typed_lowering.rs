@@ -945,7 +945,7 @@ fn main() {
     *m.entry(3).or_insert(10) += 5;
     let d = *m.entry(4).or_default();
     print_i64(m.len() as i64);
-    print_i64(m.get(3).unwrap_or(-1));
+    print_i64(m.get(3).copied().unwrap_or(-1));
     print_i64(d);
     let mut a = Acc { total: 4 };
     a.total += 3;
@@ -1018,8 +1018,8 @@ fn main() {
     m.entry(1).and_modify(|v| *v += 5).or_insert(1);
     m.entry(1).and_modify(|v| *v += 5).or_insert(1);
     m.entry(2).and_modify(|v| *v += 5).or_insert(100);
-    print_i64(m.get(1).unwrap_or(-1));
-    print_i64(m.get(2).unwrap_or(-1));
+    print_i64(m.get(1).copied().unwrap_or(-1));
+    print_i64(m.get(2).copied().unwrap_or(-1));
 }
 "#;
     if let Some(out) = check_and_run("entry_and_modify", src) {
@@ -1111,7 +1111,7 @@ fn main() {
     let vals: Vec<i64> = vec![10, 20];
     let m: HashMap<i64, i64> = keys.iter().map(|p| *p * 100).zip(vals.iter()).map(|(k, v)| (k, *v)).collect();
     print_i64(m.len() as i64);
-    print_i64(m.get(200).unwrap_or(-1));
+    print_i64(m.get(200).copied().unwrap_or(-1));
 }
 "#;
     if let Some(out) = check_and_run("iter_zip_map", src) {

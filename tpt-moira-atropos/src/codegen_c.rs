@@ -1266,6 +1266,7 @@ fn map_helpers(
     let find = mir::map_fn_name(k, v, "find");
     let insert = mir::map_fn_name(k, v, "insert");
     let get = mir::map_fn_name(k, v, "get");
+    let get_ptr = mir::map_fn_name(k, v, "get_ptr");
     let contains = mir::map_fn_name(k, v, "contains_key");
     let len = mir::map_fn_name(k, v, "len");
     let is_empty = mir::map_fn_name(k, v, "is_empty");
@@ -1305,6 +1306,14 @@ fn map_helpers(
     s.push_str(
         "    r.tag = (i < 0) ? 1 : 0;\n    if (i >= 0) r.f0 = m->vals[i];\n    return r;\n}\n",
     );
+    // `get_ptr`: a pointer to the value of `k`, or NULL (the checker's `Option<&V>` payload).
+    s.push_str(&format!("static {vc}* {get_ptr}({name}* m, {kc} k) {{
+"));
+    s.push_str(&format!("    long long i = {find}(m, k);
+"));
+    s.push_str("    return i < 0 ? NULL : &m->vals[i];
+}
+");
     s.push_str(&format!(
         "static long long {contains}({name}* m, {kc} k) {{ return {find}(m, k) >= 0; }}\n"
     ));

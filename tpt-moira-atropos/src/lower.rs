@@ -2571,6 +2571,7 @@ impl Lower {
                             h == "str"
                                 || is_scalar_pointer_hint(h)
                                 || self.struct_names.contains(h)
+                                || (h.ends_with('*') && self.struct_names.contains(h.trim_end_matches('*')))
                                 // A call returning a function value (`let f = make();`
                                 // where `make() -> fn(i64) -> i64`) is a function pointer.
                                 || h.starts_with("Fn<")
@@ -4228,7 +4229,9 @@ impl Lower {
             // A set's `insert(x)` and `contains(&x)` are the map's with the value `true`.
             ("insert", 1) => ("insert", format!("Option<{v}>")),
             ("insert", 2) => ("insert", format!("Option<{v}>")),
-            ("get", 1) => ("get", format!("Option<{v}>")),
+            // `get` is the checker's `Option<&V>`: a pointer to the value (NULL when absent) inside
+            // an option.
+            ("get", 1) => ("get_ptr", format!("{v}*")),
             ("contains" | "contains_key", 1) => ("contains_key", "long long".to_string()),
             ("len", 0) => ("len", "long long".to_string()),
             ("is_empty", 0) => ("is_empty", "bool".to_string()),
@@ -4257,8 +4260,37 @@ impl Lower {
                     ops.push(mir::Operand::Const(1));
                 }
             }
-            "get" | "contains_key" => ops.push(self.lower_key_arg(&args[0], &k)?),
+            "get" | "get_ptr" | "contains_key" => ops.push(self.lower_key_arg(&args[0], &k)?),
             _ => {}
+        }
+        if helper == "get_ptr" {
+            let p = self.fresh_temp(format!("{v}*"));
+            self.emit(
+                p.clone(),
+                mir::Rvalue::Call(mir::Operand::Func(mir::map_fn_name(&k, &v, helper)), ops),
+            );
+            // The option is absent exactly when the pointer is NULL (tag 1, as `None`).
+            let absent = self.fresh_temp("long long");
+            self.emit(
+                absent.clone(),
+                mir::Rvalue::Binary(
+                    mir::MirBinOp::Eq,
+                    mir::Operand::var(p.clone()),
+                    mir::Operand::Const(0),
+                ),
+            );
+            let t = self.fresh_temp(format!("Option<{v}*>"));
+            self.emit(
+                t.clone(),
+                mir::Rvalue::StructLit(
+                    "Option".to_string(),
+                    vec![
+                        ("tag".to_string(), mir::Operand::var(absent)),
+                        ("f0".to_string(), mir::Operand::var(p)),
+                    ],
+                ),
+            );
+            return Ok(Some(mir::Operand::var(t)));
         }
         let t = self.fresh_temp(ret_ty);
         self.emit(
@@ -7539,7 +7571,16 @@ impl Lower {
         let user_type =
             self.struct_names.contains(&ty) || self.variants.values().any(|(e, _, _)| *e == ty);
         if method == "clone" && args.is_empty() && user_type {
-            return Ok(Some(self.lower_expr(recv)?));
+            // A copy of the value: through a pointer receiver the value is read out.
+            let op = self.lower_expr(recv)?;
+            if let mir::Operand::Var(n) = &op {
+                if self.temp_type_of(n).ends_with('*') {
+                    let v = self.fresh_temp(ty.clone());
+                    self.emit(v.clone(), mir::Rvalue::Unary(mir::MirUnOp::Deref, op));
+                    return Ok(Some(mir::Operand::var(v)));
+                }
+            }
+            return Ok(Some(op));
         }
         let Some((cname, kind, ret)) = self.methods.get(&(ty.clone(), method.to_string())).cloned()
         else {

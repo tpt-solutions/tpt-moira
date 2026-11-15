@@ -500,6 +500,10 @@ pub fn hint_of_ty(ty: &Ty) -> Option<String> {
             Ty::Apply(name, args) if name == "Vec" && args.len() == 1 => {
                 hint_elem_name(&args[0]).map(|e| format!("Vec<{e}>*"))
             }
+            // A reference to a user struct is a pointer to it.
+            Ty::Struct(name) if !matches!(name.as_str(), "Vec" | "Option" | "Result" | "Self") => {
+                Some(format!("{name}*"))
+            }
             _ => None,
         },
         _ => None,
@@ -3573,7 +3577,9 @@ impl TypeChecker {
                 let result = match (method.node.as_str(), args.len()) {
                     // `get`/`remove` give `Option<V>`. (Rust's `get` is `Option<&V>`; the lowering
                     // of map lookups produces the value, so the checker keeps that shape.)
-                    ("get" | "remove", 1) => Some(Ty::Apply("Option".to_string(), vec![v])),
+                    // `get` views the value: `Option<&V>`. `remove` takes it: `Option<V>`.
+                    ("get", 1) => Some(Ty::Apply("Option".to_string(), vec![Ty::Ref(Box::new(v))])),
+                    ("remove", 1) => Some(Ty::Apply("Option".to_string(), vec![v])),
                     ("insert", 2) => Some(Ty::Apply("Option".to_string(), vec![v])),
                     ("entry", 1) => Some(Ty::Apply(
                         "Entry".to_string(),

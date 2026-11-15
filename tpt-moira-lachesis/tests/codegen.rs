@@ -1833,3 +1833,32 @@ fn map_constructed_through_a_type_alias_runs() {
     };
     assert_eq!(out, "15");
 }
+
+#[test]
+fn map_get_forms_run() {
+    let out = match run_src(
+        "use std::collections::HashMap;
+        fn main() {
+            let mut t: HashMap<i64, i64> = HashMap::new();
+            t.insert(1, 5);
+            let a = *t.get(&1).unwrap();
+            let b = t.get(&1).copied().unwrap_or(0);
+            let c = match t.get(&2) {
+                Some(v) => *v,
+                None => 7,
+            };
+            let mut d = 0;
+            if let Some(v) = t.get(&1) {
+                d = *v;
+            }
+            print_i64(a * 1000 + b * 100 + c * 10 + d);
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping map get run");
+            return;
+        }
+    };
+    assert_eq!(out, "5575", "`get` yields a reference: unwrap, copied, match and if-let all read it");
+}
