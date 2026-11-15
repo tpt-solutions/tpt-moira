@@ -710,6 +710,15 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
             the checker types it so; test `option_as_ref_over_string_and_integer_runs`.)
             `Arc<TypeHints>` fields in the compiler's own lowering (cross-crate smart pointer),
             and `Hasher::finish`.
+          - Status (2026-11-16, constructors): path-call blockers (`call to new`) 38 -> 30;
+            receiver-type blockers unchanged at 134; still `1/5`. Fixed in this batch:
+            * `Vec::new()` / `HashMap::new()` pushed into a field take the element type; a
+              returned value and a function body's tail take the function's return type; a
+              bare `None` in a tuple component takes its expected `Option<..>` type.
+            * A block after an explicit `return` no longer gets a second `return` of the
+              function's value, which was invalid C for non-scalar returns (and a silent
+              wrong value where C accepted it).
+            Test: `constructors_take_the_expected_type_in_returns_and_pushes`.
           - Status (2026-11-16, split batch): receiver-type blockers 140 -> 134; still `1/5`.
             * `str::split_once(pat)` (char or string pattern) as `Option<(str, str)>`.
             * `Vec::split_last()` as `Option<(&T, &[T])>`: the element is a pointer

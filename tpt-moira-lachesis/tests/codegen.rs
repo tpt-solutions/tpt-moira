@@ -977,6 +977,43 @@ fn split_once_and_vec_split_last_run() {
     assert_eq!(out, "key val=x\n2\n3\n2\n0", "split_once and split_last should match Rust");
 }
 
+/// Constructors and `None` take the type the context expects: a returned tuple's components
+/// (`Vec::new()`, `None`), a `return` of `Vec::new()` (its code after the return is dead and
+/// keeps no second return), and a `push` of `HashMap::new()` into a field.
+#[test]
+fn constructors_take_the_expected_type_in_returns_and_pushes() {
+    let out = match run_src(
+        "use std::collections::HashMap;
+        struct E { env: Vec<HashMap<String, i64>> }
+        fn pair(n: usize) -> (Vec<usize>, Option<usize>, usize) {
+            if n == 0 {
+                return (Vec::new(), None, 0);
+            }
+            (Vec::new(), Some(n), n)
+        }
+        fn fresh() -> Vec<usize> {
+            return Vec::new();
+        }
+        fn main() {
+            let (v, o, k) = pair(3);
+            print_i64(v.len() as i64);
+            print_bool(o.is_some());
+            print_i64(k as i64);
+            print_i64(fresh().len() as i64);
+            let mut e = E { env: Vec::new() };
+            e.env.push(HashMap::new());
+            print_i64(e.env.len() as i64);
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping constructor run");
+            return;
+        }
+    };
+    assert_eq!(out, "0\ntrue\n3\n0\n1", "constructors should take the expected type");
+}
+
 #[test]
 fn enum_match_and_if_let_run() {
     // Enum-variant construction (`Some(7)` / `None`), `match` with
