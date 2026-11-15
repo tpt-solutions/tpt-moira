@@ -91,7 +91,7 @@ fn generic_function_with_one_instance_keeps_no_generic_original() {
             .expect("instance program should lower"),
     );
     assert!(
-        !stripped.contains("id(int64_t x) {") && !stripped.contains("int32_t id(int32_t")
+        !stripped.contains("id(long long x) {") && !stripped.contains("int32_t id(int32_t")
             || stripped.contains("id__i32"),
         "generic original emitted"
     );
