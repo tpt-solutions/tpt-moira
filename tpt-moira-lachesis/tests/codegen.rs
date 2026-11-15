@@ -1732,3 +1732,33 @@ fn iterator_next_on_a_map_lookup_runs() {
     };
     assert_eq!(out, "7");
 }
+
+#[test]
+fn hashset_iterator_chains_read_its_keys_and_run() {
+    // The order of a set's items is not specified, so the test only counts them.
+    let out = match run_src(
+        "use std::collections::HashSet;
+        struct Holder { seen: HashSet<i64> }
+        fn has_item(h: &Holder) -> i64 {
+            match h.seen.iter().next() {
+                Some(_) => 1,
+                None => 0,
+            }
+        }
+        fn main() {
+            let mut s: HashSet<i64> = HashSet::new();
+            s.insert(4);
+            s.insert(9);
+            let big = s.iter().filter(|x| **x > 5).count() as i64;
+            let h = Holder { seen: s };
+            print_i64(has_item(&h) * 10 + big);
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping HashSet chain run");
+            return;
+        }
+    };
+    assert_eq!(out, "11");
+}

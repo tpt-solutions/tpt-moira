@@ -661,6 +661,8 @@ struct IterChain<'a> {
     chars: Option<&'a Expr>,
     /// A range source `lo..hi` (or `lo..=hi`): its items are the integers.
     range: Option<(&'a Expr, &'a Expr, bool)>,
+    /// A `HashSet` source: its items are its keys (the `keys` array, not `data`).
+    keyed: bool,
     stages: Vec<(String, Option<&'a Expr>)>,
 }
 
@@ -3043,6 +3045,7 @@ impl Lower {
                     seq: None,
                     chars: None,
                     range: Some((lo, hi, inclusive)),
+                    keyed: false,
                     stages,
                 });
             }
@@ -3060,6 +3063,15 @@ impl Lower {
                             seq: Some(seq),
                             chars: None,
                             range: None,
+                            keyed: false,
+                            stages,
+                        })
+                    } else if self.is_hash_set(seq) && !stages.iter().any(|(n, _)| n == "zip") {
+                        Some(IterChain {
+                            seq: Some(seq),
+                            chars: None,
+                            range: None,
+                            keyed: true,
                             stages,
                         })
                     } else {
@@ -3092,6 +3104,7 @@ impl Lower {
                         seq: None,
                         chars: Some(&**r),
                         range: None,
+                        keyed: false,
                         stages,
                     });
                 }
@@ -3117,6 +3130,12 @@ impl Lower {
         chain.range.is_some() || chain.chars.is_some()
     }
 
+    /// Whether `seq` is an unsorted `HashSet` (its hint is `Set<K>`): its items are its keys.
+    fn is_hash_set(&self, seq: &Expr) -> bool {
+        self.hint_of_expr(seq)
+            .is_some_and(|h| matches!(mir::split_generic(&h), Some(("Set", a)) if a.len() == 1))
+    }
+
     /// Whether `seq` is a vector, slice or array value the chain can index.
     fn is_sequence(&self, seq: &Expr) -> bool {
         self.vec_local(seq).is_some()
@@ -3137,9 +3156,14 @@ impl Lower {
             Some(h) => h,
             None => return Err(LowerError("iterator chain over an unknown sequence".into())),
         };
-        let (elem, hinted_ptr) = match mir::vec_elem(&hint)
-            .or_else(|| mir::slice_elem(&hint))
-            .map(|e| (e.to_string(), false))
+        let set_key = match mir::split_generic(&hint) {
+            Some(("Set", a)) if a.len() == 1 => Some(a[0].to_string()),
+            _ => None,
+        };
+        let (elem, hinted_ptr) = match set_key
+            .map(|k| (k, false))
+            .or_else(|| mir::vec_elem(&hint).map(|e| (e.to_string(), false)))
+            .or_else(|| mir::slice_elem(&hint).map(|e| (e.to_string(), false)))
             .or_else(|| mir::vec_ptr_elem(&hint).map(|e| (e.to_string(), true)))
         {
             Some(p) => p,
@@ -3232,6 +3256,7 @@ impl Lower {
         terminal: &str,
         term_args: &[Expr],
     ) -> Result<mir::Operand> {
+        let keyed = chain.keyed;
         // The source: a sequence's name, element type and pointer-ness, or a range's
         // bounds (lowered now, before the loop).
         let source = match (chain.seq, chain.range) {
@@ -3436,9 +3461,11 @@ impl Lower {
                     mir::Rvalue::Field(mir::Operand::var(vname.clone()), "len".into(), *is_ptr),
                 );
                 let data = self.fresh_temp(format!("{elem}*"));
+                // A set's items are its `keys` array; a vector's are its `data`.
+                let data_field = if keyed { "keys" } else { "data" };
                 self.emit(
                     data.clone(),
-                    mir::Rvalue::Field(mir::Operand::var(vname.clone()), "data".into(), *is_ptr),
+                    mir::Rvalue::Field(mir::Operand::var(vname.clone()), data_field.into(), *is_ptr),
                 );
                 self.emit(idx.clone(), mir::Rvalue::Use(mir::Operand::Const(0)));
                 (mir::Operand::var(len), Some(data))
