@@ -2099,6 +2099,18 @@ impl TypeChecker {
                 let tt = self.infer_block(then_b);
                 match else_b {
                     Some(eb) => {
+                        // An `else` that is only a call (`Vec::new()`) takes the `then` branch's
+                        // type as its expectation, when that type is concrete.
+                        let else_is_call = match &eb.kind {
+                            ExprKind::Block(b) => {
+                                b.stmts.is_empty()
+                                    && matches!(b.tail.as_deref().map(|t| &t.kind), Some(ExprKind::Call(..)))
+                            }
+                            other => matches!(other, ExprKind::Call(..)),
+                        };
+                        if else_is_call && !has_unknown(&tt) {
+                            self.expected_call_ty = Some(tt.clone());
+                        }
                         let et = if matches!(eb.kind, ExprKind::Block(_)) {
                             if let ExprKind::Block(b) = &eb.kind {
                                 self.infer_block(b)
@@ -2108,6 +2120,7 @@ impl TypeChecker {
                         } else {
                             self.infer_expr(eb)
                         };
+                        self.expected_call_ty = None;
                         // A branch typed by nothing else (a bare `None`) takes the other
                         // branch's type, and its tail records it.
                         let else_tail: Option<&Expr> = match &eb.kind {
@@ -3713,6 +3726,14 @@ impl TypeChecker {
                     Some((name.clone(), method.node.clone(), method.span)),
                 );
             }
+        }
+        // `clone()` of a std container is the receiver's own type (the table's `Vec<Unknown>`
+        // would lose the element type).
+        if args.is_empty()
+            && method.node == "clone"
+            && matches!(recv_name.as_deref(), Some("Vec" | "String" | "PathBuf" | "Cow"))
+        {
+            return self.strip_refs(&recv_ty);
         }
         // 2) Prelude method (`std` types). These carry no receiver in their
         //    signature; all parameters are the call arguments.

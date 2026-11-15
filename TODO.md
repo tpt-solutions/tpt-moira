@@ -775,6 +775,11 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
             takes its element types from a later `insert` (the pending collection keeps its
             constructor name), and `v.extend(w)` fixes an open vector's element type from `w` (a
             `vec![..]` of literals waits, as `push` does). Probe: lachesis 110 → 109; the rest unchanged.
+          - Status (2026-11-15, codegen round 14): `clone()` of a std container (`Vec`, `String`,
+            `PathBuf`, `Cow`) is the receiver's own type; the std table's `Vec<Unknown>` had lost
+            the element type. An `else` that is only a call takes the `then` branch's type as its
+            expectation (`if c { v.clone() } else { Vec::new() }`). Probe: clotho 33 → 29, atropos
+            146 → 145, lachesis 109 → 106, driver 22.
           - Status (2026-11-15, codegen round 10): `append` on a vector field is a draining
             `extend` (the argument is `other` or `&mut other`; the source length is cleared), and
             `remove(&k)` on a map (a new `remove` helper returning `Option<V>`; the last entry fills

@@ -2072,3 +2072,23 @@ fn untyped_extend_and_btree_constructors_take_their_element_types() {
     };
     assert_eq!(out, "21", "extend takes the element type of its argument; BTreeMap::new takes it from insert");
 }
+
+#[test]
+fn clone_of_a_vector_reference_types_an_if_with_a_new_else() {
+    let out = match run_src(
+        "fn inherit(gated: bool, attrs: &Vec<i64>) -> Vec<i64> {
+            if gated { attrs.clone() } else { Vec::new() }
+        }
+        fn main() {
+            let a = vec![1i64];
+            print_i64(inherit(true, &a).len() as i64 * 10 + inherit(false, &a).len() as i64);
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping clone/if run");
+            return;
+        }
+    };
+    assert_eq!(out, "10", "clone of `&Vec<T>` is a Vec<T>, so the else branch's Vec::new takes that type");
+}
