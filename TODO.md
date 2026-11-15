@@ -719,6 +719,19 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
             lowering agrees. Open items: `thread::scope`, `Command` output types, a
             `TypeHints::new()` alias path, `str::to_string` as a function value, and a name
             clash between a clotho `Stmt` and a `clotho_Stmt` type in the checker.
+          - Status (2026-11-15, checker round 6): lachesis now passes the checker (probe: check
+            ok; was 71 errors in round 3). Atropos: 19 checker errors. Done: enum payloads are
+            monomorphized (`Pat::Ident(Spanned<String>)` names `Spanned__str`), and `String` and
+            `str` share one instance name; the solver sees extern impls; `_` in types is an
+            unknown; `collect()` under `Vec<_>` takes the item type; partly written annotations
+            take the initializer's parts; receiver-free impl functions (`Span::default`) and
+            `f64::max` are values. Parser gaps found (valid Rust, not parsed by clotho): slice
+            patterns `[a, b]` and guards in `matches!`. Open in atropos: a borrow-check report
+            "reference to local `t0` escapes" in `__moira_closure_Lower__lower_stmt_1` (not
+            reproduced in isolation; likely a field reference taken through a reference
+            parameter lowered as a copy); the `clotho_Stmt` name in the checker; the
+            `bundle.rs`/`codegen_native.rs` std API gaps (`thread::scope`, process output types).
+            Codegen-blocked functions: clotho 29, atropos 116, lachesis 78, driver 9.
           - Status (2026-11-15, checker round 5): probe now reads: atropos check 19 errors
             (was 20), lachesis check 10 (was 71 at the start of round 3). Done: `ref` bindings
             (`Pat::RefIdent`); generic struct literals in instantiated generic bodies name their
