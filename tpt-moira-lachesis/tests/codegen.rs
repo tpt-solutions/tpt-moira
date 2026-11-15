@@ -239,6 +239,744 @@ fn run_src(src: &str) -> Option<String> {
     )
 }
 
+/// A literal or nested variant inside a payload is a test, not a binding: the arm is taken
+/// only when the payload matches. Previously the payload sub-guards were dropped, so
+/// `Some(1)` matched `Some(9)`.
+#[test]
+fn variant_payload_literal_and_nested_patterns_are_tested() {
+    let out = match run_src(
+        "enum Shape { Circle(i64), Rect(i64, i64) }
+        fn main() {
+            let t: Option<i64> = Some(9);
+            let a = match t {
+                Some(1) => 0,
+                Some(_) => 1,
+                None => 2,
+            };
+            print_i64(a);
+            let s = match Shape::Rect(3, 4) {
+                Shape::Rect(3, h) => h,
+                Shape::Rect(_, h) => h * 10,
+                Shape::Circle(r) => r,
+            };
+            print_i64(s);
+            let o: Option<Option<i64>> = Some(None);
+            let u = match o {
+                Some(Some(v)) => v,
+                Some(None) => 77,
+                None => 0,
+            };
+            print_i64(u);
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping variant pattern run");
+            return;
+        }
+    };
+    assert_eq!(out, "1\n4\n77", "payload sub-patterns must be tested");
+}
+
+/// `let P = E else { B };` takes the rest of the block when `P` matches and runs `B`
+/// (which diverges) otherwise. Previously the `else` block was dropped and the binding
+/// read garbage.
+#[test]
+fn let_else_runs_the_else_block_when_the_pattern_fails() {
+    let out = match run_src(
+        "fn pick(v: Option<i64>) -> i64 {
+            let Some(x) = v else {
+                return -1;
+            };
+            let y = x + 1;
+            y * 2
+        }
+        fn main() {
+            print_i64(pick(Some(3)));
+            print_i64(pick(None));
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping let-else run");
+            return;
+        }
+    };
+    assert_eq!(out, "8\n-1", "the else block must run when the pattern does not match");
+}
+
+/// `s.as_bytes()` is a `&[u8]` over the string's bytes: it has the string's length, indexes
+/// and iterates, and can be stored in a struct field (the shape of a lexer's byte view).
+#[test]
+fn as_bytes_views_the_string_bytes_and_runs() {
+    let out = match run_src(
+        "struct Lexer<'a> { src: &'a str, bytes: &'a [u8], pos: usize }
+        impl<'a> Lexer<'a> {
+            fn new(src: &'a str) -> Self {
+                Lexer { src, bytes: src.as_bytes(), pos: 0 }
+            }
+        }
+        fn main() {
+            let s = String::from(\"AB\");
+            let b = s.as_bytes();
+            print_i64(b.len() as i64);
+            print_i64(b[1] as i64);
+            let mut n: u32 = 0;
+            for x in b.iter() {
+                n = n + (*x as u32);
+            }
+            print_i64(n as i64);
+            let l = Lexer::new(\"hey\");
+            print_i64(l.pos as i64);
+            print_i64(l.bytes.len() as i64);
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping as_bytes run");
+            return;
+        }
+    };
+    assert_eq!(out, "2\n66\n131\n0\n3", "as_bytes should view the string's bytes");
+}
+
+/// `v.contains(&x)` compares the element with `x`: the reference is not passed to the
+/// helper. Scalar elements (`usize`, `i64`) on a vector local, a `&Vec` parameter and a
+/// slice all failed to compile before, since the `&` reached the C helper.
+#[test]
+fn contains_with_a_reference_compares_scalar_elements() {
+    let out = match run_src(
+        "fn has(v: &Vec<usize>, x: usize) -> bool { v.contains(&x) }
+        fn in_slice(v: &[usize], x: usize) -> bool { v.contains(&x) }
+        fn main() {
+            let v: Vec<i64> = vec![2, 3];
+            let x: i64 = 3;
+            print_bool(v.contains(&x));
+            let u: Vec<usize> = vec![2, 3];
+            print_bool(has(&u, 3));
+            print_bool(in_slice(&u, 9));
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping contains run");
+            return;
+        }
+    };
+    assert_eq!(out, "true\ntrue\nfalse", "contains(&x) should compare values");
+}
+
+/// A `vec![..]` literal passed to a map's `insert` takes the map's value type: the element
+/// type comes from the context, not only from the checker's hint.
+#[test]
+fn vec_literal_as_map_value_takes_the_value_type() {
+    let out = match run_src(
+        "use std::collections::HashMap;
+        fn main() {
+            let mut m: HashMap<String, Vec<usize>> = HashMap::new();
+            m.insert(String::from(\"x\"), vec![2, 3]);
+            print_i64(m.len() as i64);
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping map value run");
+            return;
+        }
+    };
+    assert_eq!(out, "1", "the inserted vector should have the map's value type");
+}
+
+/// `Option::is_none_or(f)`: an absent option is `true`, a present one applies `f`.
+#[test]
+fn option_is_none_or_runs_for_both_variants() {
+    let out = match run_src(
+        "fn main() {
+            let a: Option<i64> = None;
+            let b: Option<i64> = Some(-1);
+            let c: Option<i64> = Some(5);
+            print_bool(a.is_none_or(|x| x > 0));
+            print_bool(b.is_none_or(|x| x > 0));
+            print_bool(c.is_none_or(|x| x > 0));
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping is_none_or run");
+            return;
+        }
+    };
+    assert_eq!(out, "true\nfalse\ntrue", "is_none_or should test only a present payload");
+}
+
+/// `filter_map` keeps the payloads of the `Some` results and drops the `None`s, and the
+/// chain's terminal sees those payloads (`sum`, `collect`).
+#[test]
+fn filter_map_keeps_some_payloads_for_sum_and_collect() {
+    let out = match run_src(
+        "fn main() {
+            let v: Vec<i64> = vec![1, 2, 3, 4, 5, 6];
+            let s: i64 = v.iter().filter_map(|x| if x % 2 == 0 { Some(x * 10) } else { None }).sum();
+            print_i64(s);
+            let w: Vec<i64> = v.iter().filter_map(|x| if *x > 4 { Some(*x + 100) } else { None }).collect();
+            print_i64(w.len() as i64);
+            print_i64(w[0]);
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping filter_map run");
+            return;
+        }
+    };
+    assert_eq!(out, "120\n2\n105", "filter_map should keep only the Some payloads");
+}
+
+/// `Result::map` maps the `Ok` payload and passes an `Err` through; `Result::map_err` maps
+/// the `Err` payload and passes an `Ok` through. Both chain into `unwrap_or`.
+#[test]
+fn result_map_and_map_err_map_one_arm_and_pass_the_other() {
+    let out = match run_src(
+        "fn main() {
+            let e: Result<i64, i64> = Err(7);
+            match e.map(|x| x * 2) {
+                Ok(v) => print_i64(v),
+                Err(x) => print_i64(x),
+            }
+            let o: Result<i64, i64> = Ok(7);
+            match o.map_err(|x| x * 100) {
+                Ok(v) => print_i64(v),
+                Err(x) => print_i64(x),
+            }
+            let r: Result<i64, i64> = Ok(3);
+            print_i64(r.map(|x| x + 1).unwrap_or(0));
+            let q: Result<i64, i64> = Err(9);
+            print_i64(q.map(|x| x + 1).unwrap_or(-5));
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping Result::map run");
+            return;
+        }
+    };
+    assert_eq!(out, "7\n7\n4\n-5", "map maps Ok and passes Err; map_err maps Err and passes Ok");
+}
+
+/// `r.map(Some)` wraps an `Ok` payload in an `Option`: the mapping function is the bare
+/// constructor, so no closure is lowered.
+#[test]
+fn result_map_with_some_constructor_wraps_the_payload() {
+    let out = match run_src(
+        "fn parse(n: i64) -> Result<i64, String> {
+            if n > 0 { Ok(n) } else { Err(String::from(\"neg\")) }
+        }
+        fn main() {
+            let r = parse(4).map(Some);
+            match r {
+                Ok(o) => match o {
+                    Some(v) => print_i64(v),
+                    None => print_i64(-1),
+                },
+                Err(_) => print_i64(-2),
+            }
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping map(Some) run");
+            return;
+        }
+    };
+    assert_eq!(out, "4", "map(Some) should wrap the Ok payload");
+}
+
+/// `Vec::reverse`, `Vec::remove(i)` (returns the element, shifts the tail) and
+/// `Vec::append(&mut w)` (moves `w`'s elements and leaves `w` empty) on a named vector.
+#[test]
+fn vec_reverse_remove_and_append_run() {
+    let out = match run_src(
+        "fn main() {
+            let mut v: Vec<i64> = vec![1, 2, 3, 4];
+            v.reverse();
+            print_i64(v[0]);
+            print_i64(v[3]);
+            let r = v.remove(1);
+            print_i64(r);
+            print_i64(v.len() as i64);
+            print_i64(v[1]);
+            let mut a: Vec<i64> = vec![1];
+            let mut b: Vec<i64> = vec![2, 3];
+            a.append(&mut b);
+            print_i64(a.len() as i64);
+            print_i64(b.len() as i64);
+            print_i64(a[2]);
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping Vec operations run");
+            return;
+        }
+    };
+    assert_eq!(out, "4\n1\n3\n3\n2\n3\n0\n3", "reverse, remove and append should match Rust");
+}
+
+/// `Option::or(other)` is the receiver when it holds a value, else `other`.
+#[test]
+fn option_or_takes_the_receiver_or_the_argument() {
+    let out = match run_src(
+        "fn main() {
+            let o: Option<i64> = None;
+            print_i64(o.or(Some(4)).unwrap());
+            let p: Option<i64> = Some(2);
+            print_i64(p.or(Some(9)).unwrap());
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping Option::or run");
+            return;
+        }
+    };
+    assert_eq!(out, "4\n2", "or should keep a present value");
+}
+
+/// `str::split_at(i)` gives the two halves as strings.
+#[test]
+fn str_split_at_gives_both_halves() {
+    let out = match run_src(
+        "fn main() {
+            let s = String::from(\"abcd\");
+            let (a, b) = s.split_at(1);
+            println!(\"{} {}\", a, b);
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping split_at run");
+            return;
+        }
+    };
+    assert_eq!(out, "a bcd", "split_at should split the string in two");
+}
+
+/// A user function named after a C library function (`exit`) is renamed consistently at its
+/// definition and its calls, while library calls the lowering emits (`strlen`) keep their names.
+#[test]
+fn user_function_named_like_a_c_library_call_runs() {
+    let out = match run_src(
+        "fn exit(x: i64) -> i64 { x + 1 }
+        fn main() {
+            print_i64(exit(4));
+            let s = String::from(\"abc\");
+            print_i64(s.len() as i64);
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping reserved-name run");
+            return;
+        }
+    };
+    assert_eq!(out, "5\n3", "a user `exit` must not collide with the C `exit`");
+}
+
+/// `for part in s.split(sep)` yields the pieces between separators, empty ones included, as
+/// Rust does: `"a,,b,"` gives `a`, ``, `b`, ``. A multi-character separator works too.
+#[test]
+fn for_over_str_split_yields_rust_pieces() {
+    let out = match run_src(
+        "fn main() {
+            let s = String::from(\"a,,b,\");
+            for p in s.split(',') {
+                println!(\"[{}]\", p);
+            }
+            let t = String::from(\"x::y\");
+            let mut c = 0;
+            for p in t.split(\"::\") {
+                c = c + p.len();
+            }
+            print_i64(c as i64);
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping str split run");
+            return;
+        }
+    };
+    assert_eq!(out, "[a]\n[]\n[b]\n[]\n2", "split should yield every piece, empty ones included");
+}
+
+/// `s.split(sep)` as an iterator chain source: `collect` into a `Vec<&str>`, a `map` and
+/// `sum` over the pieces, and `count` (empty pieces included).
+#[test]
+fn split_chain_collects_maps_and_counts_pieces() {
+    let out = match run_src(
+        "fn main() {
+            let s = String::from(\"a,bb,,ccc\");
+            let v: Vec<&str> = s.split(',').collect();
+            print_i64(v.len() as i64);
+            print_i64(v[2].len() as i64);
+            let n: usize = s.split(',').map(|p| p.len()).sum();
+            print_i64(n as i64);
+            print_i64(s.split(',').count() as i64);
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping split chain run");
+            return;
+        }
+    };
+    assert_eq!(out, "4\n0\n6\n4", "split should be a chain source of its pieces");
+}
+
+/// `let x: T = s.parse().unwrap()` and `.unwrap_or(d)` for a numeric `T`: a signed or unsigned
+/// integer parses only when it fits its width, and a float parses as `f64`. A value that
+/// does not parse takes the default, or panics for `unwrap`.
+#[test]
+fn let_parse_unwrap_takes_the_annotated_numeric_type() {
+    let out = match run_src(
+        "fn main() {
+            let s = String::from(\"42\");
+            let n: i64 = s.parse().unwrap();
+            print_i64(n + 1);
+            let neg = String::from(\"-7\");
+            let m: i64 = neg.parse().unwrap_or(0);
+            print_i64(m);
+            let bad = String::from(\"x1\");
+            let k: i64 = bad.parse().unwrap_or(-3);
+            print_i64(k);
+            let big = String::from(\"300\");
+            let b: u8 = big.parse().unwrap_or(9);
+            print_i64(b as i64);
+            let f = String::from(\"2.5\");
+            let x: f64 = f.parse().unwrap();
+            print_f64(x * 2.0);
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping let parse run");
+            return;
+        }
+    };
+    assert_eq!(out, "43\n-7\n-3\n9\n5", "parse should take the annotated type");
+}
+
+/// `to_string()` on a reference to a string (a `HashMap::get` payload, which is a pointer)
+/// copies the string the reference points to.
+#[test]
+fn to_string_through_a_string_reference_copies_the_string() {
+    let out = match run_src(
+        "use std::collections::HashMap;
+        struct Table { types: HashMap<String, String> }
+        impl Table {
+            fn ty(&self, name: &str) -> String {
+                match self.types.get(name) {
+                    Some(t) => t.to_string(),
+                    None => String::from(\"none\"),
+                }
+            }
+        }
+        fn main() {
+            let mut m: HashMap<String, String> = HashMap::new();
+            m.insert(String::from(\"a\"), String::from(\"int\"));
+            let t = Table { types: m };
+            println!(\"{}\", t.ty(\"a\"));
+            println!(\"{}\", t.ty(\"b\"));
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping to_string run");
+            return;
+        }
+    };
+    assert_eq!(out, "int\nnone", "to_string should read through the reference");
+}
+
+/// `len()` and `is_empty()` on a fixed-size array (a local or a constant) are its length, and
+/// `max`/`min` on an integer compare its operands.
+#[test]
+fn fixed_array_len_and_integer_max_min_run() {
+    let out = match run_src(
+        "const REGS: [&str; 3] = [\"a\", \"bb\", \"ccc\"];
+        fn main() {
+            let a: [i64; 2] = [1, 2];
+            print_i64(a.len() as i64);
+            print_bool(a.is_empty());
+            print_i64(REGS.len() as i64);
+            let x: i64 = 3;
+            let y: i64 = 9;
+            print_i64(x.max(y));
+            print_i64(x.min(y));
+            let c: u8 = 7;
+            print_i64(c.min(4) as i64);
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping array len run");
+            return;
+        }
+    };
+    assert_eq!(out, "2\nfalse\n3\n9\n3\n4", "array length and integer max/min should match Rust");
+}
+
+/// `HashMap::get_mut` gives a mutable view of the value (a write through it persists), and
+/// `Iterator::nth(i)` is the item at position `i`, or `None` when there is none.
+#[test]
+fn map_get_mut_writes_through_and_iterator_nth_indexes() {
+    let out = match run_src(
+        "use std::collections::HashMap;
+        fn main() {
+            let mut m: HashMap<String, i64> = HashMap::new();
+            m.insert(String::from(\"a\"), 1);
+            if let Some(v) = m.get_mut(\"a\") {
+                *v = *v + 5;
+            }
+            print_i64(*m.get(\"a\").unwrap());
+            match m.get_mut(\"zz\") {
+                Some(_) => print_i64(1),
+                None => print_i64(0),
+            }
+            let s = String::from(\"a9\");
+            let c = s.chars().nth(1).unwrap();
+            print_bool(c.is_ascii_digit());
+            match s.chars().nth(5) {
+                Some(_) => print_i64(1),
+                None => print_i64(0),
+            }
+            let v: Vec<i64> = vec![4, 5, 6];
+            print_i64(v.iter().nth(2).copied().unwrap());
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping get_mut/nth run");
+            return;
+        }
+    };
+    assert_eq!(out, "6\n0\ntrue\n0\n6", "get_mut should write through and nth should index");
+}
+
+/// `Option::as_ref()` on an `Option<String>` and on an `Option<i64>`: the view has the
+/// checker's type, so the value reads through it without a C type mismatch.
+#[test]
+fn option_as_ref_over_string_and_integer_runs() {
+    let out = match run_src(
+        "fn main() {
+            let o: Option<String> = Some(String::from(\"hi\"));
+            let r: Option<&String> = o.as_ref();
+            print_bool(r.is_some());
+            match r {
+                Some(s) => print_i64(s.len() as i64),
+                None => print_i64(0),
+            }
+            let n: Option<i64> = Some(4);
+            let m: Option<&i64> = n.as_ref();
+            match m {
+                Some(v) => print_i64(*v + 1),
+                None => print_i64(0),
+            }
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping as_ref run");
+            return;
+        }
+    };
+    assert_eq!(out, "true\n2\n5", "as_ref should view the payload with its checked type");
+}
+
+/// `HashSet::intersection(&b)` keeps the keys of `a` that `b` holds, `union(&b)` keeps every key
+/// of either set once. Both count, and iterate in a `for` loop.
+#[test]
+fn hashset_intersection_and_union_count_and_iterate() {
+    let out = match run_src(
+        "use std::collections::HashSet;
+        fn main() {
+            let mut a: HashSet<i64> = HashSet::new();
+            a.insert(1);
+            a.insert(2);
+            a.insert(3);
+            let mut b: HashSet<i64> = HashSet::new();
+            b.insert(3);
+            b.insert(9);
+            print_i64(a.intersection(&b).count() as i64);
+            print_i64(a.union(&b).count() as i64);
+            let mut s: HashSet<String> = HashSet::new();
+            s.insert(String::from(\"x\"));
+            s.insert(String::from(\"y\"));
+            let mut t: HashSet<String> = HashSet::new();
+            t.insert(String::from(\"x\"));
+            t.insert(String::from(\"z\"));
+            let mut n = 0;
+            for k in s.union(&t) {
+                n = n + k.len();
+            }
+            print_i64(n as i64);
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping set operation run");
+            return;
+        }
+    };
+    assert_eq!(out, "1\n4\n3", "set operations should match Rust");
+}
+
+/// A set reached through a reference parameter (`&HashSet<String>`) takes part in
+/// `intersection`/`union` like an owned one.
+#[test]
+fn set_operation_through_a_reference_parameter() {
+    let out = match run_src(
+        "use std::collections::HashSet;
+        fn jaccard(a: &HashSet<String>, b: &HashSet<String>) -> i64 {
+            a.intersection(b).count() as i64
+        }
+        fn main() {
+            let mut a: HashSet<String> = HashSet::new();
+            a.insert(String::from(\"x\"));
+            a.insert(String::from(\"y\"));
+            let mut b: HashSet<String> = HashSet::new();
+            b.insert(String::from(\"x\"));
+            print_i64(jaccard(&a, &b));
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping set reference run");
+            return;
+        }
+    };
+    assert_eq!(out, "1", "a set behind a reference should intersect like an owned set");
+}
+
+/// `Vec::clear` empties a vector of any element type; `Vec::dedup` drops consecutive equal
+/// items of a string or scalar vector.
+#[test]
+fn vec_clear_and_dedup_run() {
+    let out = match run_src(
+        "fn main() {
+            let mut v: Vec<String> = Vec::new();
+            v.push(String::from(\"a\"));
+            v.push(String::from(\"a\"));
+            v.push(String::from(\"b\"));
+            v.dedup();
+            print_i64(v.len() as i64);
+            let mut w: Vec<i64> = vec![1, 1, 2, 2, 2, 3, 1];
+            w.dedup();
+            print_i64(w.len() as i64);
+            print_i64(w[3] as i64);
+            w.clear();
+            print_i64(w.len() as i64);
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping clear/dedup run");
+            return;
+        }
+    };
+    assert_eq!(out, "2\n4\n1\n0", "clear and dedup should match Rust");
+}
+
+/// `m.values()` and `m.keys()` are iterator chains over a map's values and keys: `sum`,
+/// `count`, and a `for` loop over the keys.
+#[test]
+fn map_values_and_keys_are_iterator_sources() {
+    let out = match run_src(
+        "use std::collections::HashMap;
+        fn main() {
+            let mut m: HashMap<String, i64> = HashMap::new();
+            m.insert(String::from(\"a\"), 2);
+            m.insert(String::from(\"bb\"), 3);
+            let t: i64 = m.values().sum();
+            print_i64(t);
+            print_i64(m.keys().count() as i64);
+            let mut n = 0;
+            for k in m.keys() {
+                n = n + k.len();
+            }
+            print_i64(n as i64);
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping map view run");
+            return;
+        }
+    };
+    assert_eq!(out, "5\n2\n3", "map keys and values should iterate as Rust does");
+}
+
+/// `Option::as_mut()` views the payload mutably: a write through it persists in the option.
+#[test]
+fn option_as_mut_writes_through() {
+    let out = match run_src(
+        "fn main() {
+            let mut p: Option<i64> = Some(3);
+            if let Some(x) = p.as_mut() {
+                *x = *x + 1;
+            }
+            print_i64(p.unwrap());
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping as_mut run");
+            return;
+        }
+    };
+    assert_eq!(out, "4", "as_mut should write through the payload");
+}
+
+/// `str::split_once(pat)` splits at the first match (a character or a string), and is `None`
+/// without one. `Vec::split_last()` gives the last element and a slice of the rest, or `None`.
+#[test]
+fn split_once_and_vec_split_last_run() {
+    let out = match run_src(
+        "fn main() {
+            let s = String::from(\"key=val=x\");
+            match s.split_once('=') {
+                Some((k, v)) => println!(\"{} {}\", k, v),
+                None => println!(\"none\"),
+            }
+            let t = String::from(\"a::b\");
+            match t.split_once(\"::\") {
+                Some((a, b)) => print_i64(b.len() as i64 + a.len() as i64),
+                None => print_i64(0),
+            }
+            let v: Vec<i64> = vec![1, 2, 3];
+            match v.split_last() {
+                Some((l, rest)) => {
+                    print_i64(*l);
+                    print_i64(rest.len() as i64);
+                }
+                None => print_i64(-1),
+            }
+            let e: Vec<i64> = Vec::new();
+            match e.split_last() {
+                Some(_) => print_i64(1),
+                None => print_i64(0),
+            }
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping split_once run");
+            return;
+        }
+    };
+    assert_eq!(out, "key val=x\n2\n3\n2\n0", "split_once and split_last should match Rust");
+}
+
 #[test]
 fn enum_match_and_if_let_run() {
     // Enum-variant construction (`Some(7)` / `None`), `match` with
@@ -920,6 +1658,87 @@ fn returned_capturing_closure_runs_when_bound_by_let() {
         out, "19\n100\n101",
         "each `let f = make(..)` should bind its own captures"
     );
+}
+
+#[test]
+fn returned_capturing_closure_with_pure_lets_runs_when_bound_by_let() {
+    // The body's leading `let` is pure, so it is inlined at the call site with the
+    // parameters, and the closure captures the let-bound name.
+    let out = match run_src(
+        "fn make(k: i64) -> impl Fn(i64) -> i64 {
+            let j = k * 2;
+            move |x: i64| x + j
+        }
+        fn main() {
+            let f = make(4);
+            print_i64(f(1));
+            let mut i: i64 = 0;
+            while i < 2 {
+                let h = make(i);
+                print_i64(h(10));
+                i = i + 1;
+            }
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping returned-capturing-closure run");
+            return;
+        }
+    };
+    assert_eq!(
+        out, "9
+10
+12",
+        "the let-bound value must be recomputed per call and captured by the closure"
+    );
+}
+
+#[test]
+fn returned_capturing_closure_from_method_runs_when_bound_by_let() {
+    // `let f = a.make(..)` inlines the method's closure: `&self`, `self` by value, and
+    // `&mut self` receivers, each with the receiver bound to `self` at the call site.
+    let out = match run_src(
+        "struct Adder { k: i64 }
+        impl Adder {
+            fn make(&self) -> impl Fn(i64) -> i64 {
+                move |x| x + self.k
+            }
+        }
+        struct Scale { k: i64 }
+        impl Scale {
+            fn times(self, m: i64) -> impl Fn(i64) -> i64 {
+                let t = self.k * m;
+                move |x| x * t
+            }
+        }
+        struct Counter { base: i64 }
+        impl Counter {
+            fn adder(&mut self, d: i64) -> impl Fn(i64) -> i64 {
+                move |x| x + d + 100
+            }
+        }
+        fn main() {
+            let a = Adder { k: 5 };
+            let f = a.make();
+            print_i64(f(1));
+            let s = Scale { k: 3 };
+            let g = s.times(2);
+            print_i64(g(7));
+            let mut c = Counter { base: 1 };
+            let h = c.adder(2);
+            print_i64(h(1));
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping returned-capturing-closure run");
+            return;
+        }
+    };
+    assert_eq!(out, "6
+42
+103", "each method's closure should see its receiver");
 }
 
 #[test]
