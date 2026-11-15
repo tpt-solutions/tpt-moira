@@ -60,15 +60,15 @@ fn hint_applies(hint: &str) -> bool {
 }
 
 /// The operator of a `wrapping_*` integer method.
-fn wrapping_binop(method: &str) -> Option<mir::BinOp> {
+fn wrapping_binop(method: &str) -> Option<mir::MirBinOp> {
     Some(match method {
-        "wrapping_add" => mir::BinOp::Add,
-        "wrapping_sub" => mir::BinOp::Sub,
-        "wrapping_mul" => mir::BinOp::Mul,
-        "wrapping_div" => mir::BinOp::Div,
-        "wrapping_rem" => mir::BinOp::Rem,
-        "wrapping_shl" => mir::BinOp::Shl,
-        "wrapping_shr" => mir::BinOp::Shr,
+        "wrapping_add" => mir::MirBinOp::Add,
+        "wrapping_sub" => mir::MirBinOp::Sub,
+        "wrapping_mul" => mir::MirBinOp::Mul,
+        "wrapping_div" => mir::MirBinOp::Div,
+        "wrapping_rem" => mir::MirBinOp::Rem,
+        "wrapping_shl" => mir::MirBinOp::Shl,
+        "wrapping_shr" => mir::MirBinOp::Shr,
         _ => return None,
     })
 }
@@ -321,7 +321,7 @@ fn lower_program_impl(
             })
             .collect(),
     );
-    let mut enum_structs: Vec<mir::StructDef> = Vec::new();
+    let mut enum_structs: Vec<mir::MirStructDef> = Vec::new();
     let mut variants: HashMap<String, (String, i128, usize)> = HashMap::new();
     let mut qualified: HashMap<String, (String, i128, usize)> = HashMap::new();
     for (ename, vars) in &enum_defs {
@@ -347,7 +347,7 @@ fn lower_program_impl(
                 }
             }
         }
-        enum_structs.push(mir::StructDef {
+        enum_structs.push(mir::MirStructDef {
             name: ename.clone(),
             fields,
         });
@@ -370,10 +370,10 @@ fn lower_program_impl(
     }
     // Every struct of the program is known to each function, whatever its position:
     // a function may use a struct declared after it.
-    let mut known_structs: Vec<mir::StructDef> = out.structs.clone();
+    let mut known_structs: Vec<mir::MirStructDef> = out.structs.clone();
     for item in &prog.items {
         if let (false, ItemKind::Struct(s)) = (item.is_cfg_test(), &item.kind) {
-            known_structs.push(mir::StructDef {
+            known_structs.push(mir::MirStructDef {
                 name: s.name.node.clone(),
                 fields: s
                     .fields
@@ -392,7 +392,7 @@ fn lower_program_impl(
             if let (false, ItemKind::Struct(s)) = (item.is_cfg_test(), &item.kind) {
                 let known = known_structs.iter().any(|k| k.name == s.name.node);
                 if !known && s.generics.params.is_empty() {
-                    known_structs.push(mir::StructDef {
+                    known_structs.push(mir::MirStructDef {
                         name: s.name.node.clone(),
                         fields: s
                             .fields
@@ -421,7 +421,7 @@ fn lower_program_impl(
                     .iter()
                     .map(|f| (f.name.node.clone(), type_to_c(&f.ty, &aliases)))
                     .collect();
-                out.structs.push(mir::StructDef {
+                out.structs.push(mir::MirStructDef {
                     name: s.name.node.clone(),
                     fields,
                 });
@@ -476,7 +476,7 @@ fn lower_program_impl(
                             continue;
                         }
                     };
-                    let tuple_structs: Vec<mir::StructDef> =
+                    let tuple_structs: Vec<mir::MirStructDef> =
                         l.tuple_structs.values().cloned().collect();
                     out.functions.push(func);
                     for c in l.closures.drain(..) {
@@ -507,7 +507,7 @@ fn lower_program_impl(
                             continue;
                         }
                     };
-                    out.structs.push(mir::StructDef {
+                    out.structs.push(mir::MirStructDef {
                         name: ad.def.fut_name.clone(),
                         fields: ad.def.fut_fields.clone(),
                     });
@@ -540,7 +540,7 @@ fn lower_program_impl(
                             continue;
                         }
                     };
-                    let tuple_structs: Vec<mir::StructDef> =
+                    let tuple_structs: Vec<mir::MirStructDef> =
                         l.tuple_structs.values().cloned().collect();
                     out.functions.push(func);
                     for f in l.closures.drain(..) {
@@ -1072,7 +1072,7 @@ fn signature_is_modeled(
 }
 
 /// Rename the variables of a block (its statements and terminator) by `map`.
-fn rename_block(block: &mut mir::Block, map: &HashMap<String, String>) {
+fn rename_block(block: &mut mir::MirBlock, map: &HashMap<String, String>) {
     for stmt in block.stmts.iter_mut() {
         if let Some(n) = map.get(&stmt.place) {
             stmt.place = n.clone();
@@ -1319,8 +1319,8 @@ fn type_to_c_expanded(ty: &ast::Type) -> String {
 struct Lower {
     /// Checked types of expressions (see [`TypeHints`]).
     hints: std::sync::Arc<TypeHints>,
-    structs: Vec<mir::StructDef>,
-    func: mir::Function,
+    structs: Vec<mir::MirStructDef>,
+    func: mir::MirFunction,
     temp_counter: usize,
     current: usize,
     /// Inferred types for SSA temporaries. `long long` when unknown.
@@ -1393,7 +1393,7 @@ struct Lower {
     /// The specialised copies already lowered or in progress, by name.
     spec_done: std::collections::HashSet<String>,
     /// Lowered specialised copies, emitted with the program.
-    specs: Vec<mir::Function>,
+    specs: Vec<mir::MirFunction>,
     /// Captured variables (name and C type) that a specialised copy takes as leading parameters.
     leading_caps: Vec<(String, String)>,
     /// When set, the enclosing `async fn` state-machine bookkeeping: the future
@@ -1408,12 +1408,12 @@ struct Lower {
     /// Generated anonymous struct types backing tuple values, keyed by a
     /// deterministic name derived from the component C types. Emitted into the
     /// program's `structs` at the end of lowering.
-    tuple_structs: HashMap<String, mir::StructDef>,
+    tuple_structs: HashMap<String, mir::MirStructDef>,
     /// Counter for lambda-lifted closure function names (`__moira_closure_N`).
     closure_counter: usize,
     /// Top-level functions (closures) lambda-lifted out of the current function
     /// body, appended to the program after the enclosing function is lowered.
-    closures: Vec<mir::Function>,
+    closures: Vec<mir::MirFunction>,
     /// Names of every top-level (and `async`) function in the program, so a bare
     /// call path can be told apart from an indirect call through a function-pointer
     /// local (a closure value).
@@ -1678,11 +1678,11 @@ struct AsyncCtx {
 }
 
 impl Lower {
-    fn new(structs: &[mir::StructDef], hints: std::sync::Arc<TypeHints>) -> Self {
+    fn new(structs: &[mir::MirStructDef], hints: std::sync::Arc<TypeHints>) -> Self {
         Lower {
             hints,
             structs: structs.to_vec(),
-            func: mir::Function {
+            func: mir::MirFunction {
                 name: String::new(),
                 params: Vec::new(),
                 ret: None,
@@ -1731,7 +1731,7 @@ impl Lower {
         }
     }
 
-    fn lower_function(&mut self, f: &ast::Function) -> Result<mir::Function> {
+    fn lower_function(&mut self, f: &ast::Function) -> Result<mir::MirFunction> {
         self.func.name = f.name.node.clone();
         self.func.ret = f.ret.as_ref().map(|t| type_to_c(t, &self.aliases));
         // The captured variables of a specialised copy are its leading parameters.
@@ -1806,7 +1806,7 @@ impl Lower {
         for (sname, sty) in &slots {
             poll_locals.push((sname.clone(), Some(sty.clone())));
         }
-        self.func = mir::Function {
+        self.func = mir::MirFunction {
             name: poll_name.clone(),
             params: vec!["self__fut".to_string()],
             ret: Some("long long".to_string()),
@@ -1937,7 +1937,7 @@ impl Lower {
             b_done,
         ));
 
-        let poll_fn = mir::Function {
+        let poll_fn = mir::MirFunction {
             name: self.func.name.clone(),
             params: self.func.params.clone(),
             ret: self.func.ret.clone(),
@@ -1974,7 +1974,7 @@ impl Lower {
     }
 
     fn new_block(&mut self) -> usize {
-        self.func.blocks.push(mir::Block::default());
+        self.func.blocks.push(mir::MirBlock::default());
         self.func.blocks.len() - 1
     }
 
@@ -1985,7 +1985,7 @@ impl Lower {
     fn emit(&mut self, place: String, rvalue: mir::Rvalue) {
         self.func.blocks[self.current]
             .stmts
-            .push(mir::Stmt { place, rvalue });
+            .push(mir::MirStmt { place, rvalue });
     }
 
     fn fresh_temp(&mut self, ty: impl Into<String>) -> String {
@@ -2032,7 +2032,7 @@ impl Lower {
                 .enumerate()
                 .map(|(i, t)| (format!("f{}", i), t.clone()))
                 .collect();
-            mir::StructDef {
+            mir::MirStructDef {
                 name: name.clone(),
                 fields,
             }
@@ -2064,7 +2064,7 @@ impl Lower {
     }
 
     /// Lambda-lift a closure `|params| body` into a fresh top-level
-    /// `mir::Function` and return a `Func` operand referencing it (the closure
+    /// `mir::MirFunction` and return a `Func` operand referencing it (the closure
     /// value). The lifted function always returns `long long` (a `()` result is
     /// returned as `0`, which callers discard) so its C signature lines up with the
     /// uniform `long long (*)(long long, …)` function-pointer type used for closure
@@ -2792,7 +2792,7 @@ impl Lower {
         self.emit(
             is_err.clone(),
             mir::Rvalue::Binary(
-                mir::BinOp::Eq,
+                mir::MirBinOp::Eq,
                 mir::Operand::var(tag),
                 mir::Operand::Const(err_tag),
             ),
@@ -2894,7 +2894,7 @@ impl Lower {
                         let t = self.fresh_temp("long long");
                         self.emit(
                             t.clone(),
-                            mir::Rvalue::Binary(mir::BinOp::Add, h, mir::Operand::Const(1)),
+                            mir::Rvalue::Binary(mir::MirBinOp::Add, h, mir::Operand::Const(1)),
                         );
                         mir::Operand::var(t)
                     } else {
@@ -2980,7 +2980,7 @@ impl Lower {
             let t = self.fresh_temp("long long");
             self.emit(
                 t.clone(),
-                mir::Rvalue::Binary(mir::BinOp::Add, hi, mir::Operand::Const(1)),
+                mir::Rvalue::Binary(mir::MirBinOp::Add, hi, mir::Operand::Const(1)),
             );
             hi = mir::Operand::var(t);
         }
@@ -3232,7 +3232,7 @@ impl Lower {
                     let t = self.fresh_temp("long long");
                     self.emit(
                         t.clone(),
-                        mir::Rvalue::Binary(mir::BinOp::Add, hi_op.clone(), mir::Operand::Const(1)),
+                        mir::Rvalue::Binary(mir::MirBinOp::Add, hi_op.clone(), mir::Operand::Const(1)),
                     );
                     hi_op = mir::Operand::var(t);
                 }
@@ -3451,7 +3451,7 @@ impl Lower {
         let cmp = self.fresh_temp("long long");
         self.emit(
             cmp.clone(),
-            mir::Rvalue::Binary(mir::BinOp::Lt, mir::Operand::var(idx.clone()), bound),
+            mir::Rvalue::Binary(mir::MirBinOp::Lt, mir::Operand::var(idx.clone()), bound),
         );
         self.set_term(mir::Terminator::If(mir::Operand::var(cmp), body_blk, exit));
 
@@ -3488,7 +3488,7 @@ impl Lower {
                     self.emit(
                         more.clone(),
                         mir::Rvalue::Binary(
-                            mir::BinOp::Lt,
+                            mir::MirBinOp::Lt,
                             mir::Operand::var(z.idx.clone()),
                             mir::Operand::var(z.len.clone()),
                         ),
@@ -3507,7 +3507,7 @@ impl Lower {
                     self.emit(
                         z.idx.clone(),
                         mir::Rvalue::Binary(
-                            mir::BinOp::Add,
+                            mir::MirBinOp::Add,
                             mir::Operand::var(z.idx.clone()),
                             mir::Operand::Const(1),
                         ),
@@ -3564,7 +3564,7 @@ impl Lower {
                     self.emit(
                         counter.clone(),
                         mir::Rvalue::Binary(
-                            mir::BinOp::Add,
+                            mir::MirBinOp::Add,
                             mir::Operand::var(counter.clone()),
                             mir::Operand::Const(1),
                         ),
@@ -3677,16 +3677,16 @@ impl Lower {
                 self.emit(
                     none.clone(),
                     mir::Rvalue::Binary(
-                        mir::BinOp::Eq,
+                        mir::MirBinOp::Eq,
                         mir::Operand::var(tag),
                         mir::Operand::Const(1),
                     ),
                 );
                 let better = self.fresh_temp("long long");
                 let cmp = if terminal == "max" {
-                    mir::BinOp::Gt
+                    mir::MirBinOp::Gt
                 } else {
-                    mir::BinOp::Lt
+                    mir::MirBinOp::Lt
                 };
                 self.emit(
                     better.clone(),
@@ -3700,7 +3700,7 @@ impl Lower {
                 self.emit(
                     take.clone(),
                     mir::Rvalue::Binary(
-                        mir::BinOp::Or,
+                        mir::MirBinOp::Or,
                         mir::Operand::var(none),
                         mir::Operand::var(better),
                     ),
@@ -3725,7 +3725,7 @@ impl Lower {
                 self.emit(
                     r.clone(),
                     mir::Rvalue::Binary(
-                        mir::BinOp::Add,
+                        mir::MirBinOp::Add,
                         mir::Operand::var(r),
                         mir::Operand::Const(1),
                     ),
@@ -3737,7 +3737,7 @@ impl Lower {
                 self.emit(
                     r.clone(),
                     mir::Rvalue::Binary(
-                        mir::BinOp::Add,
+                        mir::MirBinOp::Add,
                         mir::Operand::var(r),
                         mir::Operand::var(item.clone()),
                     ),
@@ -3789,7 +3789,7 @@ impl Lower {
         self.emit(
             idx.clone(),
             mir::Rvalue::Binary(
-                mir::BinOp::Add,
+                mir::MirBinOp::Add,
                 mir::Operand::var(idx.clone()),
                 mir::Operand::Const(1),
             ),
@@ -3838,7 +3838,7 @@ impl Lower {
         self.emit(
             more.clone(),
             mir::Rvalue::Binary(
-                mir::BinOp::Ne,
+                mir::MirBinOp::Ne,
                 mir::Operand::var(ch),
                 mir::Operand::Const(0),
             ),
@@ -3922,7 +3922,7 @@ impl Lower {
         self.emit(
             cmp.clone(),
             mir::Rvalue::Binary(
-                mir::BinOp::Lt,
+                mir::MirBinOp::Lt,
                 mir::Operand::var(idx.clone()),
                 mir::Operand::var(len),
             ),
@@ -3948,7 +3948,7 @@ impl Lower {
         self.emit(
             idx.clone(),
             mir::Rvalue::Binary(
-                mir::BinOp::Add,
+                mir::MirBinOp::Add,
                 mir::Operand::var(idx.clone()),
                 mir::Operand::Const(1),
             ),
@@ -4178,7 +4178,7 @@ impl Lower {
         self.emit(
             present.clone(),
             mir::Rvalue::Binary(
-                mir::BinOp::Ge,
+                mir::MirBinOp::Ge,
                 mir::Operand::var(found.clone()),
                 mir::Operand::Const(0),
             ),
@@ -4271,7 +4271,7 @@ impl Lower {
         self.emit(
             absent.clone(),
             mir::Rvalue::Binary(
-                mir::BinOp::Lt,
+                mir::MirBinOp::Lt,
                 mir::Operand::var(found),
                 mir::Operand::Const(0),
             ),
@@ -4457,7 +4457,7 @@ impl Lower {
         self.emit(
             cmp.clone(),
             mir::Rvalue::Binary(
-                mir::BinOp::Lt,
+                mir::MirBinOp::Lt,
                 mir::Operand::var(idx.clone()),
                 mir::Operand::var(len),
             ),
@@ -4511,7 +4511,7 @@ impl Lower {
         self.emit(
             idx.clone(),
             mir::Rvalue::Binary(
-                mir::BinOp::Add,
+                mir::MirBinOp::Add,
                 mir::Operand::var(idx.clone()),
                 mir::Operand::Const(1),
             ),
@@ -4648,7 +4648,7 @@ impl Lower {
         self.emit(
             in_a.clone(),
             mir::Rvalue::Binary(
-                mir::BinOp::Lt,
+                mir::MirBinOp::Lt,
                 mir::Operand::var(idx.clone()),
                 mir::Operand::var(len_a),
             ),
@@ -4657,7 +4657,7 @@ impl Lower {
         self.emit(
             in_b.clone(),
             mir::Rvalue::Binary(
-                mir::BinOp::Lt,
+                mir::MirBinOp::Lt,
                 mir::Operand::var(idx.clone()),
                 mir::Operand::var(len_b),
             ),
@@ -4666,7 +4666,7 @@ impl Lower {
         self.emit(
             both.clone(),
             mir::Rvalue::Binary(
-                mir::BinOp::And,
+                mir::MirBinOp::And,
                 mir::Operand::var(in_a),
                 mir::Operand::var(in_b),
             ),
@@ -4695,7 +4695,7 @@ impl Lower {
         self.emit(
             idx.clone(),
             mir::Rvalue::Binary(
-                mir::BinOp::Add,
+                mir::MirBinOp::Add,
                 mir::Operand::var(idx.clone()),
                 mir::Operand::Const(1),
             ),
@@ -4821,7 +4821,7 @@ impl Lower {
             && at != "char*"
         {
             let d = self.fresh_temp(pt.to_string());
-            self.emit(d.clone(), mir::Rvalue::Unary(mir::UnOp::Deref, v));
+            self.emit(d.clone(), mir::Rvalue::Unary(mir::MirUnOp::Deref, v));
             return mir::Operand::var(d);
         }
         v
@@ -4880,7 +4880,7 @@ impl Lower {
             let n = self.fresh_temp("long long");
             self.emit(
                 n.clone(),
-                mir::Rvalue::Unary(mir::UnOp::Not, mir::Operand::var(t)),
+                mir::Rvalue::Unary(mir::MirUnOp::Not, mir::Operand::var(t)),
             );
             return Ok(Some(mir::Operand::var(n)));
         }
@@ -4942,7 +4942,7 @@ impl Lower {
         self.emit(
             same.clone(),
             mir::Rvalue::Binary(
-                mir::BinOp::Eq,
+                mir::MirBinOp::Eq,
                 mir::Operand::var(tag_l.clone()),
                 mir::Operand::var(tag_r),
             ),
@@ -4960,7 +4960,7 @@ impl Lower {
         self.emit(
             is_some.clone(),
             mir::Rvalue::Binary(
-                mir::BinOp::Eq,
+                mir::MirBinOp::Eq,
                 mir::Operand::var(tag_l),
                 mir::Operand::Const(0),
             ),
@@ -4996,7 +4996,7 @@ impl Lower {
                 self.emit(
                     direct.clone(),
                     mir::Rvalue::Binary(
-                        mir::BinOp::Eq,
+                        mir::MirBinOp::Eq,
                         mir::Operand::var(pt),
                         mir::Operand::var(pu),
                     ),
@@ -5016,7 +5016,7 @@ impl Lower {
             let n = self.fresh_temp("long long");
             self.emit(
                 n.clone(),
-                mir::Rvalue::Unary(mir::UnOp::Not, mir::Operand::var(res)),
+                mir::Rvalue::Unary(mir::MirUnOp::Not, mir::Operand::var(res)),
             );
             return Ok(Some(mir::Operand::var(n)));
         }
@@ -5063,7 +5063,7 @@ impl Lower {
         self.emit(
             same_len.clone(),
             mir::Rvalue::Binary(
-                mir::BinOp::Eq,
+                mir::MirBinOp::Eq,
                 mir::Operand::var(len_l.clone()),
                 mir::Operand::var(len_r),
             ),
@@ -5100,7 +5100,7 @@ impl Lower {
         self.emit(
             in_range.clone(),
             mir::Rvalue::Binary(
-                mir::BinOp::Lt,
+                mir::MirBinOp::Lt,
                 mir::Operand::var(idx.clone()),
                 mir::Operand::var(len_l),
             ),
@@ -5132,7 +5132,7 @@ impl Lower {
         self.emit(
             idx.clone(),
             mir::Rvalue::Binary(
-                mir::BinOp::Add,
+                mir::MirBinOp::Add,
                 mir::Operand::var(idx.clone()),
                 mir::Operand::Const(1),
             ),
@@ -5148,7 +5148,7 @@ impl Lower {
             let n = self.fresh_temp("long long");
             self.emit(
                 n.clone(),
-                mir::Rvalue::Unary(mir::UnOp::Not, mir::Operand::var(res)),
+                mir::Rvalue::Unary(mir::MirUnOp::Not, mir::Operand::var(res)),
             );
             return Ok(Some(mir::Operand::var(n)));
         }
@@ -5218,7 +5218,7 @@ impl Lower {
         self.emit(
             more.clone(),
             mir::Rvalue::Binary(
-                mir::BinOp::Ne,
+                mir::MirBinOp::Ne,
                 mir::Operand::var(item.clone()),
                 mir::Operand::Const(0),
             ),
@@ -5229,7 +5229,7 @@ impl Lower {
         self.emit(
             idx.clone(),
             mir::Rvalue::Binary(
-                mir::BinOp::Add,
+                mir::MirBinOp::Add,
                 mir::Operand::var(idx),
                 mir::Operand::Const(1),
             ),
@@ -5252,7 +5252,7 @@ impl Lower {
         self.emit(
             found.clone(),
             mir::Rvalue::Binary(
-                mir::BinOp::Ge,
+                mir::MirBinOp::Ge,
                 mir::Operand::var(idx.clone()),
                 mir::Operand::Const(0),
             ),
@@ -5324,7 +5324,7 @@ impl Lower {
         self.emit(
             found.clone(),
             mir::Rvalue::Binary(
-                mir::BinOp::Ge,
+                mir::MirBinOp::Ge,
                 mir::Operand::var(d.clone()),
                 mir::Operand::Const(0),
             ),
@@ -5421,7 +5421,7 @@ impl Lower {
             self.emit(
                 keep.clone(),
                 mir::Rvalue::Binary(
-                    mir::BinOp::Sub,
+                    mir::MirBinOp::Sub,
                     mir::Operand::var(total),
                     mir::Operand::var(n),
                 ),
@@ -5557,7 +5557,7 @@ impl Lower {
         let t = self.fresh_temp("long long");
         match cmp {
             SortCmp::Natural => {
-                self.emit(t.clone(), mir::Rvalue::Binary(mir::BinOp::Gt, a, b));
+                self.emit(t.clone(), mir::Rvalue::Binary(mir::MirBinOp::Gt, a, b));
             }
             SortCmp::Key(f, caps) => {
                 let mut ka_args = caps.clone();
@@ -5577,7 +5577,7 @@ impl Lower {
                 self.emit(
                     t.clone(),
                     mir::Rvalue::Binary(
-                        mir::BinOp::Gt,
+                        mir::MirBinOp::Gt,
                         mir::Operand::var(ka),
                         mir::Operand::var(kb),
                     ),
@@ -5595,7 +5595,7 @@ impl Lower {
                 self.emit(
                     t.clone(),
                     mir::Rvalue::Binary(
-                        mir::BinOp::Gt,
+                        mir::MirBinOp::Gt,
                         mir::Operand::var(r),
                         mir::Operand::Const(0),
                     ),
@@ -5644,7 +5644,7 @@ impl Lower {
         self.emit(
             more.clone(),
             mir::Rvalue::Binary(
-                mir::BinOp::Lt,
+                mir::MirBinOp::Lt,
                 mir::Operand::var(i.clone()),
                 mir::Operand::var(len.clone()),
             ),
@@ -5689,7 +5689,7 @@ impl Lower {
         self.emit(
             kept.clone(),
             mir::Rvalue::Binary(
-                mir::BinOp::Add,
+                mir::MirBinOp::Add,
                 mir::Operand::var(kept.clone()),
                 mir::Operand::Const(1),
             ),
@@ -5700,7 +5700,7 @@ impl Lower {
         self.emit(
             i.clone(),
             mir::Rvalue::Binary(
-                mir::BinOp::Add,
+                mir::MirBinOp::Add,
                 mir::Operand::var(i.clone()),
                 mir::Operand::Const(1),
             ),
@@ -5757,7 +5757,7 @@ impl Lower {
         self.emit(
             more.clone(),
             mir::Rvalue::Binary(
-                mir::BinOp::Lt,
+                mir::MirBinOp::Lt,
                 mir::Operand::var(i.clone()),
                 mir::Operand::var(len),
             ),
@@ -5777,7 +5777,7 @@ impl Lower {
         self.emit(
             j_pos.clone(),
             mir::Rvalue::Binary(
-                mir::BinOp::Gt,
+                mir::MirBinOp::Gt,
                 mir::Operand::var(j.clone()),
                 mir::Operand::Const(0),
             ),
@@ -5793,7 +5793,7 @@ impl Lower {
         self.emit(
             prev.clone(),
             mir::Rvalue::Binary(
-                mir::BinOp::Sub,
+                mir::MirBinOp::Sub,
                 mir::Operand::var(j.clone()),
                 mir::Operand::Const(1),
             ),
@@ -5842,7 +5842,7 @@ impl Lower {
         self.emit(
             j.clone(),
             mir::Rvalue::Binary(
-                mir::BinOp::Sub,
+                mir::MirBinOp::Sub,
                 mir::Operand::var(j.clone()),
                 mir::Operand::Const(1),
             ),
@@ -5853,7 +5853,7 @@ impl Lower {
         self.emit(
             i.clone(),
             mir::Rvalue::Binary(
-                mir::BinOp::Add,
+                mir::MirBinOp::Add,
                 mir::Operand::var(i.clone()),
                 mir::Operand::Const(1),
             ),
@@ -5945,7 +5945,7 @@ impl Lower {
             self.emit(
                 more.clone(),
                 mir::Rvalue::Binary(
-                    mir::BinOp::Lt,
+                    mir::MirBinOp::Lt,
                     mir::Operand::var(idx.clone()),
                     mir::Operand::var(len),
                 ),
@@ -5961,7 +5961,7 @@ impl Lower {
             self.emit(
                 idx.clone(),
                 mir::Rvalue::Binary(
-                    mir::BinOp::Add,
+                    mir::MirBinOp::Add,
                     mir::Operand::var(idx),
                     mir::Operand::Const(1),
                 ),
@@ -6029,7 +6029,7 @@ impl Lower {
         self.emit(
             cmp.clone(),
             mir::Rvalue::Binary(
-                mir::BinOp::Lt,
+                mir::MirBinOp::Lt,
                 mir::Operand::var(idx.clone()),
                 mir::Operand::var(len),
             ),
@@ -6041,7 +6041,7 @@ impl Lower {
         self.emit(
             first.clone(),
             mir::Rvalue::Binary(
-                mir::BinOp::Eq,
+                mir::MirBinOp::Eq,
                 mir::Operand::var(idx.clone()),
                 mir::Operand::Const(0),
             ),
@@ -6090,7 +6090,7 @@ impl Lower {
         self.emit(
             idx.clone(),
             mir::Rvalue::Binary(
-                mir::BinOp::Add,
+                mir::MirBinOp::Add,
                 mir::Operand::var(idx),
                 mir::Operand::Const(1),
             ),
@@ -6171,7 +6171,7 @@ impl Lower {
         let in_range = self.fresh_temp("long long");
         self.emit(
             in_range.clone(),
-            mir::Rvalue::Binary(mir::BinOp::Lt, idx.clone(), mir::Operand::var(len)),
+            mir::Rvalue::Binary(mir::MirBinOp::Lt, idx.clone(), mir::Operand::var(len)),
         );
         let result = self.fresh_temp(out_ty);
         let some_blk = self.new_block();
@@ -6246,7 +6246,7 @@ impl Lower {
         self.emit(
             cond.clone(),
             mir::Rvalue::Binary(
-                mir::BinOp::Eq,
+                mir::MirBinOp::Eq,
                 mir::Operand::var(tag),
                 mir::Operand::Const(0),
             ),
@@ -6381,7 +6381,7 @@ impl Lower {
         self.emit(
             is_some.clone(),
             mir::Rvalue::Binary(
-                mir::BinOp::Eq,
+                mir::MirBinOp::Eq,
                 mir::Operand::var(tag),
                 mir::Operand::Const(0),
             ),
@@ -6544,7 +6544,7 @@ impl Lower {
         self.emit(
             is_ok.clone(),
             mir::Rvalue::Binary(
-                mir::BinOp::Eq,
+                mir::MirBinOp::Eq,
                 mir::Operand::var(tag),
                 mir::Operand::Const(0),
             ),
@@ -6687,14 +6687,14 @@ impl Lower {
                 let gt = self.fresh_temp("long long");
                 self.emit(
                     gt.clone(),
-                    mir::Rvalue::Binary(mir::BinOp::Gt, a.clone(), b.clone()),
+                    mir::Rvalue::Binary(mir::MirBinOp::Gt, a.clone(), b.clone()),
                 );
                 let lt = self.fresh_temp("long long");
-                self.emit(lt.clone(), mir::Rvalue::Binary(mir::BinOp::Lt, a, b));
+                self.emit(lt.clone(), mir::Rvalue::Binary(mir::MirBinOp::Lt, a, b));
                 self.emit(
                     t.clone(),
                     mir::Rvalue::Binary(
-                        mir::BinOp::Sub,
+                        mir::MirBinOp::Sub,
                         mir::Operand::var(gt),
                         mir::Operand::var(lt),
                     ),
@@ -6746,7 +6746,7 @@ impl Lower {
         if base == "str" || base == "char*" {
             let value = if is_ptr {
                 let v = self.fresh_temp("char*");
-                self.emit(v.clone(), mir::Rvalue::Unary(mir::UnOp::Deref, op));
+                self.emit(v.clone(), mir::Rvalue::Unary(mir::MirUnOp::Deref, op));
                 mir::Operand::var(v)
             } else {
                 op
@@ -6762,7 +6762,7 @@ impl Lower {
         }
         if is_ptr {
             let v = self.fresh_temp(base);
-            self.emit(v.clone(), mir::Rvalue::Unary(mir::UnOp::Deref, op));
+            self.emit(v.clone(), mir::Rvalue::Unary(mir::MirUnOp::Deref, op));
             return Ok(Some(mir::Operand::var(v)));
         }
         Ok(Some(op))
@@ -6796,7 +6796,7 @@ impl Lower {
         self.emit(
             cmp.clone(),
             mir::Rvalue::Binary(
-                mir::BinOp::Lt,
+                mir::MirBinOp::Lt,
                 mir::Operand::var(idx.clone()),
                 mir::Operand::var(len),
             ),
@@ -6812,7 +6812,7 @@ impl Lower {
         self.emit(
             idx.clone(),
             mir::Rvalue::Binary(
-                mir::BinOp::Add,
+                mir::MirBinOp::Add,
                 mir::Operand::var(idx),
                 mir::Operand::Const(1),
             ),
@@ -6981,7 +6981,7 @@ impl Lower {
                         self.emit(
                             empty.clone(),
                             mir::Rvalue::Binary(
-                                mir::BinOp::Eq,
+                                mir::MirBinOp::Eq,
                                 mir::Operand::var(ch.clone()),
                                 mir::Operand::Const(0),
                             ),
@@ -6991,7 +6991,7 @@ impl Lower {
                         self.emit(
                             step.clone(),
                             mir::Rvalue::Binary(
-                                mir::BinOp::Sub,
+                                mir::MirBinOp::Sub,
                                 mir::Operand::Const(1),
                                 mir::Operand::var(empty.clone()),
                             ),
@@ -7000,7 +7000,7 @@ impl Lower {
                         self.emit(
                             next_pos.clone(),
                             mir::Rvalue::Binary(
-                                mir::BinOp::Add,
+                                mir::MirBinOp::Add,
                                 mir::Operand::var(pos),
                                 mir::Operand::var(step),
                             ),
@@ -7045,7 +7045,7 @@ impl Lower {
                     self.emit(
                         empty.clone(),
                         mir::Rvalue::Binary(
-                            mir::BinOp::Eq,
+                            mir::MirBinOp::Eq,
                             mir::Operand::var(first.clone()),
                             mir::Operand::Const(0),
                         ),
@@ -7329,7 +7329,7 @@ impl Lower {
             if let mir::Operand::Var(n) = &arg {
                 if matches!(self.temp_type_of(n).as_str(), "char**" | "str*") {
                     let d = self.fresh_temp("char*");
-                    self.emit(d.clone(), mir::Rvalue::Unary(mir::UnOp::Deref, arg.clone()));
+                    self.emit(d.clone(), mir::Rvalue::Unary(mir::MirUnOp::Deref, arg.clone()));
                     arg = mir::Operand::var(d);
                 }
             }
@@ -7387,7 +7387,7 @@ impl Lower {
             }
             if let Some(pointee) = ty.strip_suffix('*') {
                 let t = self.fresh_temp(pointee.to_string());
-                self.emit(t.clone(), mir::Rvalue::Unary(mir::UnOp::Deref, op));
+                self.emit(t.clone(), mir::Rvalue::Unary(mir::MirUnOp::Deref, op));
                 return Ok(Some(mir::Operand::var(t)));
             }
             return Ok(Some(op));
@@ -7435,7 +7435,7 @@ impl Lower {
             }
         } else if is_ptr {
             let v = self.fresh_temp(ty.clone());
-            self.emit(v.clone(), mir::Rvalue::Unary(mir::UnOp::Deref, op));
+            self.emit(v.clone(), mir::Rvalue::Unary(mir::MirUnOp::Deref, op));
             mir::Operand::var(v)
         } else {
             op
@@ -7633,7 +7633,7 @@ impl Lower {
             this.emit(
                 c.clone(),
                 mir::Rvalue::Binary(
-                    mir::BinOp::Eq,
+                    mir::MirBinOp::Eq,
                     mir::Operand::var(tag.clone()),
                     mir::Operand::Const(want),
                 ),
@@ -7938,7 +7938,7 @@ impl Lower {
         self.emit(
             is_some.clone(),
             mir::Rvalue::Binary(
-                mir::BinOp::Eq,
+                mir::MirBinOp::Eq,
                 mir::Operand::var(tag),
                 mir::Operand::Const(0),
             ),
@@ -7961,7 +7961,7 @@ impl Lower {
         let val = self.fresh_temp(out.clone());
         self.emit(
             val.clone(),
-            mir::Rvalue::Unary(mir::UnOp::Deref, mir::Operand::var(ptr)),
+            mir::Rvalue::Unary(mir::MirUnOp::Deref, mir::Operand::var(ptr)),
         );
         self.emit(
             r.clone(),
@@ -8019,7 +8019,7 @@ impl Lower {
                 self.emit(
                     r.clone(),
                     mir::Rvalue::Binary(
-                        mir::BinOp::Eq,
+                        mir::MirBinOp::Eq,
                         mir::Operand::var(len),
                         mir::Operand::Const(0),
                     ),
@@ -8032,7 +8032,7 @@ impl Lower {
                 let shrink = self.fresh_temp("long long");
                 self.emit(
                     shrink.clone(),
-                    mir::Rvalue::Binary(mir::BinOp::Lt, n.clone(), mir::Operand::var(len)),
+                    mir::Rvalue::Binary(mir::MirBinOp::Lt, n.clone(), mir::Operand::var(len)),
                 );
                 let then_blk = self.new_block();
                 let join = self.new_block();
@@ -8056,7 +8056,7 @@ impl Lower {
                 self.emit(
                     nonempty.clone(),
                     mir::Rvalue::Binary(
-                        mir::BinOp::Lt,
+                        mir::MirBinOp::Lt,
                         mir::Operand::Const(0),
                         mir::Operand::var(len.clone()),
                     ),
@@ -8075,7 +8075,7 @@ impl Lower {
                 self.emit(
                     last.clone(),
                     mir::Rvalue::Binary(
-                        mir::BinOp::Sub,
+                        mir::MirBinOp::Sub,
                         mir::Operand::var(len),
                         mir::Operand::Const(1),
                     ),
@@ -8178,7 +8178,7 @@ impl Lower {
         self.emit(
             nonempty.clone(),
             mir::Rvalue::Binary(
-                mir::BinOp::Lt,
+                mir::MirBinOp::Lt,
                 mir::Operand::Const(0),
                 mir::Operand::var(len.clone()),
             ),
@@ -8199,7 +8199,7 @@ impl Lower {
             self.emit(
                 i.clone(),
                 mir::Rvalue::Binary(
-                    mir::BinOp::Sub,
+                    mir::MirBinOp::Sub,
                     mir::Operand::var(len),
                     mir::Operand::Const(1),
                 ),
@@ -8292,7 +8292,7 @@ impl Lower {
         self.emit(
             cmp.clone(),
             mir::Rvalue::Binary(
-                mir::BinOp::Lt,
+                mir::MirBinOp::Lt,
                 mir::Operand::var(idx.clone()),
                 mir::Operand::var(len),
             ),
@@ -8326,7 +8326,7 @@ impl Lower {
         self.emit(
             idx.clone(),
             mir::Rvalue::Binary(
-                mir::BinOp::Add,
+                mir::MirBinOp::Add,
                 mir::Operand::var(idx.clone()),
                 mir::Operand::Const(1),
             ),
@@ -8384,7 +8384,7 @@ impl Lower {
         self.emit(
             more.clone(),
             mir::Rvalue::Binary(
-                mir::BinOp::Lt,
+                mir::MirBinOp::Lt,
                 mir::Operand::var(idx.clone()),
                 mir::Operand::var(len),
             ),
@@ -8400,7 +8400,7 @@ impl Lower {
         self.emit(
             idx.clone(),
             mir::Rvalue::Binary(
-                mir::BinOp::Add,
+                mir::MirBinOp::Add,
                 mir::Operand::var(idx),
                 mir::Operand::Const(1),
             ),
@@ -8441,7 +8441,7 @@ impl Lower {
             self.emit(
                 idx.clone(),
                 mir::Rvalue::Binary(
-                    mir::BinOp::Sub,
+                    mir::MirBinOp::Sub,
                     mir::Operand::var(len.clone()),
                     mir::Operand::Const(1),
                 ),
@@ -8462,9 +8462,9 @@ impl Lower {
         self.current = head;
         let cmp = self.fresh_temp("long long");
         let (cmp_op, rhs) = if si.rev {
-            (mir::BinOp::Ge, mir::Operand::Const(0))
+            (mir::MirBinOp::Ge, mir::Operand::Const(0))
         } else {
-            (mir::BinOp::Lt, mir::Operand::var(len.clone()))
+            (mir::MirBinOp::Lt, mir::Operand::var(len.clone()))
         };
         self.emit(
             cmp.clone(),
@@ -8529,9 +8529,9 @@ impl Lower {
 
         self.current = step;
         let step_op = if si.rev {
-            mir::BinOp::Sub
+            mir::MirBinOp::Sub
         } else {
-            mir::BinOp::Add
+            mir::MirBinOp::Add
         };
         self.emit(
             idx.clone(),
@@ -8544,7 +8544,7 @@ impl Lower {
         self.emit(
             pos.clone(),
             mir::Rvalue::Binary(
-                mir::BinOp::Add,
+                mir::MirBinOp::Add,
                 mir::Operand::var(pos.clone()),
                 mir::Operand::Const(1),
             ),
@@ -8639,7 +8639,7 @@ impl Lower {
             let t = self.fresh_temp("long long");
             self.emit(
                 t.clone(),
-                mir::Rvalue::Binary(mir::BinOp::Sub, hi_op, mir::Operand::Const(1)),
+                mir::Rvalue::Binary(mir::MirBinOp::Sub, hi_op, mir::Operand::Const(1)),
             );
             mir::Operand::var(t)
         };
@@ -8657,7 +8657,7 @@ impl Lower {
         let cmp = self.fresh_temp("long long");
         self.emit(
             cmp.clone(),
-            mir::Rvalue::Binary(mir::BinOp::Ge, mir::Operand::var(name.to_string()), lo_op),
+            mir::Rvalue::Binary(mir::MirBinOp::Ge, mir::Operand::var(name.to_string()), lo_op),
         );
         self.set_term(mir::Terminator::If(mir::Operand::var(cmp), body_blk, exit));
 
@@ -8672,7 +8672,7 @@ impl Lower {
         self.emit(
             name.to_string(),
             mir::Rvalue::Binary(
-                mir::BinOp::Sub,
+                mir::MirBinOp::Sub,
                 mir::Operand::var(name.to_string()),
                 mir::Operand::Const(1),
             ),
@@ -8710,9 +8710,9 @@ impl Lower {
             cmp.clone(),
             mir::Rvalue::Binary(
                 if inclusive {
-                    mir::BinOp::Le
+                    mir::MirBinOp::Le
                 } else {
-                    mir::BinOp::Lt
+                    mir::MirBinOp::Lt
                 },
                 cond,
                 b_op,
@@ -8732,7 +8732,7 @@ impl Lower {
         let i = mir::Operand::var(name.to_string());
         self.emit(
             name.to_string(),
-            mir::Rvalue::Binary(mir::BinOp::Add, i, mir::Operand::Const(1)),
+            mir::Rvalue::Binary(mir::MirBinOp::Add, i, mir::Operand::Const(1)),
         );
         self.set_term(mir::Terminator::Goto(head));
 
@@ -8880,7 +8880,7 @@ impl Lower {
                                 span: e.span,
                             };
                             let store = ast::Expr {
-                                kind: ExprKind::Binary(l.clone(), ABinOp::Assign, Box::new(value)),
+                                kind: ExprKind::Binary(l.clone(), tpt_moira_clotho::ast::BinOp::Assign, Box::new(value)),
                                 span: e.span,
                             };
                             return self.lower_expr(&store);
@@ -8983,7 +8983,7 @@ impl Lower {
                         self.emit(eq.clone(), mir::Rvalue::Call(mir::Operand::Func("moira_str_eq".into()), vec![l, r]));
                         if matches!(abop, ABinOp::Ne) {
                             let n = self.fresh_temp("long long");
-                            self.emit(n.clone(), mir::Rvalue::Unary(mir::UnOp::Not, mir::Operand::var(eq)));
+                            self.emit(n.clone(), mir::Rvalue::Unary(mir::MirUnOp::Not, mir::Operand::var(eq)));
                             return Ok(mir::Operand::var(n));
                         }
                         return Ok(mir::Operand::var(eq));
@@ -8995,7 +8995,7 @@ impl Lower {
                 // Floating-point arithmetic yields a `double`; comparisons yield a truth value.
                 let arith = matches!(
                     mop,
-                    mir::BinOp::Add | mir::BinOp::Sub | mir::BinOp::Mul | mir::BinOp::Div
+                    mir::MirBinOp::Add | mir::MirBinOp::Sub | mir::MirBinOp::Mul | mir::MirBinOp::Div
                 );
                 let float_ty = arith
                     && (self.is_float_operand(&l)
@@ -9007,12 +9007,12 @@ impl Lower {
             }
             ExprKind::Unary(aop, e) => {
                 let mop = match aop {
-                    AUnOp::Neg => mir::UnOp::Neg,
-                    AUnOp::Not => mir::UnOp::Not,
-                    AUnOp::Deref => mir::UnOp::Deref,
+                    AUnOp::Neg => mir::MirUnOp::Neg,
+                    AUnOp::Not => mir::MirUnOp::Not,
+                    AUnOp::Deref => mir::MirUnOp::Deref,
                 };
                 let o = self.lower_expr(e)?;
-                if matches!(mop, mir::UnOp::Deref) {
+                if matches!(mop, mir::MirUnOp::Deref) {
                     // Reading through a non-pointer (a match-ergonomics binding) is the value.
                     let oty = match &o {
                         mir::Operand::Var(n) => self.temp_type_of(n),
@@ -9027,7 +9027,7 @@ impl Lower {
                     return Ok(mir::Operand::var(t));
                 }
                 // Negating a floating-point value yields a `double`; `!` stays an integer.
-                let float_ty = matches!(mop, mir::UnOp::Neg)
+                let float_ty = matches!(mop, mir::MirUnOp::Neg)
                     && (self.is_float_operand(&o) || self.hint_of_expr(e).as_deref() == Some("f64"));
                 let t = self.fresh_temp(if float_ty { "double" } else { "long long" });
                 self.emit(t.clone(), mir::Rvalue::Unary(mop, o));
@@ -9104,7 +9104,7 @@ impl Lower {
                         self.emit(
                             failed.clone(),
                             mir::Rvalue::Binary(
-                                mir::BinOp::Eq,
+                                mir::MirBinOp::Eq,
                                 mir::Operand::var(text.clone()),
                                 mir::Operand::Const(0),
                             ),
@@ -9847,7 +9847,7 @@ impl Lower {
                         self.emit(
                             cmp.clone(),
                             mir::Rvalue::Binary(
-                                mir::BinOp::Lt,
+                                mir::MirBinOp::Lt,
                                 mir::Operand::var(idx.clone()),
                                 mir::Operand::Const(len),
                             ),
@@ -9877,7 +9877,7 @@ impl Lower {
                         self.emit(
                             idx.clone(),
                             mir::Rvalue::Binary(
-                                mir::BinOp::Add,
+                                mir::MirBinOp::Add,
                                 mir::Operand::var(idx.clone()),
                                 mir::Operand::Const(1),
                             ),
@@ -10084,7 +10084,7 @@ impl Lower {
                                 self.emit(
                                     t.clone(),
                                     mir::Rvalue::Binary(
-                                        mir::BinOp::Eq,
+                                        mir::MirBinOp::Eq,
                                         mir::Operand::var(len),
                                         mir::Operand::Const(0),
                                     ),
@@ -10116,7 +10116,7 @@ impl Lower {
                         self.emit(
                             t.clone(),
                             mir::Rvalue::Binary(
-                                mir::BinOp::Eq,
+                                mir::MirBinOp::Eq,
                                 mir::Operand::var(len),
                                 mir::Operand::Const(0),
                             ),
@@ -10378,7 +10378,7 @@ impl Lower {
                 }
                 let pointee = oty.strip_suffix('*').unwrap_or("long long");
                 let t = self.fresh_temp(pointee.to_string());
-                self.emit(t.clone(), mir::Rvalue::Unary(mir::UnOp::Deref, o));
+                self.emit(t.clone(), mir::Rvalue::Unary(mir::MirUnOp::Deref, o));
                 Ok(mir::Operand::var(t))
             }
         }
@@ -10509,7 +10509,7 @@ impl Lower {
         self.emit(
             cmp.clone(),
             mir::Rvalue::Binary(
-                mir::BinOp::Eq,
+                mir::MirBinOp::Eq,
                 mir::Operand::var(status),
                 mir::Operand::Const(1),
             ),
@@ -11044,7 +11044,7 @@ impl Lower {
                 let cmp = self.fresh_temp("long long");
                 self.emit(
                     cmp.clone(),
-                    mir::Rvalue::Binary(mir::BinOp::Lt, mir::Operand::var(idx.clone()), n),
+                    mir::Rvalue::Binary(mir::MirBinOp::Lt, mir::Operand::var(idx.clone()), n),
                 );
                 self.set_term(mir::Terminator::If(mir::Operand::var(cmp), body_blk, exit));
                 self.current = body_blk;
@@ -11052,7 +11052,7 @@ impl Lower {
                 self.emit(
                     idx.clone(),
                     mir::Rvalue::Binary(
-                        mir::BinOp::Add,
+                        mir::MirBinOp::Add,
                         mir::Operand::var(idx.clone()),
                         mir::Operand::Const(1),
                     ),
@@ -11117,7 +11117,7 @@ impl Lower {
             return op;
         }
         let t = self.fresh_temp(pointee.to_string());
-        self.emit(t.clone(), mir::Rvalue::Unary(mir::UnOp::Deref, op));
+        self.emit(t.clone(), mir::Rvalue::Unary(mir::MirUnOp::Deref, op));
         mir::Operand::var(t)
     }
 
@@ -11302,9 +11302,9 @@ impl Lower {
                 let b = self.lower_expr(&args[1])?;
                 let ok = self.fresh_temp("long long");
                 let op = if name.ends_with("_eq") {
-                    mir::BinOp::Eq
+                    mir::MirBinOp::Eq
                 } else {
-                    mir::BinOp::Ne
+                    mir::MirBinOp::Ne
                 };
                 self.emit(ok.clone(), mir::Rvalue::Binary(op, a, b));
                 self.lower_panic_unless(mir::Operand::var(ok));
@@ -11655,7 +11655,7 @@ impl Lower {
         self.emit(
             cond.clone(),
             mir::Rvalue::Binary(
-                mir::BinOp::Eq,
+                mir::MirBinOp::Eq,
                 mir::Operand::var(tag_val),
                 mir::Operand::Const(tag),
             ),
@@ -11697,7 +11697,7 @@ impl Lower {
         self.emit(
             cond.clone(),
             mir::Rvalue::Binary(
-                mir::BinOp::Eq,
+                mir::MirBinOp::Eq,
                 mir::Operand::var(tag_val),
                 mir::Operand::Const(tag),
             ),
@@ -11740,7 +11740,7 @@ impl Lower {
                     self.emit(
                         cond.clone(),
                         mir::Rvalue::Binary(
-                            mir::BinOp::Eq,
+                            mir::MirBinOp::Eq,
                             mir::Operand::var(tag_val),
                             mir::Operand::Const(tag),
                         ),
@@ -11777,7 +11777,7 @@ impl Lower {
                 let cond = match (ca, cb) {
                     (Some(x), Some(y)) => {
                         let t = self.fresh_temp("long long");
-                        self.emit(t.clone(), mir::Rvalue::Binary(mir::BinOp::Or, x, y));
+                        self.emit(t.clone(), mir::Rvalue::Binary(mir::MirBinOp::Or, x, y));
                         Some(mir::Operand::var(t))
                     }
                     (Some(x), None) | (None, Some(x)) => Some(x),
@@ -11792,7 +11792,7 @@ impl Lower {
                 let t = self.fresh_temp("long long");
                 self.emit(
                     t.clone(),
-                    mir::Rvalue::Binary(mir::BinOp::Eq, scrut.clone(), lit_op),
+                    mir::Rvalue::Binary(mir::MirBinOp::Eq, scrut.clone(), lit_op),
                 );
                 Ok((Some(mir::Operand::var(t)), Vec::new()))
             }
@@ -11807,7 +11807,7 @@ impl Lower {
                         let t = self.fresh_temp("long long");
                         self.emit(
                             t.clone(),
-                            mir::Rvalue::Binary(mir::BinOp::Ge, scrut.clone(), lo_op),
+                            mir::Rvalue::Binary(mir::MirBinOp::Ge, scrut.clone(), lo_op),
                         );
                         conds.push(mir::Operand::var(t));
                     } else {
@@ -11820,9 +11820,9 @@ impl Lower {
                     if let ast::Pat::Lit(l) = &**hi_pat {
                         let hi_op = self.lower_lit_operand(l);
                         let op = if *inclusive {
-                            mir::BinOp::Le
+                            mir::MirBinOp::Le
                         } else {
-                            mir::BinOp::Lt
+                            mir::MirBinOp::Lt
                         };
                         let t = self.fresh_temp("long long");
                         self.emit(t.clone(), mir::Rvalue::Binary(op, scrut.clone(), hi_op));
@@ -11842,7 +11842,7 @@ impl Lower {
                             let t = self.fresh_temp("long long");
                             self.emit(
                                 t.clone(),
-                                mir::Rvalue::Binary(mir::BinOp::And, acc, c.clone()),
+                                mir::Rvalue::Binary(mir::MirBinOp::And, acc, c.clone()),
                             );
                             acc = mir::Operand::var(t);
                         }
@@ -11900,7 +11900,7 @@ impl Lower {
                     self.emit(
                         cond.clone(),
                         mir::Rvalue::Binary(
-                            mir::BinOp::Eq,
+                            mir::MirBinOp::Eq,
                             mir::Operand::var(tag_val),
                             mir::Operand::Const(tag),
                         ),
@@ -11962,7 +11962,7 @@ impl Lower {
                             None => c,
                             Some(prev) => {
                                 let t = self.fresh_temp("long long");
-                                self.emit(t.clone(), mir::Rvalue::Binary(mir::BinOp::And, prev, c));
+                                self.emit(t.clone(), mir::Rvalue::Binary(mir::MirBinOp::And, prev, c));
                                 mir::Operand::var(t)
                             }
                         });
@@ -12023,12 +12023,12 @@ impl Lower {
 /// generated `poll` coroutine and sync `run` executor.
 struct AsyncLower {
     def: mir::AsyncDef,
-    poll_fn: mir::Function,
-    run_fn: mir::Function,
-    ctor_fn: mir::Function,
+    poll_fn: mir::MirFunction,
+    run_fn: mir::MirFunction,
+    ctor_fn: mir::MirFunction,
     /// Closures lambda-lifted out of the async body (none in the supported linear
     /// async subset, but threaded through so they are never silently dropped).
-    closures: Vec<mir::Function>,
+    closures: Vec<mir::MirFunction>,
 }
 
 /// Collect the names + C types of every `let` binding in a (linear) block, used
@@ -12151,8 +12151,8 @@ fn build_run_wrapper(
     output_ty: &str,
     slots: &[(String, String)],
     aliases: &AliasTable,
-) -> mir::Function {
-    let mut func = mir::Function {
+) -> mir::MirFunction {
+    let mut func = mir::MirFunction {
         name: format!("{}__run", f.name.node),
         params: Vec::new(),
         ret: Some(output_ty.to_string()),
@@ -12169,7 +12169,7 @@ fn build_run_wrapper(
     }
 
     let mut t = 0usize;
-    let mut fresh = |func: &mut mir::Function, ty: &str| -> String {
+    let mut fresh = |func: &mut mir::MirFunction, ty: &str| -> String {
         let name = format!("t{}", t);
         t += 1;
         func.temp_types.insert(name.clone(), ty.to_string());
@@ -12177,7 +12177,7 @@ fn build_run_wrapper(
     };
 
     let b0 = func.blocks.len();
-    func.blocks.push(mir::Block::default());
+    func.blocks.push(mir::MirBlock::default());
     // `fut = (fut_struct){ .__state = 0, .param = arg, ... };`
     let fut = "t_fut".to_string();
     func.temp_types.insert(fut.clone(), fut_struct.to_string());
@@ -12193,26 +12193,26 @@ fn build_run_wrapper(
             inits.push((sname.clone(), mir::Operand::Const(0)));
         }
     }
-    func.blocks[b0].stmts.push(mir::Stmt {
+    func.blocks[b0].stmts.push(mir::MirStmt {
         place: fut.clone(),
         rvalue: mir::Rvalue::StructLit(fut_struct.to_string(), inits),
     });
 
     // Poll loop: `while (fut_poll(&fut) == PENDING) {}`.
     let loop_b = func.blocks.len();
-    func.blocks.push(mir::Block::default());
+    func.blocks.push(mir::MirBlock::default());
     let end_b = func.blocks.len();
-    func.blocks.push(mir::Block::default());
+    func.blocks.push(mir::MirBlock::default());
 
     let fut_ptr = fresh(&mut func, &format!("{}*", fut_struct));
-    func.blocks[b0].stmts.push(mir::Stmt {
+    func.blocks[b0].stmts.push(mir::MirStmt {
         place: fut_ptr.clone(),
         rvalue: mir::Rvalue::Ref(mir::Operand::var(fut.clone()), false),
     });
     func.blocks[b0].term = mir::Terminator::Goto(loop_b);
 
     let status = fresh(&mut func, "long long");
-    func.blocks[loop_b].stmts.push(mir::Stmt {
+    func.blocks[loop_b].stmts.push(mir::MirStmt {
         place: status.clone(),
         rvalue: mir::Rvalue::Call(
             mir::Operand::Func(poll_name.to_string()),
@@ -12220,10 +12220,10 @@ fn build_run_wrapper(
         ),
     });
     let cmp = fresh(&mut func, "long long");
-    func.blocks[loop_b].stmts.push(mir::Stmt {
+    func.blocks[loop_b].stmts.push(mir::MirStmt {
         place: cmp.clone(),
         rvalue: mir::Rvalue::Binary(
-            mir::BinOp::Eq,
+            mir::MirBinOp::Eq,
             mir::Operand::var(status.clone()),
             mir::Operand::Const(1),
         ),
@@ -12231,7 +12231,7 @@ fn build_run_wrapper(
     func.blocks[loop_b].term = mir::Terminator::If(mir::Operand::var(cmp), loop_b, end_b);
 
     let out = fresh(&mut func, output_ty);
-    func.blocks[end_b].stmts.push(mir::Stmt {
+    func.blocks[end_b].stmts.push(mir::MirStmt {
         place: out.clone(),
         rvalue: mir::Rvalue::Field(mir::Operand::var(fut.clone()), "_out".to_string(), false),
     });
@@ -12244,8 +12244,8 @@ fn build_run_wrapper(
 /// parameters copied from the call arguments. This is the value produced when an
 /// async call is used inside `.await` (as opposed to `__run`, which drives the
 /// future to completion).
-fn build_ctor_wrapper(f: &ast::Function, fut_struct: &str, aliases: &AliasTable) -> mir::Function {
-    let mut func = mir::Function {
+fn build_ctor_wrapper(f: &ast::Function, fut_struct: &str, aliases: &AliasTable) -> mir::MirFunction {
+    let mut func = mir::MirFunction {
         name: format!("{}__ctor", f.name.node),
         params: Vec::new(),
         ret: Some(fut_struct.to_string()),
@@ -12263,10 +12263,10 @@ fn build_ctor_wrapper(f: &ast::Function, fut_struct: &str, aliases: &AliasTable)
         inits.push((name.clone(), mir::Operand::var(name)));
     }
     let b0 = func.blocks.len();
-    func.blocks.push(mir::Block::default());
+    func.blocks.push(mir::MirBlock::default());
     let fut = "t_fut".to_string();
     func.temp_types.insert(fut.clone(), fut_struct.to_string());
-    func.blocks[b0].stmts.push(mir::Stmt {
+    func.blocks[b0].stmts.push(mir::MirStmt {
         place: fut.clone(),
         rvalue: mir::Rvalue::StructLit(fut_struct.to_string(), inits),
     });
@@ -12314,18 +12314,18 @@ fn plain_binop(op: ABinOp) -> Option<ABinOp> {
     })
 }
 
-fn compound_op(op: ABinOp) -> Option<mir::BinOp> {
+fn compound_op(op: ABinOp) -> Option<mir::MirBinOp> {
     Some(match op {
-        ABinOp::AddAssign => mir::BinOp::Add,
-        ABinOp::SubAssign => mir::BinOp::Sub,
-        ABinOp::MulAssign => mir::BinOp::Mul,
-        ABinOp::DivAssign => mir::BinOp::Div,
-        ABinOp::RemAssign => mir::BinOp::Rem,
-        ABinOp::BitAndAssign => mir::BinOp::BitAnd,
-        ABinOp::BitOrAssign => mir::BinOp::BitOr,
-        ABinOp::BitXorAssign => mir::BinOp::BitXor,
-        ABinOp::ShlAssign => mir::BinOp::Shl,
-        ABinOp::ShrAssign => mir::BinOp::Shr,
+        ABinOp::AddAssign => mir::MirBinOp::Add,
+        ABinOp::SubAssign => mir::MirBinOp::Sub,
+        ABinOp::MulAssign => mir::MirBinOp::Mul,
+        ABinOp::DivAssign => mir::MirBinOp::Div,
+        ABinOp::RemAssign => mir::MirBinOp::Rem,
+        ABinOp::BitAndAssign => mir::MirBinOp::BitAnd,
+        ABinOp::BitOrAssign => mir::MirBinOp::BitOr,
+        ABinOp::BitXorAssign => mir::MirBinOp::BitXor,
+        ABinOp::ShlAssign => mir::MirBinOp::Shl,
+        ABinOp::ShrAssign => mir::MirBinOp::Shr,
         _ => return None,
     })
 }
@@ -12338,26 +12338,26 @@ fn is_scalar_eq_type(ty: &str) -> bool {
     )
 }
 
-fn map_binop(op: ABinOp) -> Result<mir::BinOp> {
+fn map_binop(op: ABinOp) -> Result<mir::MirBinOp> {
     Ok(match op {
-        ABinOp::Add => mir::BinOp::Add,
-        ABinOp::Sub => mir::BinOp::Sub,
-        ABinOp::Mul => mir::BinOp::Mul,
-        ABinOp::Div => mir::BinOp::Div,
-        ABinOp::Rem => mir::BinOp::Rem,
-        ABinOp::And => mir::BinOp::And,
-        ABinOp::Or => mir::BinOp::Or,
-        ABinOp::BitAnd => mir::BinOp::BitAnd,
-        ABinOp::BitOr => mir::BinOp::BitOr,
-        ABinOp::BitXor => mir::BinOp::BitXor,
-        ABinOp::Shl => mir::BinOp::Shl,
-        ABinOp::Shr => mir::BinOp::Shr,
-        ABinOp::Eq => mir::BinOp::Eq,
-        ABinOp::Ne => mir::BinOp::Ne,
-        ABinOp::Lt => mir::BinOp::Lt,
-        ABinOp::Gt => mir::BinOp::Gt,
-        ABinOp::Le => mir::BinOp::Le,
-        ABinOp::Ge => mir::BinOp::Ge,
+        ABinOp::Add => mir::MirBinOp::Add,
+        ABinOp::Sub => mir::MirBinOp::Sub,
+        ABinOp::Mul => mir::MirBinOp::Mul,
+        ABinOp::Div => mir::MirBinOp::Div,
+        ABinOp::Rem => mir::MirBinOp::Rem,
+        ABinOp::And => mir::MirBinOp::And,
+        ABinOp::Or => mir::MirBinOp::Or,
+        ABinOp::BitAnd => mir::MirBinOp::BitAnd,
+        ABinOp::BitOr => mir::MirBinOp::BitOr,
+        ABinOp::BitXor => mir::MirBinOp::BitXor,
+        ABinOp::Shl => mir::MirBinOp::Shl,
+        ABinOp::Shr => mir::MirBinOp::Shr,
+        ABinOp::Eq => mir::MirBinOp::Eq,
+        ABinOp::Ne => mir::MirBinOp::Ne,
+        ABinOp::Lt => mir::MirBinOp::Lt,
+        ABinOp::Gt => mir::MirBinOp::Gt,
+        ABinOp::Le => mir::MirBinOp::Le,
+        ABinOp::Ge => mir::MirBinOp::Ge,
         other => {
             return Err(LowerError(format!(
                 "operator {:?} is not supported in the codegen subset",
@@ -12367,7 +12367,7 @@ fn map_binop(op: ABinOp) -> Result<mir::BinOp> {
     })
 }
 
-fn lookup_field_type(structs: &[mir::StructDef], base_ty: &str, field: &str) -> Option<String> {
+fn lookup_field_type(structs: &[mir::MirStructDef], base_ty: &str, field: &str) -> Option<String> {
     structs
         .iter()
         .find(|s| s.name == base_ty)

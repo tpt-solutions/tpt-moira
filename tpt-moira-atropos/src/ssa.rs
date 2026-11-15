@@ -40,8 +40,8 @@ pub enum Val {
 pub enum Op {
     Const(i128),
     Copy(Val),
-    Binary(mir::BinOp, Val, Val),
-    Unary(mir::UnOp, Val),
+    Binary(mir::MirBinOp, Val, Val),
+    Unary(mir::MirUnOp, Val),
     Call(Val, Vec<Val>),
     StructLit(String, Vec<(String, Val)>),
     Field(Val, String),
@@ -84,13 +84,13 @@ pub struct SsaFunction {
     pub locals: Vec<(String, Option<String>)>,
     pub blocks: Vec<SsaBlock>,
     pub values: Vec<Value>,
-    pub structs: Vec<mir::StructDef>,
+    pub structs: Vec<mir::MirStructDef>,
 }
 
 /// A whole program in SSA form.
 #[derive(Debug, Clone, Default)]
 pub struct SsaProgram {
-    pub structs: Vec<mir::StructDef>,
+    pub structs: Vec<mir::MirStructDef>,
     pub functions: Vec<SsaFunction>,
 }
 
@@ -113,7 +113,7 @@ pub fn build_ssa(mir: &mir::MirProgram) -> Result<SsaProgram, String> {
     Ok(out)
 }
 
-fn build_function(f: &mir::Function) -> Result<SsaFunction, String> {
+fn build_function(f: &mir::MirFunction) -> Result<SsaFunction, String> {
     let mut func = SsaFunction {
         name: f.name.clone(),
         params: f.params.clone(),
@@ -233,7 +233,7 @@ fn build_function(f: &mir::Function) -> Result<SsaFunction, String> {
     Ok(func)
 }
 
-fn mir_structs_of(f: &mir::Function) -> Vec<mir::StructDef> {
+fn mir_structs_of(f: &mir::MirFunction) -> Vec<mir::MirStructDef> {
     let _ = f;
     Vec::new()
 }
@@ -282,8 +282,8 @@ fn const_of(v: &Val, values: &[Value]) -> Option<i128> {
 }
 
 /// Evaluate a binary operation on two constants, if both are known.
-fn eval_binary(b: mir::BinOp, l: i128, r: i128) -> Option<i128> {
-    use mir::BinOp::*;
+fn eval_binary(b: mir::MirBinOp, l: i128, r: i128) -> Option<i128> {
+    use mir::MirBinOp::*;
     let logical = |x: i128| x != 0;
     Some(match b {
         Add => l.wrapping_add(r),
@@ -337,8 +337,8 @@ pub fn constant_fold(func: &mut SsaFunction) -> bool {
                         _ => None,
                     }
                 }
-                Op::Unary(mir::UnOp::Neg, o) => const_of(o, &func.values).map(|c| -c),
-                Op::Unary(mir::UnOp::Not, o) => {
+                Op::Unary(mir::MirUnOp::Neg, o) => const_of(o, &func.values).map(|c| -c),
+                Op::Unary(mir::MirUnOp::Not, o) => {
                     const_of(o, &func.values).map(|c| if c == 0 { 1 } else { 0 })
                 }
                 Op::Copy(o) => const_of(o, &func.values),

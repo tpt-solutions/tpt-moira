@@ -88,7 +88,7 @@ fn is_live_at(info: &BorrowInfo, bi: usize, si: usize) -> bool {
 /// is live when a name holding the borrow is read on some path from it before the borrow's
 /// temporary is written again (the write of the temporary kills it).
 fn compute_live(
-    f: &tpt_moira_atropos::mir::Function,
+    f: &tpt_moira_atropos::mir::MirFunction,
     names: &HashSet<String>,
     temp: &str,
     succs: &[Vec<usize>],
@@ -132,7 +132,7 @@ fn compute_live(
     live
 }
 
-fn check_function(f: &tpt_moira_atropos::mir::Function, errors: &mut Vec<Diag>) {
+fn check_function(f: &tpt_moira_atropos::mir::MirFunction, errors: &mut Vec<Diag>) {
     // Fast path: no references => nothing to check.
     let mut has_borrow = false;
     for b in &f.blocks {

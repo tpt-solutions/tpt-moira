@@ -196,7 +196,7 @@ impl<'a> Emitter<'a> {
             Op::Const(c) => Ok(format!("    mov rax, {}\n    push rax\n", *c as i64)),
             Op::Copy(v) => Ok(self.gen_val(v)),
             Op::Binary(b, l, r) => {
-                use crate::mir::BinOp::*;
+                use crate::mir::MirBinOp::*;
                 let mut s = String::new();
                 s.push_str(&self.gen_val(l));
                 s.push_str(&self.gen_val(r));
@@ -247,11 +247,11 @@ impl<'a> Emitter<'a> {
                 let mut s = self.gen_val(v);
                 s.push_str("    pop rax\n");
                 match u {
-                    crate::mir::UnOp::Neg => s.push_str("    neg rax\n"),
-                    crate::mir::UnOp::Not => {
+                    crate::mir::MirUnOp::Neg => s.push_str("    neg rax\n"),
+                    crate::mir::MirUnOp::Not => {
                         s.push_str("    test rax, rax\n    sete al\n    movzx rax, al\n")
                     }
-                    crate::mir::UnOp::Deref => s.push_str("    mov rax, [rax]\n"),
+                    crate::mir::MirUnOp::Deref => s.push_str("    mov rax, [rax]\n"),
                 }
                 s.push_str("    push rax\n");
                 Ok(s)

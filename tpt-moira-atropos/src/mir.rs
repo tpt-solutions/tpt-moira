@@ -1,8 +1,8 @@
 //! Mid-level IR for the Phase-1 subset.
 //!
 //! The IR is in SSA form: every value is bound exactly once to a *temporary*
-//! (`t0`, `t1`, …) via a [`Stmt::Assign`], and control flow is made explicit
-//! with [`Terminator`]s over basic [`Block`]s. This makes later optimization
+//! (`t0`, `t1`, …) via a [`MirStmt::Assign`], and control flow is made explicit
+//! with [`Terminator`]s over basic [`MirBlock`]s. This makes later optimization
 //! passes (constant folding, dead-code elimination) and a native backend
 //! straightforward to layer on.
 
@@ -12,9 +12,9 @@ use std::fmt;
 #[derive(Debug, Clone, Default)]
 pub struct MirProgram {
     /// Struct type definitions: `(name, [(field_name, field_type)])`.
-    pub structs: Vec<StructDef>,
+    pub structs: Vec<MirStructDef>,
     /// Top-level functions.
-    pub functions: Vec<Function>,
+    pub functions: Vec<MirFunction>,
     /// Generated `async fn` state machines (future struct + poll + run wrapper).
     pub async_fns: Vec<AsyncDef>,
 }
@@ -48,15 +48,15 @@ pub struct AsyncDef {
 }
 
 #[derive(Debug, Clone)]
-pub struct StructDef {
+pub struct MirStructDef {
     pub name: String,
     pub fields: Vec<(String, String)>,
 }
 
 /// A function: a name, parameters, an optional return type, and a list of basic
-/// blocks. Block 0 is the entry point.
+/// blocks. MirBlock 0 is the entry point.
 #[derive(Debug, Clone)]
-pub struct Function {
+pub struct MirFunction {
     pub name: String,
     pub params: Vec<String>,
     pub ret: Option<String>,
@@ -64,10 +64,10 @@ pub struct Function {
     pub locals: Vec<(String, Option<String>)>,
     /// SSA temporaries (`t0`, `t1`, …) with their inferred C type.
     pub temp_types: std::collections::HashMap<String, String>,
-    pub blocks: Vec<Block>,
+    pub blocks: Vec<MirBlock>,
 }
 
-impl Function {
+impl MirFunction {
     /// Number of basic blocks.
     pub fn block_count(&self) -> usize {
         self.blocks.len()
@@ -77,14 +77,14 @@ impl Function {
 /// A basic block: a linear sequence of assignments followed by exactly one
 /// terminator.
 #[derive(Debug, Clone, Default)]
-pub struct Block {
-    pub stmts: Vec<Stmt>,
+pub struct MirBlock {
+    pub stmts: Vec<MirStmt>,
     pub term: Terminator,
 }
 
 /// A single SSA binding: `place = rvalue`.
 #[derive(Debug, Clone)]
-pub struct Stmt {
+pub struct MirStmt {
     pub place: String,
     pub rvalue: Rvalue,
 }
@@ -95,10 +95,10 @@ pub enum Rvalue {
     /// Copy/use another operand.
     Use(Operand),
     /// Binary primitive operation.
-    Binary(BinOp, Operand, Operand),
+    Binary(MirBinOp, Operand, Operand),
     /// Unary primitive operation.
-    Unary(UnOp, Operand),
-    /// Function call `callee(args)`, where `callee` is either a named top-level
+    Unary(MirUnOp, Operand),
+    /// MirFunction call `callee(args)`, where `callee` is either a named top-level
     /// function (`Operand::Func`) or an indirect call through a function pointer
     /// held in a variable (`Operand::Var`) — the latter backs closures.
     Call(Operand, Vec<Operand>),
@@ -135,7 +135,7 @@ pub enum Rvalue {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BinOp {
+pub enum MirBinOp {
     Add,
     Sub,
     Mul,
@@ -158,7 +158,7 @@ pub enum BinOp {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum UnOp {
+pub enum MirUnOp {
     Neg,
     Not,
     Deref,
@@ -178,7 +178,7 @@ pub enum Operand {
     Unit,
     /// A reference to a top-level function by name — a function-pointer constant.
     /// Used for ordinary calls and as the value a closure expression lowers to
-    /// (the closure is lambda-lifted into a top-level `mir::Function`).
+    /// (the closure is lambda-lifted into a top-level `mir::MirFunction`).
     Func(String),
     /// A string literal, used as a C string argument (e.g. the literal segments
     /// of an expanded `println!`). The C backend renders it as a quoted
@@ -256,7 +256,7 @@ impl fmt::Display for MirProgram {
     }
 }
 
-impl fmt::Display for StructDef {
+impl fmt::Display for MirStructDef {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "struct {} {{", self.name)?;
         for (n, t) in &self.fields {
@@ -266,7 +266,7 @@ impl fmt::Display for StructDef {
     }
 }
 
-impl fmt::Display for Function {
+impl fmt::Display for MirFunction {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let ret = self.ret.clone().unwrap_or_else(|| "()".to_string());
         writeln!(

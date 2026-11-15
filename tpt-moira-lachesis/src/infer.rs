@@ -748,6 +748,7 @@ impl TypeChecker {
         // The crate's own aliases take precedence over an extern's of the same name.
         let mut cx = TypeChecker::default();
         cx.aliases = tpt_moira_clotho::alias::AliasTable::from_program(prog);
+        cx.aliases.add_use_renames(prog);
         for (crate_name, ext) in externs {
             cx.aliases
                 .extend_from(&tpt_moira_clotho::alias::AliasTable::from_exports(ext));

@@ -32,6 +32,44 @@ impl AliasTable {
         table
     }
 
+    /// Add the renames of a program's `use path as Alias;` items as aliases of the imported
+    /// name: `use tpt_moira_clotho::ast::BinOp as ABinOp;` makes `ABinOp` name `BinOp`. Only a
+    /// single-segment use names an alias, and a rename never overrides a type alias of the same name.
+    pub fn add_use_renames(&mut self, prog: &Program) {
+        fn walk(tree: &crate::ast::UseTree, out: &mut Vec<(String, String)>) {
+            if let (Some(alias), Some(last)) = (&tree.alias, tree.prefix.last()) {
+                out.push((alias.node.clone(), last.node.clone()));
+            }
+            if let crate::ast::UseKind::Nested(children) = &tree.kind {
+                for c in children {
+                    walk(c, out);
+                }
+            }
+        }
+        let mut renames = Vec::new();
+        for item in &prog.items {
+            if let ItemKind::Use(tree) = &item.kind {
+                walk(tree, &mut renames);
+            }
+        }
+        for (alias, target) in renames {
+            if self.defs.contains_key(&alias) {
+                continue;
+            }
+            let span = crate::token::Span::default();
+            let ty = Type {
+                kind: TypeKind::Path(
+                    Path {
+                        segments: vec![crate::ast::Spanned::new(target, span)],
+                    },
+                    Vec::new(),
+                ),
+                span,
+            };
+            self.defs.insert(alias, (Vec::new(), ty));
+        }
+    }
+
     /// The aliases another crate may name: only `pub` ones. A private alias such
     /// as atropos's `type Result<T> = ...` must not leak into a dependent crate.
     pub fn from_exports(prog: &Program) -> Self {

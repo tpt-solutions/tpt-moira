@@ -189,7 +189,7 @@ fn escape_c_names(prog: &mir::MirProgram) -> mir::MirProgram {
 
 // Index loops, not `iter_mut()`: the Stage-1 subset lowers `for` only over ranges and arrays.
 #[allow(clippy::needless_range_loop)]
-fn escape_function(f: &mut mir::Function) {
+fn escape_function(f: &mut mir::MirFunction) {
     if let Some(c) = c_name(&f.name) {
         f.name = c;
     }
@@ -436,7 +436,7 @@ pub fn emit_c(prog: &mir::MirProgram) -> String {
 }
 
 /// The C signature of a function (`ret name(params)`, without the body).
-fn c_signature(f: &mir::Function, struct_names: &std::collections::HashSet<&str>) -> String {
+fn c_signature(f: &mir::MirFunction, struct_names: &std::collections::HashSet<&str>) -> String {
     let ret = if f.name == "main" {
         "int".to_string()
     } else {
@@ -480,7 +480,7 @@ fn fn_header(ret: &str, name: &str, param_str: &str) -> String {
 }
 
 /// The declared type of a temporary or local of `f`, if known.
-fn dest_type(f: &mir::Function, place: &str) -> Option<String> {
+fn dest_type(f: &mir::MirFunction, place: &str) -> Option<String> {
     f.temp_types.get(place).cloned().or_else(|| {
         f.locals
             .iter()
@@ -491,7 +491,7 @@ fn dest_type(f: &mir::Function, place: &str) -> Option<String> {
 
 /// A struct literal of a prelude enum (`Option`, `Result`) names the instance struct of
 /// its destination's type (`Option<i32>` is `Option_i32`); other literals are unchanged.
-fn fix_struct_lit(f: &mir::Function, place: &str, rv: &mir::Rvalue) -> mir::Rvalue {
+fn fix_struct_lit(f: &mir::MirFunction, place: &str, rv: &mir::Rvalue) -> mir::Rvalue {
     if let mir::Rvalue::StructLit(name, fields) = rv {
         if let Some(dest) = dest_type(f, place) {
             if let Some((base, _)) = mir::split_generic(&dest) {
@@ -505,7 +505,7 @@ fn fix_struct_lit(f: &mir::Function, place: &str, rv: &mir::Rvalue) -> mir::Rval
 }
 
 fn emit_function(
-    f: &mir::Function,
+    f: &mir::MirFunction,
     struct_names: &std::collections::HashSet<&str>,
     void_names: &std::collections::HashSet<&str>,
 ) -> String {
@@ -949,9 +949,9 @@ fn emit_rvalue(rv: &mir::Rvalue) -> String {
             format!("({} {} {})", emit_operand(l), c_binop(*op), emit_operand(r))
         }
         mir::Rvalue::Unary(op, o) => match op {
-            mir::UnOp::Neg => format!("(-{})", emit_operand(o)),
-            mir::UnOp::Not => format!("(!{})", emit_operand(o)),
-            mir::UnOp::Deref => format!("(*{})", emit_operand(o)),
+            mir::MirUnOp::Neg => format!("(-{})", emit_operand(o)),
+            mir::MirUnOp::Not => format!("(!{})", emit_operand(o)),
+            mir::MirUnOp::Deref => format!("(*{})", emit_operand(o)),
         },
         mir::Rvalue::Call(callee, args) => {
             let a: Vec<String> = args.iter().map(emit_operand).collect();
@@ -1017,8 +1017,8 @@ fn emit_rvalue(rv: &mir::Rvalue) -> String {
     }
 }
 
-fn c_binop(op: mir::BinOp) -> &'static str {
-    use mir::BinOp::*;
+fn c_binop(op: mir::MirBinOp) -> &'static str {
+    use mir::MirBinOp::*;
     match op {
         Add => "+",
         Sub => "-",
@@ -1104,7 +1104,7 @@ fn scan_generics(
 fn instantiations(
     prog: &mir::MirProgram,
 ) -> (
-    Vec<mir::StructDef>,
+    Vec<mir::MirStructDef>,
     std::collections::BTreeSet<(String, String)>,
 ) {
     let mut types: Vec<String> = Vec::new();
@@ -1167,7 +1167,7 @@ fn instantiations(
                 }
             }
         }
-        defs.push(mir::StructDef { name, fields });
+        defs.push(mir::MirStructDef { name, fields });
     }
     (defs, maps)
 }
@@ -1183,7 +1183,7 @@ fn map_typedef(k: &str, v: &str, struct_names: &std::collections::HashSet<&str>)
 }
 
 /// The struct of a key type (a generic instance is named by its instance struct).
-fn key_struct<'a>(ty: &str, structs: &'a [mir::StructDef]) -> Option<&'a mir::StructDef> {
+fn key_struct<'a>(ty: &str, structs: &'a [mir::MirStructDef]) -> Option<&'a mir::MirStructDef> {
     let name = if ty.contains('<') {
         mir::inst_c_name(ty)
     } else {
@@ -1194,7 +1194,7 @@ fn key_struct<'a>(ty: &str, structs: &'a [mir::StructDef]) -> Option<&'a mir::St
 
 /// `a < b` for keys of type `ty`: strings compare with `strcmp`, a struct lexicographically
 /// over its fields (in declaration order), anything else with `<`.
-fn key_less(ty: &str, a: &str, b: &str, structs: &[mir::StructDef]) -> String {
+fn key_less(ty: &str, a: &str, b: &str, structs: &[mir::MirStructDef]) -> String {
     if ty == "char*" || ty == "str" {
         return format!("(strcmp({a}, {b}) < 0)");
     }
@@ -1213,7 +1213,7 @@ fn key_less(ty: &str, a: &str, b: &str, structs: &[mir::StructDef]) -> String {
 }
 
 /// `a == b` for keys of type `ty` (see `key_less`).
-fn key_equal(ty: &str, a: &str, b: &str, structs: &[mir::StructDef]) -> String {
+fn key_equal(ty: &str, a: &str, b: &str, structs: &[mir::MirStructDef]) -> String {
     if ty == "char*" || ty == "str" {
         return format!("(strcmp({a}, {b}) == 0)");
     }
@@ -1241,7 +1241,7 @@ fn map_helpers(
     k: &str,
     v: &str,
     struct_names: &std::collections::HashSet<&str>,
-    structs: &[mir::StructDef],
+    structs: &[mir::MirStructDef],
 ) -> String {
     let name = mir::map_c_name(k, v);
     let kc = c_type(k, struct_names);
