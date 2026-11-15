@@ -154,6 +154,8 @@ pub struct TypeChecker {
     /// The parameter types a closure argument is expected to take, from the `Fn` type
     /// of the parameter it is passed to. Consumed by the next closure checked.
     closure_expected: Option<Vec<Ty>>,
+    /// The result type a closure is expected to have (from a function-typed parameter).
+    closure_expected_ret: Option<Ty>,
     /// The variables each closure literal captures, with their types, by the closure's span.
     closure_caps: HashMap<(usize, usize), Vec<(String, Ty)>>,
 }
@@ -623,6 +625,7 @@ impl Default for TypeChecker {
             glob_enums: Vec::new(),
             method_own_generics: HashMap::new(),
             closure_expected: None,
+            closure_expected_ret: None,
             closure_caps: HashMap::new(),
         }
     }
@@ -1799,6 +1802,7 @@ impl TypeChecker {
         let _ = (span, &body, &param_names);
 
         let expected = self.closure_expected.take();
+        let expected_ret = self.closure_expected_ret.take();
         let mut param_tys = Vec::with_capacity(params.len());
         self.env.push(HashMap::new());
         for (i, p) in params.iter().enumerate() {
@@ -1831,9 +1835,15 @@ impl TypeChecker {
         let saved_ret = std::mem::replace(&mut self.ret, closure_ret);
         let body_ty = self.infer_expr(body);
         self.ret = saved_ret;
-        let ret_ty: Ty = match ret {
-            Some(r) => self.type_to_ty(r),
-            None => body_ty.clone(),
+        // Without an annotation, the result is the body's type, or the expected result type
+        // (`impl Fn(A) -> R` fixes `R`, so an unsuffixed literal body takes it).
+        let ret_ty: Ty = match (ret, expected_ret) {
+            (Some(r), _) => self.type_to_ty(r),
+            (None, Some(er)) if !matches!(er, Ty::Unknown) => {
+                self.expect(&body_ty, &er, body.span);
+                er
+            }
+            (None, _) => body_ty.clone(),
         };
         self.env.pop();
         Ty::Fn(param_tys, Box::new(ret_ty))
@@ -3089,13 +3099,15 @@ impl TypeChecker {
                     _ => a,
                 };
                 if let ExprKind::Closure { .. } = closure_arg.kind {
-                    if let Ty::Fn(ps, _) = self.strip_refs(pt) {
+                    if let Ty::Fn(ps, r) = self.strip_refs(pt) {
                         self.closure_expected = Some(ps);
+                        self.closure_expected_ret = Some(*r);
                     }
                 }
                 let at = self.infer_expr(a);
                 self.expected_call_ty = None;
                 self.closure_expected = None;
+                self.closure_expected_ret = None;
                 self.expect(&at, pt, a.span);
             }
             sig.ret.clone()
