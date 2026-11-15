@@ -1109,9 +1109,72 @@ impl Parser {
 
     fn parse_block(&mut self) -> ParseResult<Block> {
         self.expect(TokenKind::LBrace)?;
+        let block = self.parse_block_items()?;
+        self.expect(TokenKind::RBrace)?;
+        Ok(block)
+    }
+
+    /// Parse the statements of a block up to (not including) its closing `}`.
+    ///
+    /// A `let P = E else { B };` takes the rest of the block as its success arm: it is
+    /// desugared to `let tmp = E; match tmp { P => { rest }, _ => { B } }`, so the value of
+    /// the block is the value of the rest of the block, or of the diverging `B`.
+    fn parse_block_items(&mut self) -> ParseResult<Block> {
         let mut stmts = Vec::new();
         let mut tail = None;
         while !self.check(&TokenKind::RBrace) && !self.at_eof() {
+            if self.check(&TokenKind::Let) {
+                let start = self.peek().span.start;
+                let (local, els) = self.parse_local_else(true)?;
+                let Some(els) = els else {
+                    stmts.push(Stmt {
+                        kind: StmtKind::Local(local),
+                    });
+                    continue;
+                };
+                let init = local.init.clone().ok_or_else(|| {
+                    Diag::error("`let ... else` needs an initializer".to_string(), Some(Span::new(start, start)))
+                })?;
+                let scrut_name = format!("__let_else_{start}");
+                let scrut_span = Span::new(start, start);
+                stmts.push(Stmt {
+                    kind: StmtKind::Local(Local {
+                        pat: Pat::Ident(Spanned::new(scrut_name.clone(), scrut_span)),
+                        ty: local.ty.clone(),
+                        init: Some(init),
+                        mutable: false,
+                    }),
+                });
+                let rest = self.parse_block_items()?;
+                let rest_span = Span::new(start, self.peek().span.start);
+                let scrut = Expr {
+                    kind: ExprKind::Path(Path {
+                        segments: vec![Spanned::new(scrut_name, scrut_span)],
+                    }),
+                    span: scrut_span,
+                };
+                let arms = vec![
+                    (
+                        local.pat.clone(),
+                        Expr {
+                            kind: ExprKind::Block(rest),
+                            span: rest_span,
+                        },
+                    ),
+                    (
+                        Pat::Wild,
+                        Expr {
+                            kind: ExprKind::Block(els),
+                            span: rest_span,
+                        },
+                    ),
+                ];
+                tail = Some(Box::new(Expr {
+                    kind: ExprKind::Match(Box::new(scrut), arms),
+                    span: rest_span,
+                }));
+                break;
+            }
             let s = self.parse_stmt()?;
             // A trailing, semicolon-less expression statement becomes the block's
             // value (tail expression), matching Rust semantics.
@@ -1123,7 +1186,6 @@ impl Parser {
             }
             stmts.push(s);
         }
-        self.expect(TokenKind::RBrace)?;
         Ok(Block { stmts, tail })
     }
 
@@ -1379,6 +1441,11 @@ impl Parser {
     }
 
     fn parse_local(&mut self, allow_struct_init: bool) -> ParseResult<Local> {
+        Ok(self.parse_local_else(allow_struct_init)?.0)
+    }
+
+    /// Parse a `let` statement, returning its `else` block when it has one.
+    fn parse_local_else(&mut self, allow_struct_init: bool) -> ParseResult<(Local, Option<Block>)> {
         self.expect(TokenKind::Let)?;
         let mutable = self.eat(&TokenKind::Mut);
         let pat = self.parse_pat()?;
@@ -1387,6 +1454,7 @@ impl Parser {
         } else {
             None
         };
+        let mut else_block = None;
         let init = if self.eat(&TokenKind::Eq) {
             // In expression position (`if let`/`while let`) the RHS must not
             // swallow the following block as a struct literal, so struct literals
@@ -1396,24 +1464,26 @@ impl Parser {
             } else {
                 self.parse_expr_bp(0, false)?
             };
-            // `let P = E else { .. }` — the else branch diverges (returns /
-            // breaks / panics). The Phase-1 subset does not model the diverging
-            // control flow, so the block is parsed and dropped to keep `let`-else
-            // code parseable.
-            if self.eat(&TokenKind::Else) {
-                self.parse_block()?;
+            // `let P = E else { .. }`: the caller decides how to lower the else block.
+            // Expression-position lets (`if let`) drop it, as before.
+            if self.check(&TokenKind::Else) {
+                self.bump();
+                else_block = Some(self.parse_block()?);
             }
             Some(e)
         } else {
             None
         };
         self.eat(&TokenKind::Semicolon);
-        Ok(Local {
-            pat,
-            ty,
-            init,
-            mutable,
-        })
+        Ok((
+            Local {
+                pat,
+                ty,
+                init,
+                mutable,
+            },
+            else_block,
+        ))
     }
 
     fn parse_pat_single(&mut self) -> ParseResult<Pat> {
