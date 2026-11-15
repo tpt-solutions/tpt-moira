@@ -1700,3 +1700,35 @@ fn read_only_vec_methods_on_a_field_receiver_run() {
     };
     assert_eq!(out, "103");
 }
+
+#[test]
+fn iterator_next_on_a_map_lookup_runs() {
+    let out = match run_src(
+        "use std::collections::HashMap;
+        fn target(m: &HashMap<i64, Vec<i64>>, k: i64) -> i64 {
+            let owners = match m.get(&k) {
+                Some(o) => o,
+                None => return 0,
+            };
+            match owners.iter().next() {
+                Some(x) => *x,
+                None => 0,
+            }
+        }
+        fn main() {
+            let mut m: HashMap<i64, Vec<i64>> = HashMap::new();
+            let mut v: Vec<i64> = Vec::new();
+            v.push(7);
+            v.push(8);
+            m.insert(1, v);
+            print_i64(target(&m, 1));
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping iterator next run");
+            return;
+        }
+    };
+    assert_eq!(out, "7");
+}

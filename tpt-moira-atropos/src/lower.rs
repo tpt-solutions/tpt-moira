@@ -677,7 +677,7 @@ struct ZipSeq {
 fn is_iter_terminal(name: &str) -> bool {
     matches!(
         name,
-        "collect" | "any" | "all" | "find" | "count" | "sum" | "for_each" | "max" | "min" | "last"
+        "collect" | "any" | "all" | "find" | "count" | "sum" | "for_each" | "max" | "min" | "last" | "next"
     )
 }
 
@@ -3379,7 +3379,7 @@ impl Lower {
                 self.emit(r.clone(), mir::Rvalue::Use(mir::Operand::Const(init)));
                 res = Some(r);
             }
-            "find" => {
+            "find" | "next" => {
                 let r = self.fresh_temp(format!("Option<{elem}>"));
                 self.emit(
                     r.clone(),
@@ -3754,6 +3754,21 @@ impl Lower {
                     ),
                 );
                 self.set_term(mir::Terminator::Goto(step));
+            }
+            // `next()`: the first item, as `Some`, leaves the loop at once.
+            "next" => {
+                let r = res.clone().expect("next has a result");
+                self.emit(
+                    r,
+                    mir::Rvalue::StructLit(
+                        "Option".to_string(),
+                        vec![
+                            ("tag".to_string(), mir::Operand::Const(0)),
+                            ("f0".to_string(), mir::Operand::var(item.clone())),
+                        ],
+                    ),
+                );
+                self.set_term(mir::Terminator::Goto(exit));
             }
             "for_each" => {
                 let (f, caps) = term_callee.clone().expect("for_each has a closure");
