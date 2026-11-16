@@ -1187,6 +1187,34 @@ fn recursive_helper_passing_two_closures_on_runs() {
     assert_eq!(out, "6\n3", "each closure should run on every node");
 }
 
+/// A path is its text: `parent()` is the text before the last separator (`None` for a root),
+/// `to_string_lossy()` is the text, and `exists()` / `is_file()` ask the file system.
+#[test]
+fn path_text_methods_run() {
+    let out = match run_src(
+        "fn main() {
+            let p = String::from(\"dir/sub/file.txt\");
+            match p.parent() {
+                Some(d) => println!(\"{}\", d),
+                None => println!(\"none\"),
+            }
+            let q = String::from(\".\");
+            print_bool(q.exists());
+            let r = String::from(\"definitely_missing_xyz\");
+            print_bool(r.is_file());
+            let s = String::from(\"a/b\");
+            println!(\"{}\", s.to_string_lossy());
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping path run");
+            return;
+        }
+    };
+    assert_eq!(out, "dir/sub\ntrue\nfalse\na/b", "path methods should match Rust");
+}
+
 #[test]
 fn enum_match_and_if_let_run() {
     // Enum-variant construction (`Some(7)` / `None`), `match` with

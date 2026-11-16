@@ -710,6 +710,13 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
             the checker types it so; test `option_as_ref_over_string_and_integer_runs`.)
             `Arc<TypeHints>` fields in the compiler's own lowering (cross-crate smart pointer),
             and `Hasher::finish`.
+          - Status (2026-11-16, path text methods): a path is its text here, so `exists()`,
+            `is_file()` (C `fopen`/`opendir`), `parent()` (the text before the last separator,
+            `None` for a root) and `to_string_lossy()` lower on a string. Test:
+            `path_text_methods_run`. The C backend now reserves the POSIX names a header would
+            declare (`open`, `read`, `write`, `stat`, ...), so a user function of that name is
+            renamed consistently and no longer collides with `io.h`. Self-host blockers 140 -> 132;
+            still `1/5`.
           - Status (2026-11-16, pass-on): a generic or `impl FnMut` helper that takes several
             capturing closures and passes them on to itself (`visit_expr`) is specialised for all
             of them at once. The copy takes the union of their captures as leading parameters
