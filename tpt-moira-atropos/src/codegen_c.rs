@@ -117,6 +117,10 @@ long long moira_line_next(char* s, long long i) { char* q = strchr(s + i, '\n');
 long long moira_parse_s(char* s, long long d, int has_default, int bits) { char* e; errno = 0; if (*s == 0 || isspace((unsigned char)*s)) goto bad; long long v = strtoll(s, &e, 10); long long lim = bits < 64 ? (1LL << (bits - 1)) : 0; if (*e == 0 && errno == 0 && (bits == 64 || (v >= -lim && v < lim))) return v; bad: if (has_default) return d; __moira_panic(); return 0; }
 unsigned long long moira_parse_u(char* s, unsigned long long d, int has_default, int bits) { char* e; errno = 0; if (*s == 0 || isspace((unsigned char)*s) || *s == '-') goto bad; unsigned long long v = strtoull(s, &e, 10); unsigned long long mx = bits < 64 ? ((1ULL << bits) - 1) : 0ULL; if (*e == 0 && errno == 0 && (bits == 64 || v <= mx)) return v; bad: if (has_default) return d; __moira_panic(); return 0; }
 double moira_parse_f(char* s, double d, int has_default) { char* e; errno = 0; if (*s == 0 || isspace((unsigned char)*s)) goto bad; double v = strtod(s, &e); if (*e == 0 && errno == 0) return v; bad: if (has_default) return d; __moira_panic(); return 0; }
+#include <dirent.h>
+long long moira_path_exists(char* s) { FILE* f = fopen(s, "r"); if (f) fclose(f); DIR* d = opendir(s); if (d) closedir(d); return f != NULL || d != NULL; }
+long long moira_path_is_file(char* s) { FILE* f = fopen(s, "r"); if (!f) return 0; fclose(f); DIR* d = opendir(s); if (d) { closedir(d); return 0; } return 1; }
+long long moira_path_parent_index(char* s) { long long n = (long long)strlen(s); if (n == 1 && (s[0] == '/' || s[0] == '\\')) return -1; for (long long i = n - 1; i >= 0; i--) if (s[i] == '/' || s[i] == '\\') return i; return 0; }
 long long moira_split_find(char* s, long long from, char* pat) { long long n = (long long)strlen(s), m = (long long)strlen(pat); for (long long i = from; i + m <= n; i++) if (memcmp(s + i, pat, (size_t)m) == 0) return i; return -1; }
 long long moira_split_end(char* s, long long from, char* pat) { long long i = moira_split_find(s, from, pat); return i < 0 ? (long long)strlen(s) : i; }
 long long moira_split_next(char* s, long long from, char* pat) { long long i = moira_split_find(s, from, pat); return i < 0 ? (long long)strlen(s) + 1 : i + (long long)strlen(pat); }
@@ -181,6 +185,9 @@ const C_RESERVED: &[&str] = &[
     "strcpy", "strncmp", "strstr", "strchr", "memcpy", "memset", "memcmp", "isspace", "isalpha",
     "isdigit", "isalnum", "isxdigit", "isupper", "islower", "tolower", "toupper", "sqrt", "pow",
     "rand", "time", "clock", "assert", "remove", "rename", "system", "atoi", "atol", "strtol",
+    // POSIX names that the C headers declare (`dirent.h` and MinGW's `io.h` declare `open`).
+    "open", "close", "read", "write", "access", "stat", "opendir", "readdir", "closedir",
+    "unlink", "mkdir", "getenv", "fopen", "fclose", "fread", "fwrite", "feof", "ferror",
 ];
 
 /// The C spelling of a MIR name: a C reserved word gets a trailing `_`.
