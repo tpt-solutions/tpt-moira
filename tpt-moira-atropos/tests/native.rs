@@ -52,3 +52,4 @@ fn native_arithmetic_branches_loops_and_strings_run() {
     };
     assert_eq!(out, "23\n3\n3\n4\n42\n45\ndone 45\n", "native output should match Rust");
 }
+

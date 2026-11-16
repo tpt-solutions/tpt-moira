@@ -45,6 +45,8 @@ pub enum Op {
     Call(Val, Vec<Val>),
     StructLit(String, Vec<(String, Val)>),
     Field(Val, String),
+    /// `obj.field = value`: a store into a struct's storage; its own value is unit.
+    Store(Val, String, Val),
     Ref(Val),
 }
 
@@ -176,10 +178,10 @@ fn build_function(f: &mir::MirFunction) -> Result<SsaFunction, String> {
                     // Stage-0 C backend. The from-scratch native backend does not
                     // support it (it already rejects struct literals), so we reject
                     // here with a clear message rather than miscompile.
-                    mir::Rvalue::StoreField(..) => return Err(
-                        "the native backend does not support `async fn` state machines (use the \
-                         C backend, `--emit c`)"
-                            .to_string(),
+                    mir::Rvalue::StoreField(obj, fld, v, _deref) => Op::Store(
+                        resolve(obj, &last_def),
+                        fld.clone(),
+                        resolve(v, &last_def),
                     ),
                     // Arrays and indexing are emitted only by the C backend; the
                     // from-scratch native backend does not model array layout.
@@ -378,8 +380,8 @@ pub fn dce(func: &mut SsaFunction) -> bool {
                 seed_live.insert(i);
             }
         }
-        // Calls have side effects: always keep.
-        if matches!(func.values[i].op, Op::Call(..)) {
+        // Calls and stores have side effects: always keep.
+        if matches!(func.values[i].op, Op::Call(..) | Op::Store(..)) {
             seed_live.insert(i);
         }
     }
@@ -475,6 +477,13 @@ fn collect_names(op: &Op, out: &mut HashSet<String>) {
                 }
             }
         }
+        Op::Store(o, _, v) => {
+            for x in [o, v] {
+                if let Val::Name(n) = x {
+                    out.insert(n.clone());
+                }
+            }
+        }
         Op::Const(_) => {}
     }
 }
@@ -489,6 +498,7 @@ fn operands_of(op: &Op) -> Vec<Val> {
             v
         }
         Op::StructLit(_, fields) => fields.iter().map(|(_, v)| v.clone()).collect(),
+        Op::Store(o, _, v) => vec![o.clone(), v.clone()],
         Op::Const(_) => vec![],
     }
 }
@@ -512,6 +522,10 @@ fn rewrite_operands(op: &mut Op, remap: &HashMap<usize, usize>) {
             args.iter_mut().for_each(fix)
         }
         Op::StructLit(_, fields) => fields.iter_mut().for_each(|(_, v)| fix(v)),
+        Op::Store(o, _, v) => {
+            fix(o);
+            fix(v);
+        }
         Op::Const(_) => {}
     }
 }
@@ -570,6 +584,9 @@ impl std::fmt::Display for SsaProgram {
                             writeln!(f, "struct {} {{ {} }}", name, flds.join(", "))?
                         }
                         Op::Field(o, fld) => writeln!(f, "{}.{}", show_val(o), fld)?,
+                        Op::Store(o, fld, v) => {
+                            writeln!(f, "{}.{} = {}", show_val(o), fld, show_val(v))?
+                        }
                         Op::Ref(o) => writeln!(f, "&{}", show_val(o))?,
                     }
                 }

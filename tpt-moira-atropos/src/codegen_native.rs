@@ -25,7 +25,15 @@ const REGS: [&str; 6] = ["rdi", "rsi", "rdx", "rcx", "r8", "r9"];
 /// Slot allocation for one function.
 struct Slots {
     named: HashMap<String, usize>,
+    /// The slot that holds the caller's destination block, for a function that returns a struct.
+    dest: Option<usize>,
     value: Vec<usize>,
+    /// For a value that holds a struct (a literal, or a copy of one): the first slot of its block
+    /// and the number of fields. A struct value is a pointer to its block.
+    blocks: HashMap<usize, (usize, usize)>,
+    /// A struct parameter's own block (name, first slot, fields): the callee copies the argument
+    /// into it on entry, so that its changes do not reach the caller's struct.
+    param_blocks: Vec<(String, usize, usize)>,
     total: usize,
 }
 
@@ -33,7 +41,11 @@ struct Slots {
 /// p..p+l, cross-block temporaries the next slots, and SSA values get fresh
 /// slots (unless their name already maps to a slot, e.g. a cross-block temp or a
 /// reassigned local).
-fn compute_slots(func: &SsaFunction) -> Slots {
+fn compute_slots(
+    func: &SsaFunction,
+    structs: &HashMap<String, Vec<String>>,
+    value_ty: &[String],
+) -> Slots {
     let mut named: HashMap<String, usize> = HashMap::new();
     // `lower` records parameters in `locals` as well as `params`, so assigning
     // slots from `locals` (in order) covers both without double-counting.
@@ -107,10 +119,57 @@ fn compute_slots(func: &SsaFunction) -> Slots {
         value.push(named_base + counter);
         counter += 1;
     }
-    let total = named_base + counter;
+    // Struct blocks: a struct value owns one slot per field, contiguous in the frame.
+    let mut blocks: HashMap<usize, (usize, usize)> = HashMap::new();
+    let mut extra = named_base + counter;
+    // A struct-returning function receives its destination block as an extra leading argument,
+    // kept in its own slot.
+    let dest = match &func.ret {
+        Some(r) if structs.contains_key(r) => {
+            extra += 1;
+            Some(extra - 1)
+        }
+        _ => None,
+    };
+    for (vi, v) in func.values.iter().enumerate() {
+        // A value that is a struct itself (not a pointer to one) owns a block.
+        let own_struct = value_ty
+            .get(vi)
+            .filter(|ty| !ty.ends_with('*') && structs.contains_key(ty.as_str()))
+            .cloned();
+        let name = match &v.op {
+            Op::StructLit(name, _) => Some(name.clone()),
+            Op::Copy(_) | Op::Call(..) => own_struct,
+            _ => None,
+        };
+        if let Some(name) = name {
+            let k = structs.get(&name).map(|f| f.len()).unwrap_or(0);
+            blocks.insert(vi, (extra, k));
+            extra += k;
+        }
+    }
+    let mut param_blocks: Vec<(String, usize, usize)> = Vec::new();
+    for p in &func.params {
+        let ty = func
+            .locals
+            .iter()
+            .find(|(n, _)| n == p)
+            .and_then(|(_, t)| t.clone());
+        if let Some(ty) = ty {
+            if !ty.ends_with('*') && structs.contains_key(&ty) {
+                let k = structs[&ty].len();
+                param_blocks.push((p.clone(), extra, k));
+                extra += k;
+            }
+        }
+    }
+    let total = extra;
     Slots {
         named,
+        dest,
         value,
+        blocks,
+        param_blocks,
         total,
     }
 }
@@ -147,6 +206,13 @@ fn collect_names_in_op(op: &Op, visit: &mut impl FnMut(&str)) {
                 }
             }
         }
+        Op::Store(obj, _, v) => {
+            for x in [obj, v] {
+                if let Val::Name(n) = x {
+                    visit(n);
+                }
+            }
+        }
         Op::Const(_) => {}
     }
 }
@@ -154,6 +220,13 @@ fn collect_names_in_op(op: &Op, visit: &mut impl FnMut(&str)) {
 struct Emitter<'a> {
     slots: &'a Slots,
     label: usize,
+    /// Field names of each struct, in declaration order (a field's index is its offset).
+    structs: &'a HashMap<String, Vec<String>>,
+    /// The functions that return a struct (they take the destination block first).
+    struct_fns: &'a std::collections::HashSet<String>,
+    /// The type of each SSA value, and of each named local.
+    value_ty: &'a [String],
+    local_ty: &'a HashMap<String, String>,
 }
 
 impl<'a> Emitter<'a> {
@@ -184,6 +257,35 @@ impl<'a> Emitter<'a> {
         }
     }
 
+    /// The struct a value holds (its type without a pointer marker), if it is one.
+    fn struct_of(&self, v: &Val) -> Option<String> {
+        let ty = match v {
+            Val::Value(i) => self.value_ty.get(*i)?.clone(),
+            Val::Name(n) => self.local_ty.get(n)?.clone(),
+            _ => return None,
+        };
+        let base = ty.trim_end_matches('*').to_string();
+        if self.structs.contains_key(&base) {
+            Some(base)
+        } else {
+            None
+        }
+    }
+
+    /// The index of `field` in struct `name` (its offset in words).
+    fn field_index(&self, name: &str, field: &str) -> Result<usize, String> {
+        self.structs
+            .get(name)
+            .and_then(|fs| fs.iter().position(|f| f == field))
+            .ok_or_else(|| format!("no field `{field}` in struct `{name}`"))
+    }
+
+    /// The operand of word `i` of the struct block that starts at slot `base` with `k` words. The
+    /// block's lowest address is the first word; word `i` is `i` words above it.
+    fn block_word(base: usize, k: usize, i: usize) -> String {
+        format!("[rbp - {}]", (base + k - i) * 8)
+    }
+
     fn fresh(&mut self) -> usize {
         let l = self.label;
         self.label += 1;
@@ -191,10 +293,59 @@ impl<'a> Emitter<'a> {
     }
 
     /// Emit code computing `op`, leaving the result pushed on the stack.
-    fn emit_op(&mut self, op: &Op) -> Result<String, String> {
+    fn emit_op(&mut self, idx: usize, op: &Op) -> Result<String, String> {
         match op {
             Op::Const(c) => Ok(format!("    mov rax, {}\n    push rax\n", *c as i64)),
-            Op::Copy(v) => Ok(self.gen_val(v)),
+            Op::Copy(v) => {
+                // Copying a struct copies its words into a block of its own.
+                let Some(&(base, k)) = self.slots.blocks.get(&idx) else {
+                    return Ok(self.gen_val(v));
+                };
+                let mut s = self.gen_val(v);
+                s.push_str("    pop rax\n");
+                for i in 0..k {
+                    s.push_str(&format!("    mov rcx, QWORD PTR [rax + {}]\n", i * 8));
+                    s.push_str(&format!("    mov QWORD PTR {}, rcx\n", Emitter::block_word(base, k, i)));
+                }
+                s.push_str(&format!("    lea rax, [rbp - {}]\n    push rax\n", (base + k) * 8));
+                Ok(s)
+            }
+            Op::StructLit(name, fields) => {
+                let Some(&(base, k)) = self.slots.blocks.get(&idx) else {
+                    return Err(format!("struct literal `{name}` has no block"));
+                };
+                let mut s = String::new();
+                for (fname, v) in fields {
+                    let i = self.field_index(name, fname)?;
+                    s.push_str(&self.gen_val(v));
+                    s.push_str("    pop rcx\n");
+                    s.push_str(&format!("    mov QWORD PTR {}, rcx\n", Emitter::block_word(base, k, i)));
+                }
+                s.push_str(&format!("    lea rax, [rbp - {}]\n    push rax\n", (base + k) * 8));
+                Ok(s)
+            }
+            Op::Field(obj, fname) => {
+                let name = self
+                    .struct_of(obj)
+                    .ok_or_else(|| format!("field `{fname}` of a value that is not a struct"))?;
+                let i = self.field_index(&name, fname)?;
+                let mut s = self.gen_val(obj);
+                s.push_str(&format!("    pop rax\n    mov rax, QWORD PTR [rax + {}]\n    push rax\n", i * 8));
+                Ok(s)
+            }
+            Op::Store(obj, fname, v) => {
+                let name = self
+                    .struct_of(obj)
+                    .ok_or_else(|| format!("assignment to `{fname}` of a value that is not a struct"))?;
+                let i = self.field_index(&name, fname)?;
+                let mut s = self.gen_val(obj);
+                s.push_str(&self.gen_val(v));
+                s.push_str(&format!(
+                    "    pop rcx\n    pop rax\n    mov QWORD PTR [rax + {}], rcx\n    xor eax, eax\n    push rax\n",
+                    i * 8
+                ));
+                Ok(s)
+            }
             Op::Binary(b, l, r) => {
                 use crate::mir::MirBinOp::*;
                 let mut s = String::new();
@@ -266,20 +417,29 @@ impl<'a> Emitter<'a> {
                     ))
                     }
                 };
-                if args.len() > 6 {
+                let returns_struct = self.struct_fns.contains(&name);
+                let n = args.len() + usize::from(returns_struct);
+                if n > 6 {
                     return Err(format!(
                         "native backend supports at most 6 arguments, `{}` needs {}",
-                        name,
-                        args.len()
+                        name, n
                     ));
                 }
                 let mut s = String::new();
+                if returns_struct {
+                    let &(base, k) = self
+                        .slots
+                        .blocks
+                        .get(&idx)
+                        .ok_or_else(|| format!("call of `{name}` has no result block"))?;
+                    s.push_str(&format!("    lea rax, [rbp - {}]\n    push rax\n", (base + k) * 8));
+                }
                 for a in args {
                     s.push_str(&self.gen_val(a));
                 }
-                // Pop arguments into registers in reverse parameter order so that
-                // arg0 lands in rdi, arg1 in rsi, etc.
-                for i in (0..args.len()).rev() {
+                // Pop arguments into registers in parameter order so that the first one lands
+                // in rdi, the next in rsi, and so on.
+                for i in (0..n).rev() {
                     s.push_str(&format!("    pop {}\n", REGS[i]));
                 }
                 // Align the stack for the call without depending on how many values are pending
@@ -292,9 +452,11 @@ impl<'a> Emitter<'a> {
                 s.push_str("    push rax\n");
                 Ok(s)
             }
-            Op::StructLit(..) | Op::Field(..) | Op::Ref(..) => Err(
-                "struct literals, field access, and references are handled by the Stage-0 C \
-                 backend, not the from-scratch native backend (restricted subset)"
+            // A reference to a struct is the struct's pointer.
+            Op::Ref(v) if self.struct_of(v).is_some() => Ok(self.gen_val(v)),
+            Op::Ref(..) => Err(
+                "references are handled by the Stage-0 C backend, not the from-scratch native \
+                 backend (restricted subset)"
                     .to_string(),
             ),
         }
@@ -302,35 +464,84 @@ impl<'a> Emitter<'a> {
 }
 
 /// Emit one function's x86-64 assembly (System V, Intel syntax).
-fn emit_function_asm(func: &SsaFunction) -> Result<String, String> {
+fn emit_function_asm(
+    func: &SsaFunction,
+    structs: &HashMap<String, Vec<String>>,
+    struct_fns: &std::collections::HashSet<String>,
+) -> Result<String, String> {
     let mut out = String::new();
-    let slots = compute_slots(func);
+    let local_ty: HashMap<String, String> = func
+        .locals
+        .iter()
+        .filter_map(|(n, t)| t.clone().map(|t| (n.clone(), t)))
+        .collect();
+    // A value's type is its recorded type; a copy of a value or a local that is a struct (or
+    // pointer to one) takes that type when its own recorded type is not one.
+    let mut value_ty: Vec<String> = Vec::with_capacity(func.values.len());
+    for v in &func.values {
+        let from_src = match &v.op {
+            Op::Copy(Val::Name(n)) => local_ty.get(n).cloned(),
+            Op::Copy(Val::Value(j)) => value_ty.get(*j).cloned(),
+            _ => None,
+        };
+        let is_struct = |t: &str| structs.contains_key(t.trim_end_matches('*'));
+        let ty = match from_src {
+            Some(src) if is_struct(&src) && !is_struct(&v.ty) => src,
+            _ => v.ty.clone(),
+        };
+        value_ty.push(ty);
+    }
+    let slots = compute_slots(func, structs, &value_ty);
     let mut em = Emitter {
         slots: &slots,
         label: 0,
+        structs,
+        struct_fns,
+        value_ty: &value_ty,
+        local_ty: &local_ty,
     };
     out.push_str(&format!("\n{}:\n", fn_label(&func.name)));
     out.push_str("    push rbp\n    mov rbp, rsp\n");
     out.push_str(&format!("    sub rsp, {}\n", slots.total * 8));
 
-    // Spill incoming parameters into their slots.
+    // Spill incoming parameters into their slots. A struct-returning function's first register
+    // is its destination block.
+    let shift = usize::from(slots.dest.is_some());
+    if let Some(d) = slots.dest {
+        out.push_str(&format!("    mov {}, rdi\n", em.off(d)));
+    }
     for (i, param) in func.params.iter().enumerate() {
-        if i >= REGS.len() {
+        if i + shift >= REGS.len() {
             break;
         }
         let slot = slots.named[param];
         out.push_str(&format!(
             "    mov {off}, {reg}\n",
             off = em.off(slot),
-            reg = REGS[i]
+            reg = REGS[i + shift]
         ));
     }
 
+    // A struct parameter is copied into the callee's own block; the parameter then points there.
+    for (p, base, k) in &slots.param_blocks {
+        let off = em.off(slots.named[p]);
+        out.push_str(&format!("    mov rax, QWORD PTR {off}
+"));
+        for i in 0..*k {
+            out.push_str(&format!("    mov rcx, QWORD PTR [rax + {}]
+", i * 8));
+            out.push_str(&format!("    mov QWORD PTR {}, rcx
+", Emitter::block_word(*base, *k, i)));
+        }
+        out.push_str(&format!("    lea rax, [rbp - {}]
+    mov QWORD PTR {off}, rax
+", (base + k) * 8));
+    }
     for (bi, block) in func.blocks.iter().enumerate() {
         out.push_str(&format!("{}_b{}:\n", func.name, bi));
         for &idx in &block.stmts {
             let v = &func.values[idx];
-            let asm = em.emit_op(&v.op)?;
+            let asm = em.emit_op(idx, &v.op)?;
             out.push_str(&asm);
             let slot = em.slots.value[idx];
             out.push_str(&format!("    pop {}\n", em.off(slot)));
@@ -345,6 +556,16 @@ fn emit_function_asm(func: &SsaFunction) -> Result<String, String> {
             SsaTerm::Return(Some(v)) => {
                 out.push_str(&em.gen_val(v));
                 out.push_str("    pop rax\n");
+                if let (Some(d), Some(r)) = (slots.dest, &func.ret) {
+                    // Copy the struct's words into the caller's block; return that pointer.
+                    let k = structs.get(r).map(|f| f.len()).unwrap_or(0);
+                    out.push_str(&format!("    mov rdx, QWORD PTR {}\n", em.off(d)));
+                    for i in 0..k {
+                        out.push_str(&format!("    mov rcx, QWORD PTR [rax + {}]\n", i * 8));
+                        out.push_str(&format!("    mov QWORD PTR [rdx + {}], rcx\n", i * 8));
+                    }
+                    out.push_str("    mov rax, rdx\n");
+                }
                 out.push_str("    mov rsp, rbp\n    pop rbp\n    ret\n");
             }
             SsaTerm::Return(None) => {
@@ -399,6 +620,10 @@ fn collect_strings(f: &SsaFunction, out: &mut std::collections::BTreeSet<String>
     for value in &f.values {
         match &value.op {
             Op::Const(_) => {}
+            Op::Store(o, _, v) => {
+                val(o, out);
+                val(v, out);
+            }
             Op::Copy(v) | Op::Unary(_, v) | Op::Field(v, _) | Op::Ref(v) => val(v, out),
             Op::Binary(_, l, r) => {
                 val(l, out);
@@ -427,11 +652,24 @@ fn collect_strings(f: &SsaFunction, out: &mut std::collections::BTreeSet<String>
 }
 
 pub fn emit_asm(prog: &SsaProgram) -> Result<String, String> {
+    let structs: HashMap<String, Vec<String>> = prog
+        .structs
+        .iter()
+        .map(|s| (s.name.clone(), s.fields.iter().map(|(n, _)| n.clone()).collect()))
+        .collect();
+    let structs = &structs;
+    let struct_fns: std::collections::HashSet<String> = prog
+        .functions
+        .iter()
+        .filter(|f| f.ret.as_ref().is_some_and(|r| structs.contains_key(r)))
+        .map(|f| f.name.clone())
+        .collect();
+    let struct_fns = &struct_fns;
     let bodies: Vec<Result<String, String>> = std::thread::scope(|s| {
         let handles: Vec<_> = prog
             .functions
             .iter()
-            .map(|f| s.spawn(|| emit_function_asm(f)))
+            .map(|f| s.spawn(move || emit_function_asm(f, structs, struct_fns)))
             .collect();
         handles.into_iter().map(|h| h.join().unwrap()).collect()
     });

@@ -106,7 +106,15 @@ Target: compile a strict subset of Rust (no complex trait resolution, no async/a
       1.66x, 1.65x and 2.82x (geomean 1.97x). Caveats: the programs use the integer subset only;
       only compile time is measured, not the run time of the generated code; and the native
       backend still has no floats, tuples, structs or closures (those programs are rejected).
-      Next: widen the subset (structs and `Vec` in particular), and time run-time performance.
+      **Structs (2026-11-17).** The native backend now builds struct literals, field reads and
+      writes, struct copies (`let b = a` copies the words), struct parameters (copied into the
+      callee on entry, so mutation does not reach the caller), `&`/`&mut` of a struct (the same
+      pointer), methods on structs, and struct return (the caller passes a destination block).
+      Found on the way: dead-code elimination dropped stores, which now count as effects.
+      Tests: `tpt-moira-atropos/tests/native.rs` and `tpt-moira-lachesis/tests/native_structs.rs`.
+      **Still missing:** `Vec` (it needs heap storage and helper routines in assembly), tuples,
+      arrays, floats and enums. Run-time performance of the generated code is not measured.
+      Next: `Vec`, then time run-time performance against `rustc -O`.
     - **End-to-end build speed (2026-11-17).** Cause of the 0.42x: every generated C file
       carried the whole runtime, and its non-`static` helpers were compiled at full `gcc -O2`
       even when unused (about 220 ms of the 346 ms on `xlarge`). `mark_runtime_static`
