@@ -1,0 +1,37 @@
+# cargo-deny configuration for TPT Moira.
+# Run with: cargo deny check
+#
+# Licensing policy: Apache-2.0 is deliberately NOT in the allow list on its own.
+# A dependency licensed "Apache-2.0 OR MIT" passes through its MIT option, while a
+# dependency licensed only "Apache-2.0" is rejected.
+
+[graph]
+all-features = true
+
+[licenses]
+version = 2
+confidence-threshold = 0.93
+allow = [
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+]
+# Our own workspace crates are dual-licensed "MIT OR Apache-2.0"; the MIT option satisfies the policy.
+
+[advisories]
+version = 2
+ignore = []
+
+[bans]
+multiple-versions = "warn"
+# Workspace crates depend on each other by path without a version, which cargo-deny
+# reports as wildcards. Allowed here; external deps still need a real version requirement.
+wildcards = "allow"
+highlight = "all"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
