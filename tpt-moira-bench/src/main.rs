@@ -206,6 +206,8 @@ const BENCHMARKS: &[(&str, &str)] = &[
 enum MoiraMode {
     Ssa,
     Check,
+    /// Source to binary: `moira --emit c`, then the C compiler (`cc -O2`), timed together.
+    E2e,
 }
 
 impl MoiraMode {
@@ -213,12 +215,14 @@ impl MoiraMode {
         match self {
             MoiraMode::Ssa => "ssa",
             MoiraMode::Check => "check",
+            MoiraMode::E2e => "e2e",
         }
     }
     fn label(&self) -> &'static str {
         match self {
             MoiraMode::Ssa => "front-end + SSA mid-end",
             MoiraMode::Check => "front-end + type-check + borrow-check + cache",
+            MoiraMode::E2e => "end to end: moira --emit c + cc -O2",
         }
     }
 }
@@ -290,6 +294,7 @@ fn main() {
             "--record" => record = true,
             "--dashboard" => dashboard = true,
             "--full" => moira_mode = MoiraMode::Check,
+            "--e2e" => moira_mode = MoiraMode::E2e,
             "--corpus" => match args.get(i + 1) {
                 Some(d) => {
                     corpus = Some(PathBuf::from(d));
@@ -412,6 +417,10 @@ fn run_benchmark(
     let moira = find_moira();
     let rustc = find_rustc();
     let cc = cc_mode.binary().and_then(find_cc);
+    if moira_mode == MoiraMode::E2e && cc.is_none() {
+        eprintln!("error: --e2e needs a C compiler; pass `--cc gcc` (or `--cc clang`)");
+        std::process::exit(2);
+    }
 
     let cc_label = cc_mode.label();
 
@@ -467,6 +476,10 @@ fn run_benchmark(
         rustc_mode.label(),
         cc_label
     );
+    if moira_mode == MoiraMode::E2e {
+        println!("  note: `--e2e` times `moira --emit c` and `cc -O2` together against rustc's full");
+        println!("        build. Record it in its own results directory (`--results`), not the default.");
+    }
     if moira_mode == MoiraMode::Check {
         println!("  note: `--full` measures Moira's complete semantic pipeline; the rustc");
         println!(
@@ -504,7 +517,12 @@ fn run_benchmark(
             Source::File(p) => (p.clone(), false),
         };
 
-        let m_args = moira_args(&file, moira_mode);
+        // End to end the Moira step is an emit followed by the C compiler; see `time_steps`.
+        let m_args = if moira_mode == MoiraMode::E2e {
+            Vec::new()
+        } else {
+            moira_args(&file, moira_mode)
+        };
         let r_args = rustc_args(&file, rustc_mode);
         // For the C-compiler baseline we need Moira to emit C first.
         let (c_src_file, cc_args) = cc
@@ -512,7 +530,39 @@ fn run_benchmark(
             .map(|bin| cc_pipeline(bin, &file))
             .unwrap_or((PathBuf::new(), Vec::new()));
 
-        let moira_ms = moira.as_ref().and_then(|bin| time_cmd(bin, &m_args, ITERS));
+        let moira_ms = if moira_mode == MoiraMode::E2e {
+            match (moira.as_ref(), cc.as_ref()) {
+                (Some(m), Some(c)) => {
+                    let c_src = temp_path("e2e.c");
+                    let out = temp_path("e2e_out");
+                    let steps = vec![
+                        (
+                            m.clone(),
+                            vec![
+                                "--emit".to_string(),
+                                "c".to_string(),
+                                "-o".to_string(),
+                                c_src.to_string_lossy().into_owned(),
+                                file.to_string_lossy().into_owned(),
+                            ],
+                        ),
+                        (
+                            c.clone(),
+                            vec![
+                                "-O2".to_string(),
+                                c_src.to_string_lossy().into_owned(),
+                                "-o".to_string(),
+                                out.to_string_lossy().into_owned(),
+                            ],
+                        ),
+                    ];
+                    time_steps(&steps, ITERS)
+                }
+                _ => None,
+            }
+        } else {
+            moira.as_ref().and_then(|bin| time_cmd(bin, &m_args, ITERS))
+        };
         let rustc_ms = rustc.as_ref().and_then(|bin| time_cmd(bin, &r_args, ITERS));
         let cc_ms = if cc_args.is_empty() {
             None
@@ -651,7 +701,8 @@ fn run_benchmark(
             let _ = std::fs::remove_file(a);
         }
     }
-    if let Some(floor) = floor_ms {
+    // The floor was measured for the front end alone; it does not bound the end-to-end time.
+    if let Some(floor) = floor_ms.filter(|_| moira_mode != MoiraMode::E2e) {
         let ceilings: Vec<f64> = entries
             .iter()
             .filter_map(|e| e.rustc_ms.map(|r| r / floor))
@@ -943,7 +994,6 @@ fn rustc_args(file: &Path, mode: RustcMode) -> Vec<String> {
 fn cc_pipeline(cc_binary: &Path, rust_file: &Path) -> (PathBuf, Vec<String>) {
     let c_src = temp_path("c");
     let emit = vec![
-        "moira".to_string(),
         "--emit".to_string(),
         "c".to_string(),
         "-o".to_string(),
@@ -958,8 +1008,8 @@ fn cc_pipeline(cc_binary: &Path, rust_file: &Path) -> (PathBuf, Vec<String>) {
         .status();
 
     let out = temp_path("cc_out");
+    // The compiler itself is the program timed (`time_cmd`); these are its arguments only.
     let cc_args = vec![
-        cc_binary.to_string_lossy().into_owned(),
         "-O2".to_string(),
         c_src.to_string_lossy().into_owned(),
         "-o".to_string(),
@@ -999,6 +1049,41 @@ fn time_cmd(program: &Path, args: &[String], iters: usize) -> Option<f64> {
     samples.sort();
     let med = samples[samples.len() / 2];
     Some(med.as_secs_f64() * 1000.0)
+}
+
+/// Time a sequence of commands run one after another (for example an emit and then a C compile):
+/// the median over `iters` runs of the whole sequence, in milliseconds. `None` if any step fails.
+fn time_steps(steps: &[(PathBuf, Vec<String>)], iters: usize) -> Option<f64> {
+    use std::process::Stdio;
+    let run_all = || -> bool {
+        steps.iter().all(|(program, args)| {
+            Command::new(program)
+                .args(args)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        })
+    };
+    for _ in 0..WARMUP {
+        if !run_all() {
+            return None;
+        }
+    }
+    let mut samples: Vec<Duration> = Vec::with_capacity(iters);
+    for _ in 0..iters {
+        let start = Instant::now();
+        if !run_all() {
+            return None;
+        }
+        samples.push(start.elapsed());
+    }
+    if samples.is_empty() {
+        return None;
+    }
+    samples.sort();
+    Some(samples[samples.len() / 2].as_secs_f64() * 1000.0)
 }
 
 fn write_temp(ext: &str, content: &str) -> PathBuf {

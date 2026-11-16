@@ -57,10 +57,18 @@ Target: compile a strict subset of Rust (no complex trait resolution, no async/a
       own emit is about 16 ms of about 390 ms on `xlarge`; the rest is `gcc -O2`, of which about
       117 ms is fixed process cost (an empty C file). Front end only: `moira --emit check` is about
       10 ms against `rustc --emit=metadata`, the fair comparison, which gives the ~7x above.
-      Decision (2026-11-17): the headline is the front-end comparison (about 7x against
-      `rustc --emit=metadata`, bounded by process startup). The 10x target is **not met**
-      end to end. Source-to-binary speed is tracked separately under "End-to-end build speed"
-      below.
+      **Correction (2026-11-17, scaling corpus):** the ~7x front-end headline holds only for the
+      tiny battery programs, which are dominated by process startup. On generated programs of
+      50, 200 and 800 functions (median of 10): Moira `--emit check` takes 57, 201 and 817 ms;
+      `rustc --emit=metadata` takes 66, 98 and 236 ms. The ratio (rustc / Moira) is 1.16x,
+      0.49x and 0.29x. Moira's front end costs about 1 ms per function against about 0.3 ms for
+      rustc. The 7x headline is therefore **withdrawn** until the front end is faster at scale.
+      End to end (`--e2e`, same programs, median of 30): Moira `--emit c` plus `gcc -O2` takes
+      0.33x, 0.16x and 0.18x of `rustc -O` (geomean 0.21x). At 800 functions: Moira emit
+      about 1.3 s, `gcc -O0` 1.0 s, `gcc -O1` 2.3 s, `gcc -O2` 5.5 s, `rustc -O` 1.2 s.
+      The 10x target is **not met** on either measure.
+      Next: profile Moira's front end and emit on the 800-function program; the emitted C is
+      goto-based with one temporary per operation, which `gcc -O2` compiles slowly.
     - **End-to-end build speed (2026-11-17).** Cause of the 0.42x: every generated C file
       carried the whole runtime, and its non-`static` helpers were compiled at full `gcc -O2`
       even when unused (about 220 ms of the 346 ms on `xlarge`). `mark_runtime_static`
