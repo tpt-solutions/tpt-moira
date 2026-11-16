@@ -33,6 +33,8 @@ type ScrutineeLowering = (Option<mir::Operand>, Vec<(String, mir::Operand)>);
 
 /// Renamed-type map plus the `(field, rename)` pairs it produced.
 type FieldRenames = (HashMap<String, String>, Vec<(String, Option<String>)>);
+/// The methods of every `impl` block: `(type, method) -> (C function name, kind, C type)`.
+type MethodTable = HashMap<(String, String), (String, u8, String)>;
 
 /// Lower a whole program. `use` declarations are ignored; unsupported items
 /// (enum, const, static, nested items) produce an error.
@@ -319,7 +321,7 @@ fn lower_program_impl(
         .collect();
     // The methods of every `impl` block (this crate's and the extra crates'): a method
     // `m` of type `T` lowers to the function `T__m`.
-    let mut methods: HashMap<(String, String), (String, u8, String)> = HashMap::new();
+    let mut methods: MethodTable = HashMap::new();
     add_impl_methods(&prog.items, &aliases, &mut methods);
     for p in extra {
         add_impl_methods(&p.items, &aliases, &mut methods);
@@ -1096,11 +1098,7 @@ fn add_fn_params(
 }
 
 /// Record the methods of the `impl` blocks in `items` (see `Lower::methods`).
-fn add_impl_methods(
-    items: &[ast::Item],
-    aliases: &AliasTable,
-    methods: &mut HashMap<(String, String), (String, u8, String)>,
-) {
+fn add_impl_methods(items: &[ast::Item], aliases: &AliasTable, methods: &mut MethodTable) {
     for it in items {
         if let ItemKind::Impl(imp) = &it.kind {
             if let Some(ty) = impl_type_name(&imp.for_ty) {
@@ -1526,7 +1524,7 @@ struct Lower {
     fn_param_tys: std::sync::Arc<HashMap<String, Vec<String>>>,
     /// The methods of every `impl` block: `(type, method) -> (C function name, kind)`,
     /// kind 0 for an associated function, 1 for a `&self` method, 2 for `self`.
-    methods: std::sync::Arc<HashMap<(String, String), (String, u8, String)>>,
+    methods: std::sync::Arc<MethodTable>,
     /// The type of the `impl` block being lowered (what `Self` names), if any.
     self_ty: Option<String>,
     /// The names of the structs in the program and its extra crates.
@@ -3489,7 +3487,7 @@ impl Lower {
                 {
                     stages.reverse();
                     let other: &'a Expr = match &args[0].kind {
-                        ExprKind::Ref(inner, _) => &**inner,
+                        ExprKind::Ref(inner, _) => inner,
                         _ => &args[0],
                     };
                     return Some(IterChain {
