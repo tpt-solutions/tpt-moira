@@ -8571,6 +8571,10 @@ impl Lower {
             "as_str",
             "as_bytes",
             "split_at",
+            "exists",
+            "is_file",
+            "to_string_lossy",
+            "parent",
             "split_once",
             "push_str",
             "push",
@@ -8588,6 +8592,48 @@ impl Lower {
         // `s.as_str()` is the string itself.
         if method == "as_str" && args.is_empty() {
             return Ok(Some(self.lower_expr(recv)?));
+        }
+        // `p.exists()` / `p.is_file()`: the file system's answer for the path.
+        if matches!(method, "exists" | "is_file") && args.is_empty() {
+            let s = self.lower_expr(recv)?;
+            let t = self.fresh_temp("long long");
+            let helper = if method == "exists" { "moira_path_exists" } else { "moira_path_is_file" };
+            self.emit(t.clone(), mir::Rvalue::Call(mir::Operand::Func(helper.into()), vec![s]));
+            let b = self.fresh_temp("bool");
+            self.emit(b.clone(), mir::Rvalue::Binary(mir::MirBinOp::Ne, mir::Operand::var(t), mir::Operand::Const(0)));
+            return Ok(Some(mir::Operand::var(b)));
+        }
+        // `p.to_string_lossy()`: the text itself (a path is a string).
+        if method == "to_string_lossy" && args.is_empty() {
+            return self.lower_expr(recv).map(Some);
+        }
+        // `p.parent()`: the text before the last separator, `None` for a root.
+        if method == "parent" && args.is_empty() {
+            let Some(s) = (match self.lower_expr(recv)? {
+                mir::Operand::Var(n) => Some(n),
+                _ => None,
+            }) else {
+                return Err(LowerError("`parent` needs a named path".into()));
+            };
+            let at = self.fresh_temp("long long");
+            self.emit(at.clone(), mir::Rvalue::Call(mir::Operand::Func("moira_path_parent_index".into()), vec![mir::Operand::var(s.clone())]));
+            let has = self.fresh_temp("long long");
+            self.emit(has.clone(), mir::Rvalue::Binary(mir::MirBinOp::Ne, mir::Operand::var(at.clone()), mir::Operand::Const(-1)));
+            let result = self.fresh_temp("Option<str>");
+            let some_blk = self.new_block();
+            let none_blk = self.new_block();
+            let join = self.new_block();
+            self.set_term(mir::Terminator::If(mir::Operand::var(has), some_blk, none_blk));
+            self.current = some_blk;
+            let head = self.fresh_temp("str");
+            self.emit(head.clone(), mir::Rvalue::Call(mir::Operand::Func("moira_str_sub".into()), vec![mir::Operand::var(s), mir::Operand::Const(0), mir::Operand::var(at)]));
+            self.emit(result.clone(), mir::Rvalue::StructLit("Option".to_string(), vec![("tag".to_string(), mir::Operand::Const(0)), (payload_field("Option", 0, 0), mir::Operand::var(head))]));
+            self.set_term(mir::Terminator::Goto(join));
+            self.current = none_blk;
+            self.emit(result.clone(), mir::Rvalue::StructLit("Option".to_string(), vec![("tag".to_string(), mir::Operand::Const(1))]));
+            self.set_term(mir::Terminator::Goto(join));
+            self.current = join;
+            return Ok(Some(mir::Operand::var(result)));
         }
         // `s.split_once(pat)`: `Some((before, after))` around the first match, else `None`.
         if method == "split_once" && args.len() == 1 {

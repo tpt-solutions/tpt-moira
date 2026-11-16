@@ -5278,6 +5278,11 @@ impl TypeChecker {
             ("str", "to_owned", vec![], Str),
             // `split_at(i)` is the pair of the two halves, each a string.
             ("str", "split_at", vec![Usize], Ty::Tuple(vec![Str, Str])),
+            // A path is its text (`PathBuf` is a string): `exists`, `is_file`, `parent`.
+            ("str", "exists", vec![], Bool),
+            ("str", "is_file", vec![], Bool),
+            ("str", "to_string_lossy", vec![], Str),
+            ("str", "parent", vec![], Ty::Apply("Option".into(), vec![Str])),
             // `split_once(pat)`: the halves around the first match, if there is one.
             (
                 "str",
