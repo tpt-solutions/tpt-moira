@@ -1482,6 +1482,9 @@ struct Lower {
     /// Blocks that follow an explicit `return`: nothing jumps to them, so the function's end
     /// must not add a second return to them.
     dead_blocks: Vec<usize>,
+    /// The captured variables of the closure being lowered. A closure's captures are copies,
+    /// so an assignment to one would be lost: it is reported instead.
+    capture_names: Vec<String>,
     /// The C parameter types of each top-level function and impl method, by C name.
     fn_param_tys: HashMap<String, Vec<String>>,
     /// The methods of every `impl` block: `(type, method) -> (C function name, kind)`,
@@ -1819,6 +1822,7 @@ impl Lower {
             self_ty: None,
             expect_ty: None,
             dead_blocks: Vec::new(),
+            capture_names: Vec::new(),
             closure_rets: HashMap::new(),
             arm_counter: 0,
             var_renames: HashMap::new(),
@@ -2228,6 +2232,7 @@ impl Lower {
         // Build the lifted function in its own context, seeded with the enclosing
         // environment so nested closures and async names resolve.
         let mut sub = Lower::new(&self.structs, self.hints.clone());
+        sub.capture_names = captures.clone();
         sub.lenient_calls = self.lenient_calls;
         sub.async_fns = self.async_fns.clone();
         sub.all_fn_names = self.all_fn_names.clone();
@@ -10305,6 +10310,17 @@ impl Lower {
                 e.span.start, e.span.end
             ))),
             ExprKind::Binary(l, abop, r) => {
+                // A closure's captured variables are copies: assigning to one would be lost.
+                let is_assign = matches!(abop, ABinOp::Assign)
+                    || compound_op(*abop).is_some();
+                if let (true, ExprKind::Path(p)) = (is_assign, &l.kind) {
+                    if p.segments.len() == 1 && self.capture_names.contains(&p.segments[0].node) {
+                        return Err(LowerError(format!(
+                            "assigning to the captured variable `{}` in a closure is not supported yet (bytes {}..{})",
+                            p.segments[0].node, e.span.start, e.span.end
+                        )));
+                    }
+                }
                 // Assignment / compound assignment mutate the left-hand place.
                 if let Some(arith) = compound_op(*abop) {
                     // `place op= rhs` on a field, an element or a dereference is `place = place op
