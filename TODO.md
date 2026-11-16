@@ -867,6 +867,17 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
             chain (not in a `for`), `retain`/`extend` on non-field receivers, `Map::iter()` (pairs),
             `parse`, `unwrap_or_default`, `entry`, `as_str`/`as_ref`, and the `new`/`from`/`replace`
             path calls in untyped positions.
+          - Status (2026-11-16, field receivers): still `1/5`. Blocked functions per crate:
+            clotho 17 -> 15, atropos 94 -> 92, lachesis 68 -> 67.
+            * `insert(i, x)` on a vector field (same write-back helper as `remove`). Test:
+              `vec_field_insert_run`.
+            * `retain(f)` on a vector field: the field is copied into a local (the copy shares the
+              data buffer), the kept items are written in place, and the field is written back.
+              Test: `vec_field_retain_run`.
+            Checked and already working on locals: `unwrap_or_default` (Option of int and String),
+            `extend` from a vector and from a chain, `parse().unwrap_or(d)`. Still open:
+            `s.parse::<T>()` matched as a `Result` (needs an error type), `HashMap::get` on a
+            field with `unwrap_or` in a `HashMap::new()` untyped position, and `entry`.
           - Status (2026-11-16, parse): `let x: T = s.parse().unwrap()` and `.unwrap_or(d)`
             lower for numeric `T` (signed/unsigned by bit width, `f64`), with C helpers
             `moira_parse_{s,u,f}` that reject trailing text, range-check the width and panic

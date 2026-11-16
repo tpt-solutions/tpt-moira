@@ -6772,7 +6772,27 @@ impl Lower {
     /// to the front, and the length becomes their count. The closure gets a pointer to each
     /// element. `None` when the receiver is not a named vector.
     fn lower_vec_retain(&mut self, recv: &Expr, closure: &Expr) -> Result<Option<mir::Operand>> {
-        let Some((vname, elem, is_ptr)) = self.vec_local(recv) else {
+        // A named vector, or a vector field: the field is copied into a local (the copy shares the
+        // data buffer, so the kept items are written in place) and written back at the end.
+        let (vname, elem, is_ptr, field_back) = if let Some((v, e, p)) = self.vec_local(recv) {
+            (v, e, p, None)
+        } else if let ExprKind::Field(base, field) = &recv.kind {
+            let Some(elem) = self.hint_of_expr(recv).and_then(|h| mir::vec_elem(&h).map(|s| s.to_string())) else {
+                return Ok(None);
+            };
+            let b = self.lower_expr(base)?;
+            let bname = match &b {
+                mir::Operand::Var(n) => n.clone(),
+                _ => return Err(LowerError("a vector field needs a named struct".into())),
+            };
+            let ptr_base = self.scrutinee_is_pointer(&b);
+            let cur = self.fresh_temp(mir::vec_type(&elem));
+            self.emit(
+                cur.clone(),
+                mir::Rvalue::Field(mir::Operand::var(bname.clone()), field.node.clone(), ptr_base),
+            );
+            (cur, elem, false, Some((bname, field.node.clone(), ptr_base)))
+        } else {
             return Ok(None);
         };
         self.closure_param_hint = Some(vec![format!("{elem}*")]);
@@ -6872,12 +6892,18 @@ impl Lower {
         self.emit(
             "__scratch".to_string(),
             mir::Rvalue::StoreField(
-                mir::Operand::var(vname),
+                mir::Operand::var(vname.clone()),
                 "len".into(),
                 mir::Operand::var(kept),
                 is_ptr,
             ),
         );
+        if let Some((bname, field, ptr_base)) = field_back {
+            self.emit(
+                "__scratch".to_string(),
+                mir::Rvalue::StoreField(mir::Operand::var(bname), field, mir::Operand::var(vname), ptr_base),
+            );
+        }
         Ok(Some(mir::Operand::Unit))
     }
 
@@ -7057,7 +7083,7 @@ impl Lower {
         self.emit(ptr.clone(), mir::Rvalue::Ref(mir::Operand::var(cur.clone()), true));
         let mut operands = vec![mir::Operand::var(ptr)];
         for a in args {
-            self.expect_ty = Some(elem.clone());
+            self.expect_ty = if method == "insert" && operands.len() == 1 { None } else { Some(elem.clone()) };
             let o = self.lower_expr(a);
             self.expect_ty = None;
             operands.push(o?);
@@ -7091,7 +7117,7 @@ impl Lower {
         let ExprKind::Field(base, field) = &recv.kind else {
             return Ok(None);
         };
-        if matches!(method, "clear" | "reverse" | "remove") {
+        if matches!(method, "clear" | "reverse" | "remove" | "insert") {
             return self.lower_vec_field_helper(base, field, recv, method, args);
         }
         if !(method == "push" || method == "extend" || method == "append") || args.len() != 1 {

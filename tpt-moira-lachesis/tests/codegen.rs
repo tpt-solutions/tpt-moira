@@ -1358,6 +1358,52 @@ fn vec_field_remove_reverse_clear_run() {
     assert_eq!(out, "1\n3\n0", "field vector helpers should write back");
 }
 
+/// `insert(i, x)` on a vector field writes the grown vector back into the struct.
+#[test]
+fn vec_field_insert_run() {
+    let out = match run_src(
+        "struct Store { items: Vec<i32> }
+        impl Store {
+            fn put(&mut self, i: usize, x: i32) { self.items.insert(i, x); }
+        }
+        fn main() {
+            let mut s = Store { items: vec![1, 3] };
+            s.put(1, 2);
+            println!(\"{} {} {} {}\", s.items.len(), s.items[0], s.items[1], s.items[2]);
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping vec field insert run");
+            return;
+        }
+    };
+    assert_eq!(out, "3 1 2 3", "field insert should write back");
+}
+
+/// `retain` on a vector field keeps the items the closure accepts and writes the result back.
+#[test]
+fn vec_field_retain_run() {
+    let out = match run_src(
+        "struct Store { items: Vec<i32> }
+        impl Store {
+            fn keep_positive(&mut self) { self.items.retain(|x| *x > 0); }
+        }
+        fn main() {
+            let mut s = Store { items: vec![1, -2, 3, -4, 5] };
+            s.keep_positive();
+            println!(\"{} {} {}\", s.items.len(), s.items[0], s.items[2]);
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping vec field retain run");
+            return;
+        }
+    };
+    assert_eq!(out, "3 1 5", "field retain should keep the accepted items");
+}
+
 /// `find_map` returns the first `Some` the closure produces, and `None` when there is none.
 #[test]
 fn find_map_returns_first_some_run() {
