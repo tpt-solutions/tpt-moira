@@ -2125,8 +2125,8 @@ impl Parser {
             TokenKind::LParen => {
                 self.bump();
                 if self.eat(&TokenKind::RParen) {
-                    // unit literal `()`
-                    ExprKind::Lit(Lit::Str(String::new()))
+                    // unit value `()`: the empty tuple
+                    ExprKind::Tuple(Vec::new())
                 } else {
                     let first = self.parse_expr()?;
                     if self.eat(&TokenKind::Comma) {

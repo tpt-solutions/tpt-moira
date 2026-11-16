@@ -266,12 +266,21 @@ def probe_crate(moira: Path, crate: dict) -> ProbeResult:
     if res.returncode != 0:
         err = (res.stderr or res.stdout).strip().splitlines()
         snippet = err[-1] if err else "(no diagnostic)"
-        # Count the diagnostics for a faster-at-a-glance signal.
-        count = len([l for l in err if "type/borrow error" in l or "error" in l])
-        note = f"check failed: {snippet}"
-        if count:
-            note = f"check failed ({count} diagnostic line(s)): {snippet}"
-        result.notes.append(note)
+        # Each diagnostic is an `Error at ...: <message>` line, followed by its `at <file>:<line>`
+        # location; list every one so the report shows what must change, not only a count.
+        diags = []
+        for i, l in enumerate(err):
+            m = re.search(r"Error at bytes [0-9-]+: (.*)$", l)
+            if m:
+                loc = ""
+                if i + 1 < len(err) and err[i + 1].strip().startswith("moira:   at "):
+                    loc = err[i + 1].strip()[len("moira:   at "):]
+                diags.append(f"check: {m.group(1).strip()}" + (f" ({loc})" if loc else ""))
+        if diags:
+            result.notes.append(f"check failed with {len(diags)} type/borrow error(s):")
+            result.notes.extend(f"  - {d}" for d in diags)
+        else:
+            result.notes.append(f"check failed: {snippet}")
 
     # Codegen probe (C backend) — independent of check; reports whether the
     # subset lowers + emits at all.
@@ -306,7 +315,10 @@ def probe_crate(moira: Path, crate: dict) -> ProbeResult:
         else:
             blockers = []
         if blockers:
-            result.notes.append(f"codegen blocked in {len(blockers)} function(s):")
+            fns = {m.group(1) for b in blockers for m in [re.search(r"in fn `([^`]*)`", b)] if m}
+            result.notes.append(
+                f"codegen blocked by {len(blockers)} construct(s) in {len(fns) or 'some'} function(s):"
+            )
             result.notes.extend(f"  - {b}" for b in blockers)
         else:
             snippet = err[-1] if err else "(no diagnostic)"
@@ -393,6 +405,23 @@ def self_host(release: bool, strict: bool) -> int:
         g = "ok" if r.codegen_ok else "fail"
         status = "SELF-HOSTABLE" if r.self_hostable else "blocked"
         lines.append(f"| {r.crate} | {p} | {c} | {g} | {status} |")
+    # Blockers grouped by kind, across every crate, so progress shows as counts falling.
+    kinds: dict = {}
+    for r in results:
+        for n in r.notes:
+            t = n.strip().lstrip("-").strip()
+            m = re.search(r"method `([^`]*)` on a receiver", t) or re.search(r"call to `([^`]*)`", t)
+            if m:
+                key = ("method " if "method `" in t else "call to ") + f"`{m.group(1)}`"
+            elif t.startswith("check:"):
+                key = "type/borrow error"
+            else:
+                continue
+            kinds[key] = kinds.get(key, 0) + 1
+    if kinds:
+        lines += ["", "## Blockers by kind", "", "| Kind | Count |", "|------|-------|"]
+        for k, c in sorted(kinds.items(), key=lambda kv: (-kv[1], kv[0])):
+            lines.append(f"| {k} | {c} |")
     lines += ["", "## Notes", ""]
     for r in results:
         for n in r.notes:

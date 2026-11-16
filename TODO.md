@@ -867,6 +867,22 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
             chain (not in a `for`), `retain`/`extend` on non-field receivers, `Map::iter()` (pairs),
             `parse`, `unwrap_or_default`, `entry`, `as_str`/`as_ref`, and the `new`/`from`/`replace`
             path calls in untyped positions.
+          - Status (2026-11-17, check stage and probe report): clotho now **passes the type and
+            borrow check** (31 errors -> 0). Fixes, each in `tpt-moira-lachesis/src/infer.rs`:
+            `&mut Box<T>`/`&Box<T>` arguments deref-coerce to `&mut T`/`&T` (`coerce_box_ref`);
+            `for x in v.iter_mut()` and loops over `&mut` yield `&mut` items (was `&`); the empty
+            tuple `()` is the unit type (the parser had made it the string literal `""`, now
+            `ExprKind::Tuple(vec![])`, lowered to `Operand::Unit`); `strip_prefix`/`strip_suffix`/
+            `parent` return `Option<&str>`; `&[]` is accepted where `&Vec<T>`/`&[T]` is expected
+            (`compatible` and `unify_ty`). Also: an untyped `Vec::new()`/`HashMap::new()` that only
+            receives unsuffixed literals defaults to `i32` (only when no return type or other use
+            fixes it first), and a pending `Vec::new()` local used as a struct field takes the
+            field's type. The probe (`x.py self-host`) now lists every check diagnostic with its
+            location, labels codegen blockers as constructs, and adds a "Blockers by kind" table.
+            Still open: a literal-only map read inside its own body (`m.get(&1)`) is typed before
+            the default applies (`pending_coll_literal`), and `Arc::new(...)` is not modelled
+            (`Lower::new` and others use it). Blocked constructs: clotho 15, atropos 92,
+            lachesis 69, driver 21.
           - Status (2026-11-16, field receivers): still `1/5`. Blocked functions per crate:
             clotho 17 -> 15, atropos 94 -> 92, lachesis 68 -> 67.
             * `insert(i, x)` on a vector field (same write-back helper as `remove`). Test:

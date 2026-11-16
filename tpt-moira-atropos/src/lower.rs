@@ -12503,6 +12503,10 @@ impl Lower {
             }
             ExprKind::Macro(m) if macro_name(m) == "vec" => self.lower_vec_macro(e, m),
             ExprKind::Macro(m) => self.lower_print_macro(m),
+            // `()`, the unit value, has no runtime representation.
+            ExprKind::Tuple(elems) if elems.is_empty() => Ok(mir::Operand::Unit),
+            // `()`, the unit value, has no runtime representation.
+            ExprKind::Tuple(elems) if elems.is_empty() => Ok(mir::Operand::Unit),
             ExprKind::Tuple(elems) => {
                 // Build a tuple value: lower each element, derive its C type
                 // (constants fall back to `long long`), register the generated

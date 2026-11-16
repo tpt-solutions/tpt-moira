@@ -1306,6 +1306,93 @@ fn iter_rev_chain_reverses_the_source_run() {
     assert_eq!(out, "3 2 1 1", "rev should walk from the last element");
 }
 
+/// A local `let v = Vec::new();` moved into a struct field takes the field's element type.
+#[test]
+fn pending_vec_local_takes_struct_field_type_run() {
+    let out = match run_src(
+        "struct P { v: Vec<i32> }
+        fn mk() -> P {
+            let v = Vec::new();
+            P { v }
+        }
+        fn main() {
+            let p = mk();
+            println!(\"{}\", p.v.len());
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping struct field vec run");
+            return;
+        }
+    };
+    assert_eq!(out, "0", "the pending vector should take the field's type");
+}
+
+/// An untyped `Vec::new()` that only receives unsuffixed literals takes Rust's default `i32`.
+#[test]
+fn untyped_vec_of_literals_defaults_to_i32_run() {
+    let out = match run_src(
+        "fn main() {
+            let mut v = Vec::new();
+            v.push(4);
+            v.push(5);
+            println!(\"{} {}\", v.len(), v[1]);
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping literal vec run");
+            return;
+        }
+    };
+    assert_eq!(out, "2 5", "literal elements should default to i32");
+}
+
+/// An untyped `HashMap::new()` that only receives unsuffixed literal keys and values defaults
+/// to `i32` for both. (Uses inside the body are typed before the default applies, so this test
+/// reads only the length.)
+#[test]
+fn untyped_map_of_literals_defaults_to_i32_run() {
+    let out = match run_src(
+        "use std::collections::HashMap;
+        fn main() {
+            let mut m = HashMap::new();
+            m.insert(1, 20);
+            m.insert(2, 30);
+            println!(\"{}\", m.len());
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping literal map run");
+            return;
+        }
+    };
+    assert_eq!(out, "2", "literal keys and values should default to i32");
+}
+
+/// `for x in v.iter_mut()` yields mutable references, so the loop body can write through them.
+#[test]
+fn iter_mut_loop_writes_through_run() {
+    let out = match run_src(
+        "fn main() {
+            let mut v: Vec<i32> = vec![1, 2, 3];
+            for x in v.iter_mut() {
+                *x += 10;
+            }
+            println!(\"{} {} {}\", v[0], v[1], v[2]);
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping iter_mut run");
+            return;
+        }
+    };
+    assert_eq!(out, "11 12 13", "iter_mut items should be mutable references");
+}
+
 /// `insert(i, x)` puts the element at index `i` (front, middle and end).
 #[test]
 fn vec_insert_at_each_position_run() {
