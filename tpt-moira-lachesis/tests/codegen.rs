@@ -1390,7 +1390,10 @@ fn iter_mut_loop_writes_through_run() {
             return;
         }
     };
-    assert_eq!(out, "11 12 13", "iter_mut items should be mutable references");
+    assert_eq!(
+        out, "11 12 13",
+        "iter_mut items should be mutable references"
+    );
 }
 
 /// `insert(i, x)` puts the element at index `i` (front, middle and end).

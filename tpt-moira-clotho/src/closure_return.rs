@@ -739,7 +739,11 @@ fn emit_let(
                     node: new_name,
                     span: pname.span,
                 }),
-                ty: if self_arg { None } else { Some(param.ty.clone()) },
+                ty: if self_arg {
+                    None
+                } else {
+                    Some(param.ty.clone())
+                },
                 init: Some(inits[k].clone()),
                 mutable: false,
             }),

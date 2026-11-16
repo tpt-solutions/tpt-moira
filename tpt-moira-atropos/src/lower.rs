@@ -206,22 +206,23 @@ fn lower_program_impl(
         .collect();
     // Constants that are not literals (`const N: &[i64] = &[..];`): their initializer is
     // lowered at each use, with the declared slice type where there is one.
-    let const_exprs: std::sync::Arc<std::collections::HashMap<String, (ast::Expr, Option<String>)>> =
-        std::sync::Arc::new(
-            prog.items
-                .iter()
-                .filter_map(|it| match &it.kind {
-                    ItemKind::Const(c) if const_literal(&c.value).is_none() => Some((
-                        c.name.node.clone(),
-                        (
-                            c.value.clone(),
-                            c.ty.as_ref().map(|t| type_to_c(t, &aliases)),
-                        ),
-                    )),
-                    _ => None,
-                })
-                .collect(),
-        );
+    let const_exprs: std::sync::Arc<
+        std::collections::HashMap<String, (ast::Expr, Option<String>)>,
+    > = std::sync::Arc::new(
+        prog.items
+            .iter()
+            .filter_map(|it| match &it.kind {
+                ItemKind::Const(c) if const_literal(&c.value).is_none() => Some((
+                    c.name.node.clone(),
+                    (
+                        c.value.clone(),
+                        c.ty.as_ref().map(|t| type_to_c(t, &aliases)),
+                    ),
+                )),
+                _ => None,
+            })
+            .collect(),
+    );
     // Enum layout registry. The prelude `std` enums are modeled even when the
     // source declares no `enum` items; user `enum` definitions register their
     // own variants below.
@@ -409,7 +410,13 @@ fn lower_program_impl(
                 fields: s
                     .fields
                     .iter()
-                    .enumerate().map(|(i, f)| (tuple_field_name(i, &f.name.node), type_to_c(&f.ty, &aliases)))
+                    .enumerate()
+                    .map(|(i, f)| {
+                        (
+                            tuple_field_name(i, &f.name.node),
+                            type_to_c(&f.ty, &aliases),
+                        )
+                    })
                     .collect(),
             });
         }
@@ -429,7 +436,12 @@ fn lower_program_impl(
                             .fields
                             .iter()
                             .enumerate()
-                            .map(|(i, f)| (tuple_field_name(i, &f.name.node), type_to_c(&f.ty, &extern_aliases)))
+                            .map(|(i, f)| {
+                                (
+                                    tuple_field_name(i, &f.name.node),
+                                    type_to_c(&f.ty, &extern_aliases),
+                                )
+                            })
                             .collect(),
                     });
                 }
@@ -451,7 +463,13 @@ fn lower_program_impl(
                 let fields = s
                     .fields
                     .iter()
-                    .enumerate().map(|(i, f)| (tuple_field_name(i, &f.name.node), type_to_c(&f.ty, &aliases)))
+                    .enumerate()
+                    .map(|(i, f)| {
+                        (
+                            tuple_field_name(i, &f.name.node),
+                            type_to_c(&f.ty, &aliases),
+                        )
+                    })
                     .collect();
                 out.structs.push(mir::MirStructDef {
                     name: s.name.node.clone(),
@@ -1619,7 +1637,10 @@ thread_local! {
 }
 
 /// The names of the variables `body` assigns to, other than those `bound` names.
-fn assigned_names(body: &Expr, bound: &std::collections::HashSet<String>) -> std::collections::HashSet<String> {
+fn assigned_names(
+    body: &Expr,
+    bound: &std::collections::HashSet<String>,
+) -> std::collections::HashSet<String> {
     ASSIGNED.with(|a| a.borrow_mut().clear());
     let mut out = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -1930,8 +1951,10 @@ impl Lower {
         // typed nor declared in the C output.
         self.func.temp_types = self.types.clone();
         if !self.deferred.is_empty() {
-            return Err(LowerError(self.deferred.join("
-")));
+            return Err(LowerError(self.deferred.join(
+                "
+",
+            )));
         }
         Ok(self.func.clone())
     }
@@ -2217,7 +2240,11 @@ impl Lower {
 
     /// [`Lower::lower_block_value`] with the type the block's tail expression is expected to
     /// have (a function body's tail has the function's return type).
-    fn lower_block_with_tail(&mut self, b: &ast::Block, tail_ty: Option<String>) -> Result<mir::Operand> {
+    fn lower_block_with_tail(
+        &mut self,
+        b: &ast::Block,
+        tail_ty: Option<String>,
+    ) -> Result<mir::Operand> {
         // A `let` in the block scopes its names to the block.
         let saved = self.var_renames.clone();
         let mut result = Ok(());
@@ -2513,12 +2540,22 @@ impl Lower {
         let mut caps: Vec<String> = Vec::new();
         let mut written: std::collections::HashSet<String> = std::collections::HashSet::new();
         for (_, lifted) in &found {
-            for c in self.closure_captures.get(lifted).cloned().unwrap_or_default() {
+            for c in self
+                .closure_captures
+                .get(lifted)
+                .cloned()
+                .unwrap_or_default()
+            {
                 if !caps.contains(&c) {
                     caps.push(c);
                 }
             }
-            for w in self.closure_ref_caps.get(lifted).cloned().unwrap_or_default() {
+            for w in self
+                .closure_ref_caps
+                .get(lifted)
+                .cloned()
+                .unwrap_or_default()
+            {
                 written.insert(w);
             }
         }
@@ -2720,9 +2757,12 @@ impl Lower {
                     return self.lower_tuple_destructure(local);
                 }
                 // `let x: T = s.parse().unwrap();` (or `unwrap_or(d)`) for a numeric `T`.
-                if let (Pat::Ident(n), Some(ty), Some(init)) = (&local.pat, &local.ty, &local.init) {
+                if let (Pat::Ident(n), Some(ty), Some(init)) = (&local.pat, &local.ty, &local.init)
+                {
                     if let Some(parsed) = self.parse_unwrap_parts(init) {
-                        if let Some(ct) = numeric_parse_target(&c_scalar_name(&type_to_c(ty, &self.aliases))) {
+                        if let Some(ct) =
+                            numeric_parse_target(&c_scalar_name(&type_to_c(ty, &self.aliases)))
+                        {
                             return self.lower_parse_let(&n.node, &ct, parsed.0, parsed.1);
                         }
                     }
@@ -2902,7 +2942,11 @@ impl Lower {
                         let slice_pt = local
                             .ty
                             .as_ref()
-                            .map(|t| type_to_c(t, &self.aliases).trim_end_matches('*').to_string())
+                            .map(|t| {
+                                type_to_c(t, &self.aliases)
+                                    .trim_end_matches('*')
+                                    .to_string()
+                            })
                             .filter(|h| mir::slice_elem(h).is_some());
                         if let Some(pt) = slice_pt {
                             if let Some(v) = self.array_arg_as_slice(inner, &pt)? {
@@ -3421,7 +3465,8 @@ impl Lower {
                 }
                 // `m.keys()` / `m.values()` on a map: a source of its keys or values.
                 "keys" | "values"
-                    if args.is_empty() && self.hint_of_expr(r).is_some_and(|h| h.starts_with("Map<")) =>
+                    if args.is_empty()
+                        && self.hint_of_expr(r).is_some_and(|h| h.starts_with("Map<")) =>
                 {
                     stages.reverse();
                     return Some(IterChain {
@@ -3439,7 +3484,8 @@ impl Lower {
                 }
                 // `a.intersection(&b)` / `a.union(&b)` on a set: a source of its keys.
                 "intersection" | "union"
-                    if args.len() == 1 && self.hint_of_expr(r).is_some_and(|h| h.starts_with("Set<")) =>
+                    if args.len() == 1
+                        && self.hint_of_expr(r).is_some_and(|h| h.starts_with("Set<")) =>
                 {
                     stages.reverse();
                     let other: &'a Expr = match &args[0].kind {
@@ -3605,8 +3651,16 @@ impl Lower {
     /// capture parameters. A written capture is passed as the address of the variable (or as
     /// the pointer this closure already holds for it); the others are passed by value.
     fn capture_operands(&mut self, lifted: &str) -> Vec<mir::Operand> {
-        let caps = self.closure_captures.get(lifted).cloned().unwrap_or_default();
-        let refs = self.closure_ref_caps.get(lifted).cloned().unwrap_or_default();
+        let caps = self
+            .closure_captures
+            .get(lifted)
+            .cloned()
+            .unwrap_or_default();
+        let refs = self
+            .closure_ref_caps
+            .get(lifted)
+            .cloned()
+            .unwrap_or_default();
         let mut ops = Vec::new();
         for c in caps {
             let held_ptr = self.ref_names.contains(&c);
@@ -3617,10 +3671,7 @@ impl Lower {
                     let ty = self.capture_c_type(&c);
                     let var = self.var_name(&c);
                     let p = self.fresh_temp(format!("{ty}*"));
-                    self.emit(
-                        p.clone(),
-                        mir::Rvalue::Ref(mir::Operand::var(var), true),
-                    );
+                    self.emit(p.clone(), mir::Rvalue::Ref(mir::Operand::var(var), true));
                     ops.push(mir::Operand::var(p));
                 }
             } else if held_ptr {
@@ -3733,7 +3784,10 @@ impl Lower {
                     ),
                 );
                 let ptr = self.fresh_temp(format!("{}*", mir::vec_type(&selem)));
-                self.emit(ptr.clone(), mir::Rvalue::Ref(mir::Operand::var(copy.clone()), true));
+                self.emit(
+                    ptr.clone(),
+                    mir::Rvalue::Ref(mir::Operand::var(copy.clone()), true),
+                );
                 let reversed = self.fresh_temp("long long");
                 self.emit(
                     reversed,
@@ -3752,7 +3806,11 @@ impl Lower {
                     let t = self.fresh_temp("long long");
                     self.emit(
                         t.clone(),
-                        mir::Rvalue::Binary(mir::MirBinOp::Add, hi_op.clone(), mir::Operand::Const(1)),
+                        mir::Rvalue::Binary(
+                            mir::MirBinOp::Add,
+                            hi_op.clone(),
+                            mir::Operand::Const(1),
+                        ),
                     );
                     hi_op = mir::Operand::var(t);
                 }
@@ -4007,7 +4065,10 @@ impl Lower {
                         mir::Operand::var(vname.clone())
                     } else {
                         let p = self.fresh_temp(format!("Map<{elem},bool>*"));
-                        self.emit(p.clone(), mir::Rvalue::Ref(mir::Operand::var(vname.clone()), true));
+                        self.emit(
+                            p.clone(),
+                            mir::Rvalue::Ref(mir::Operand::var(vname.clone()), true),
+                        );
                         mir::Operand::var(p)
                     };
                     rank_src = Some((set_ptr, elem.clone()));
@@ -4022,7 +4083,11 @@ impl Lower {
                 let data_field = if keyed { "keys" } else { "data" };
                 self.emit(
                     data.clone(),
-                    mir::Rvalue::Field(mir::Operand::var(vname.clone()), data_field.into(), *is_ptr),
+                    mir::Rvalue::Field(
+                        mir::Operand::var(vname.clone()),
+                        data_field.into(),
+                        *is_ptr,
+                    ),
                 );
                 self.emit(idx.clone(), mir::Rvalue::Use(mir::Operand::Const(0)));
                 (mir::Operand::var(len), Some(data))
@@ -4150,12 +4215,8 @@ impl Lower {
                 }
                 "filter_map" => {
                     let (f, caps) = callee.expect("filter_map has a closure");
-                    let args = self.chain_args(
-                        caps,
-                        &pos,
-                        &item,
-                        arg.expect("filter_map has a closure"),
-                    )?;
+                    let args =
+                        self.chain_args(caps, &pos, &item, arg.expect("filter_map has a closure"))?;
                     let ret = self
                         .closure_rets
                         .get(&f)
@@ -4564,7 +4625,9 @@ impl Lower {
     ) -> Result<mir::Operand> {
         if let ExprKind::Lit(ast::Lit::Str(text)) = &sep.kind {
             if text.is_empty() {
-                return Err(LowerError("`split` on an empty pattern is not in the codegen subset".into()));
+                return Err(LowerError(
+                    "`split` on an empty pattern is not in the codegen subset".into(),
+                ));
             }
         }
         let s = match self.lower_expr(seq)? {
@@ -4608,7 +4671,11 @@ impl Lower {
             end.clone(),
             mir::Rvalue::Call(
                 mir::Operand::Func("moira_split_end".to_string()),
-                vec![mir::Operand::var(s.clone()), mir::Operand::var(idx.clone()), sep_op.clone()],
+                vec![
+                    mir::Operand::var(s.clone()),
+                    mir::Operand::var(idx.clone()),
+                    sep_op.clone(),
+                ],
             ),
         );
         let piece = self.fresh_temp("char*");
@@ -4616,7 +4683,11 @@ impl Lower {
             piece.clone(),
             mir::Rvalue::Call(
                 mir::Operand::Func("moira_str_sub".to_string()),
-                vec![mir::Operand::var(s.clone()), mir::Operand::var(idx.clone()), mir::Operand::var(end)],
+                vec![
+                    mir::Operand::var(s.clone()),
+                    mir::Operand::var(idx.clone()),
+                    mir::Operand::var(end),
+                ],
             ),
         );
         self.emit(
@@ -4892,7 +4963,14 @@ impl Lower {
         };
         if !matches!(
             method,
-            "insert" | "get" | "get_mut" | "contains_key" | "contains" | "remove" | "len" | "is_empty"
+            "insert"
+                | "get"
+                | "get_mut"
+                | "contains_key"
+                | "contains"
+                | "remove"
+                | "len"
+                | "is_empty"
         ) {
             return Ok(None);
         }
@@ -4943,7 +5021,10 @@ impl Lower {
                 // A map read from a field (): the read-only methods work on a
                 // copy of the map, which shares its storage.
                 None if matches!(recv.kind, ExprKind::Field(..))
-                    && matches!(method, "get" | "get_mut" | "contains_key" | "len" | "is_empty") =>
+                    && matches!(
+                        method,
+                        "get" | "get_mut" | "contains_key" | "len" | "is_empty"
+                    ) =>
                 {
                     match self.map_from_hint(recv)? {
                         Some(m) => m,
@@ -6076,7 +6157,8 @@ impl Lower {
         let ExprKind::MethodCall(r, pm, pargs) = &inner.kind else {
             return None;
         };
-        if pm.node != "parse" || !pargs.is_empty() || self.hint_of_expr(r).as_deref() != Some("str") {
+        if pm.node != "parse" || !pargs.is_empty() || self.hint_of_expr(r).as_deref() != Some("str")
+        {
             return None;
         }
         Some((&**r, default))
@@ -6112,13 +6194,12 @@ impl Lower {
             mir::Rvalue::Call(mir::Operand::Func(helper.to_string()), args),
         );
         if !self.func.locals.iter().any(|(n, _)| n == name) {
-            self.func.locals.push((name.to_string(), Some(ctype.clone())));
+            self.func
+                .locals
+                .push((name.to_string(), Some(ctype.clone())));
         }
         self.types.insert(name.to_string(), ctype);
-        self.emit(
-            name.to_string(),
-            mir::Rvalue::Use(mir::Operand::var(value)),
-        );
+        self.emit(name.to_string(), mir::Rvalue::Use(mir::Operand::var(value)));
         Ok(())
     }
 
@@ -6253,8 +6334,16 @@ impl Lower {
                         vec![map, mir::Operand::var(key.clone())],
                     ),
                 );
-                let (on_true, on_false) = if keep_present { (push, skip) } else { (skip, push) };
-                self.set_term(mir::Terminator::If(mir::Operand::var(present), on_true, on_false));
+                let (on_true, on_false) = if keep_present {
+                    (push, skip)
+                } else {
+                    (skip, push)
+                };
+                self.set_term(mir::Terminator::If(
+                    mir::Operand::var(present),
+                    on_true,
+                    on_false,
+                ));
             }
         }
         self.current = push;
@@ -6284,7 +6373,9 @@ impl Lower {
     fn split_to_vec(&mut self, recv: &Expr, sep: &Expr) -> Result<(String, String, bool)> {
         if let ExprKind::Lit(ast::Lit::Str(text)) = &sep.kind {
             if text.is_empty() {
-                return Err(LowerError("`split` on an empty pattern is not in the codegen subset".into()));
+                return Err(LowerError(
+                    "`split` on an empty pattern is not in the codegen subset".into(),
+                ));
             }
         }
         let s = match self.lower_expr(recv)? {
@@ -6335,7 +6426,11 @@ impl Lower {
             end.clone(),
             mir::Rvalue::Call(
                 mir::Operand::Func("moira_split_end".to_string()),
-                vec![mir::Operand::var(s.clone()), mir::Operand::var(idx.clone()), sep_op.clone()],
+                vec![
+                    mir::Operand::var(s.clone()),
+                    mir::Operand::var(idx.clone()),
+                    sep_op.clone(),
+                ],
             ),
         );
         let piece = self.fresh_temp("str");
@@ -6343,7 +6438,11 @@ impl Lower {
             piece.clone(),
             mir::Rvalue::Call(
                 mir::Operand::Func("moira_str_sub".to_string()),
-                vec![mir::Operand::var(s.clone()), mir::Operand::var(idx.clone()), mir::Operand::var(end)],
+                vec![
+                    mir::Operand::var(s.clone()),
+                    mir::Operand::var(idx.clone()),
+                    mir::Operand::var(end),
+                ],
             ),
         );
         self.emit_vec_push(&out, "str", mir::Operand::var(piece));
@@ -6790,7 +6889,10 @@ impl Lower {
         let (vname, elem, is_ptr, field_back) = if let Some((v, e, p)) = self.vec_local(recv) {
             (v, e, p, None)
         } else if let ExprKind::Field(base, field) = &recv.kind {
-            let Some(elem) = self.hint_of_expr(recv).and_then(|h| mir::vec_elem(&h).map(|s| s.to_string())) else {
+            let Some(elem) = self
+                .hint_of_expr(recv)
+                .and_then(|h| mir::vec_elem(&h).map(|s| s.to_string()))
+            else {
                 return Ok(None);
             };
             let b = self.lower_expr(base)?;
@@ -6802,9 +6904,18 @@ impl Lower {
             let cur = self.fresh_temp(mir::vec_type(&elem));
             self.emit(
                 cur.clone(),
-                mir::Rvalue::Field(mir::Operand::var(bname.clone()), field.node.clone(), ptr_base),
+                mir::Rvalue::Field(
+                    mir::Operand::var(bname.clone()),
+                    field.node.clone(),
+                    ptr_base,
+                ),
             );
-            (cur, elem, false, Some((bname, field.node.clone(), ptr_base)))
+            (
+                cur,
+                elem,
+                false,
+                Some((bname, field.node.clone(), ptr_base)),
+            )
         } else {
             return Ok(None);
         };
@@ -6914,7 +7025,12 @@ impl Lower {
         if let Some((bname, field, ptr_base)) = field_back {
             self.emit(
                 "__scratch".to_string(),
-                mir::Rvalue::StoreField(mir::Operand::var(bname), field, mir::Operand::var(vname), ptr_base),
+                mir::Rvalue::StoreField(
+                    mir::Operand::var(bname),
+                    field,
+                    mir::Operand::var(vname),
+                    ptr_base,
+                ),
             );
         }
         Ok(Some(mir::Operand::Unit))
@@ -7090,22 +7206,40 @@ impl Lower {
         let cur = self.fresh_temp(mir::vec_type(&elem));
         self.emit(
             cur.clone(),
-            mir::Rvalue::Field(mir::Operand::var(bname.clone()), field.node.clone(), ptr_base),
+            mir::Rvalue::Field(
+                mir::Operand::var(bname.clone()),
+                field.node.clone(),
+                ptr_base,
+            ),
         );
         let ptr = self.fresh_temp(format!("{}*", mir::vec_type(&elem)));
-        self.emit(ptr.clone(), mir::Rvalue::Ref(mir::Operand::var(cur.clone()), true));
+        self.emit(
+            ptr.clone(),
+            mir::Rvalue::Ref(mir::Operand::var(cur.clone()), true),
+        );
         let mut operands = vec![mir::Operand::var(ptr)];
         for a in args {
-            self.expect_ty = if method == "insert" && operands.len() == 1 { None } else { Some(elem.clone()) };
+            self.expect_ty = if method == "insert" && operands.len() == 1 {
+                None
+            } else {
+                Some(elem.clone())
+            };
             let o = self.lower_expr(a);
             self.expect_ty = None;
             operands.push(o?);
         }
-        let result_ty = if method == "remove" { elem.clone() } else { "long long".to_string() };
+        let result_ty = if method == "remove" {
+            elem.clone()
+        } else {
+            "long long".to_string()
+        };
         let t = self.fresh_temp(result_ty);
         self.emit(
             t.clone(),
-            mir::Rvalue::Call(mir::Operand::Func(mir::vec_fn_name(&elem, method)), operands),
+            mir::Rvalue::Call(
+                mir::Operand::Func(mir::vec_fn_name(&elem, method)),
+                operands,
+            ),
         );
         self.emit(
             "__scratch".to_string(),
@@ -7116,7 +7250,11 @@ impl Lower {
                 ptr_base,
             ),
         );
-        Ok(Some(if method == "remove" { mir::Operand::var(t) } else { mir::Operand::Unit }))
+        Ok(Some(if method == "remove" {
+            mir::Operand::var(t)
+        } else {
+            mir::Operand::Unit
+        }))
     }
 
     /// `base.f.push(x)` / `base.f.extend(v)` on a vector field: the field is read into a local,
@@ -7775,7 +7913,9 @@ impl Lower {
         closure: &Expr,
     ) -> Result<Option<mir::Operand>> {
         // A reference to an option is hinted as a pointer to it; the payload is the same.
-        let recv_hint = self.hint_of_expr(recv).map(|h| h.trim_end_matches('*').to_string());
+        let recv_hint = self
+            .hint_of_expr(recv)
+            .map(|h| h.trim_end_matches('*').to_string());
         let Some(("Option", targs)) = recv_hint.as_deref().and_then(mir::split_generic) else {
             return Ok(None);
         };
@@ -8059,8 +8199,16 @@ impl Lower {
             let is_int = int_hint.as_deref().is_some_and(|h| {
                 matches!(
                     h,
-                    "int8_t" | "int16_t" | "int32_t" | "long long" | "int" | "uint8_t" | "uint16_t"
-                        | "uint32_t" | "uint64_t" | "unsigned long long"
+                    "int8_t"
+                        | "int16_t"
+                        | "int32_t"
+                        | "long long"
+                        | "int"
+                        | "uint8_t"
+                        | "uint16_t"
+                        | "uint32_t"
+                        | "uint64_t"
+                        | "unsigned long long"
                 )
             });
             if is_int {
@@ -8068,17 +8216,22 @@ impl Lower {
                 let a = self.lower_expr(recv)?;
                 let b = self.lower_expr(&args[0])?;
                 // `max` keeps `a` when it is strictly greater; `min` when strictly smaller.
-                let op = if method == "max" { mir::MirBinOp::Gt } else { mir::MirBinOp::Lt };
+                let op = if method == "max" {
+                    mir::MirBinOp::Gt
+                } else {
+                    mir::MirBinOp::Lt
+                };
                 let cond = self.fresh_temp("long long");
-                self.emit(
-                    cond.clone(),
-                    mir::Rvalue::Binary(op, a.clone(), b.clone()),
-                );
+                self.emit(cond.clone(), mir::Rvalue::Binary(op, a.clone(), b.clone()));
                 let r = self.fresh_temp(ct);
                 let then_blk = self.new_block();
                 let else_blk = self.new_block();
                 let join = self.new_block();
-                self.set_term(mir::Terminator::If(mir::Operand::var(cond), then_blk, else_blk));
+                self.set_term(mir::Terminator::If(
+                    mir::Operand::var(cond),
+                    then_blk,
+                    else_blk,
+                ));
                 self.current = then_blk;
                 self.emit(r.clone(), mir::Rvalue::Use(a));
                 self.set_term(mir::Terminator::Goto(join));
@@ -8100,7 +8253,11 @@ impl Lower {
             });
             if let Some(n) = n {
                 self.lower_expr(recv)?;
-                let v = if method == "len" { n } else { i128::from(n == 0) };
+                let v = if method == "len" {
+                    n
+                } else {
+                    i128::from(n == 0)
+                };
                 return Ok(Some(mir::Operand::Const(v)));
             }
         }
@@ -8580,7 +8737,7 @@ impl Lower {
             });
             // A reference to a string (`Option<&String>`'s payload) is a pointer to it: read the
             // string through the pointer before copying it.
-                        // The variable's C type decides: the checker's hint names the referent.
+            // The variable's C type decides: the checker's hint names the referent.
             let through_ref = matches!(recv.kind, ExprKind::Path(_))
                 && matches!(
                     self.lower_expr(recv),
@@ -8746,10 +8903,24 @@ impl Lower {
         if matches!(method, "exists" | "is_file") && args.is_empty() {
             let s = self.lower_expr(recv)?;
             let t = self.fresh_temp("long long");
-            let helper = if method == "exists" { "moira_path_exists" } else { "moira_path_is_file" };
-            self.emit(t.clone(), mir::Rvalue::Call(mir::Operand::Func(helper.into()), vec![s]));
+            let helper = if method == "exists" {
+                "moira_path_exists"
+            } else {
+                "moira_path_is_file"
+            };
+            self.emit(
+                t.clone(),
+                mir::Rvalue::Call(mir::Operand::Func(helper.into()), vec![s]),
+            );
             let b = self.fresh_temp("bool");
-            self.emit(b.clone(), mir::Rvalue::Binary(mir::MirBinOp::Ne, mir::Operand::var(t), mir::Operand::Const(0)));
+            self.emit(
+                b.clone(),
+                mir::Rvalue::Binary(
+                    mir::MirBinOp::Ne,
+                    mir::Operand::var(t),
+                    mir::Operand::Const(0),
+                ),
+            );
             return Ok(Some(mir::Operand::var(b)));
         }
         // `p.to_string_lossy()`: the text itself (a path is a string).
@@ -8765,21 +8936,63 @@ impl Lower {
                 return Err(LowerError("`parent` needs a named path".into()));
             };
             let at = self.fresh_temp("long long");
-            self.emit(at.clone(), mir::Rvalue::Call(mir::Operand::Func("moira_path_parent_index".into()), vec![mir::Operand::var(s.clone())]));
+            self.emit(
+                at.clone(),
+                mir::Rvalue::Call(
+                    mir::Operand::Func("moira_path_parent_index".into()),
+                    vec![mir::Operand::var(s.clone())],
+                ),
+            );
             let has = self.fresh_temp("long long");
-            self.emit(has.clone(), mir::Rvalue::Binary(mir::MirBinOp::Ne, mir::Operand::var(at.clone()), mir::Operand::Const(-1)));
+            self.emit(
+                has.clone(),
+                mir::Rvalue::Binary(
+                    mir::MirBinOp::Ne,
+                    mir::Operand::var(at.clone()),
+                    mir::Operand::Const(-1),
+                ),
+            );
             let result = self.fresh_temp("Option<str>");
             let some_blk = self.new_block();
             let none_blk = self.new_block();
             let join = self.new_block();
-            self.set_term(mir::Terminator::If(mir::Operand::var(has), some_blk, none_blk));
+            self.set_term(mir::Terminator::If(
+                mir::Operand::var(has),
+                some_blk,
+                none_blk,
+            ));
             self.current = some_blk;
             let head = self.fresh_temp("str");
-            self.emit(head.clone(), mir::Rvalue::Call(mir::Operand::Func("moira_str_sub".into()), vec![mir::Operand::var(s), mir::Operand::Const(0), mir::Operand::var(at)]));
-            self.emit(result.clone(), mir::Rvalue::StructLit("Option".to_string(), vec![("tag".to_string(), mir::Operand::Const(0)), (payload_field("Option", 0, 0), mir::Operand::var(head))]));
+            self.emit(
+                head.clone(),
+                mir::Rvalue::Call(
+                    mir::Operand::Func("moira_str_sub".into()),
+                    vec![
+                        mir::Operand::var(s),
+                        mir::Operand::Const(0),
+                        mir::Operand::var(at),
+                    ],
+                ),
+            );
+            self.emit(
+                result.clone(),
+                mir::Rvalue::StructLit(
+                    "Option".to_string(),
+                    vec![
+                        ("tag".to_string(), mir::Operand::Const(0)),
+                        (payload_field("Option", 0, 0), mir::Operand::var(head)),
+                    ],
+                ),
+            );
             self.set_term(mir::Terminator::Goto(join));
             self.current = none_blk;
-            self.emit(result.clone(), mir::Rvalue::StructLit("Option".to_string(), vec![("tag".to_string(), mir::Operand::Const(1))]));
+            self.emit(
+                result.clone(),
+                mir::Rvalue::StructLit(
+                    "Option".to_string(),
+                    vec![("tag".to_string(), mir::Operand::Const(1))],
+                ),
+            );
             self.set_term(mir::Terminator::Goto(join));
             self.current = join;
             return Ok(Some(mir::Operand::var(result)));
@@ -8795,7 +9008,11 @@ impl Lower {
                 at.clone(),
                 mir::Rvalue::Call(
                     mir::Operand::Func("moira_split_find".into()),
-                    vec![mir::Operand::var(sn.clone()), mir::Operand::Const(0), pat.clone()],
+                    vec![
+                        mir::Operand::var(sn.clone()),
+                        mir::Operand::Const(0),
+                        pat.clone(),
+                    ],
                 ),
             );
             let plen = self.fresh_temp("long long");
@@ -8824,7 +9041,11 @@ impl Lower {
             let none_blk = self.new_block();
             let some_blk = self.new_block();
             let join = self.new_block();
-            self.set_term(mir::Terminator::If(mir::Operand::var(missing), none_blk, some_blk));
+            self.set_term(mir::Terminator::If(
+                mir::Operand::var(missing),
+                none_blk,
+                some_blk,
+            ));
             self.current = none_blk;
             self.emit(
                 result.clone(),
@@ -8840,7 +9061,11 @@ impl Lower {
                 before.clone(),
                 mir::Rvalue::Call(
                     mir::Operand::Func("moira_str_sub".into()),
-                    vec![mir::Operand::var(sn.clone()), mir::Operand::Const(0), mir::Operand::var(at.clone())],
+                    vec![
+                        mir::Operand::var(sn.clone()),
+                        mir::Operand::Const(0),
+                        mir::Operand::var(at.clone()),
+                    ],
                 ),
             );
             let after_at = self.fresh_temp("long long");
@@ -8857,7 +9082,11 @@ impl Lower {
                 after.clone(),
                 mir::Rvalue::Call(
                     mir::Operand::Func("moira_str_sub".into()),
-                    vec![mir::Operand::var(sn), mir::Operand::var(after_at), mir::Operand::var(len)],
+                    vec![
+                        mir::Operand::var(sn),
+                        mir::Operand::var(after_at),
+                        mir::Operand::var(len),
+                    ],
                 ),
             );
             let pair = self.fresh_temp("Tuple<str,str>");
@@ -8901,7 +9130,11 @@ impl Lower {
                 head.clone(),
                 mir::Rvalue::Call(
                     mir::Operand::Func("moira_str_sub".into()),
-                    vec![mir::Operand::var(sn.clone()), mir::Operand::Const(0), i.clone()],
+                    vec![
+                        mir::Operand::var(sn.clone()),
+                        mir::Operand::Const(0),
+                        i.clone(),
+                    ],
                 ),
             );
             let tail = self.fresh_temp("str");
@@ -8970,9 +9203,15 @@ impl Lower {
         if matches!(method, "trim_end_matches" | "trim_start_matches") && args.len() == 1 {
             let s = self.lower_expr(recv)?;
             let (helper, pat) = if let ExprKind::Lit(ast::Lit::Char(_)) = &args[0].kind {
-                (format!("moira_str_{method}_char"), self.lower_expr(&args[0])?)
+                (
+                    format!("moira_str_{method}_char"),
+                    self.lower_expr(&args[0])?,
+                )
             } else {
-                (format!("moira_str_{method}_str"), self.pattern_string(&args[0])?)
+                (
+                    format!("moira_str_{method}_str"),
+                    self.pattern_string(&args[0])?,
+                )
             };
             let t = self.fresh_temp("char*");
             self.emit(
@@ -9067,7 +9306,10 @@ impl Lower {
             if let mir::Operand::Var(n) = &arg {
                 if matches!(self.temp_type_of(n).as_str(), "char**" | "str*") {
                     let d = self.fresh_temp("char*");
-                    self.emit(d.clone(), mir::Rvalue::Unary(mir::MirUnOp::Deref, arg.clone()));
+                    self.emit(
+                        d.clone(),
+                        mir::Rvalue::Unary(mir::MirUnOp::Deref, arg.clone()),
+                    );
                     arg = mir::Operand::var(d);
                 }
             }
@@ -9274,7 +9516,10 @@ impl Lower {
             return Ok(None);
         }
         // A string place: the old string moves out and the place becomes an empty string.
-        if matches!(self.hint_of_expr(place).as_deref(), Some("str") | Some("String")) {
+        if matches!(
+            self.hint_of_expr(place).as_deref(),
+            Some("str") | Some("String")
+        ) {
             return self.lower_mem_take_string(place).map(Some);
         }
         // The place's type from the checker, or, for a vector local whose element type was
@@ -9433,7 +9678,11 @@ impl Lower {
             // reference, the payload is the address of the value inside the option.
             // A string payload is already its own reference (`str` is the `char*`), so it is the
             // identity below, as the checker types it.
-            "as_ref" | "as_mut" if payload_ty != "long long" && !payload_ty.ends_with('*') && payload_ty != "str" => {
+            "as_ref" | "as_mut"
+                if payload_ty != "long long"
+                    && !payload_ty.ends_with('*')
+                    && payload_ty != "str" =>
+            {
                 let r = self.fresh_temp(format!("Option<{payload_ty}*>"));
                 let tag = self.fresh_temp("long long");
                 self.emit(
@@ -9500,7 +9749,14 @@ impl Lower {
                 );
                 self.set_term(mir::Terminator::Goto(join));
                 self.current = else_blk;
-                self.emit(r.clone(), mir::Rvalue::Use(mir::Operand::Const(if method == "is_none_or" { 1 } else { 0 })));
+                self.emit(
+                    r.clone(),
+                    mir::Rvalue::Use(mir::Operand::Const(if method == "is_none_or" {
+                        1
+                    } else {
+                        0
+                    })),
+                );
                 self.set_term(mir::Terminator::Goto(join));
                 self.current = join;
                 Ok(Some(mir::Operand::var(r)))
@@ -10475,7 +10731,11 @@ impl Lower {
         let cmp = self.fresh_temp("long long");
         self.emit(
             cmp.clone(),
-            mir::Rvalue::Binary(mir::MirBinOp::Ge, mir::Operand::var(name.to_string()), lo_op),
+            mir::Rvalue::Binary(
+                mir::MirBinOp::Ge,
+                mir::Operand::var(name.to_string()),
+                lo_op,
+            ),
         );
         self.set_term(mir::Terminator::If(mir::Operand::var(cmp), body_blk, exit));
 
@@ -14183,7 +14443,10 @@ impl Lower {
                             None => c,
                             Some(prev) => {
                                 let t = self.fresh_temp("long long");
-                                self.emit(t.clone(), mir::Rvalue::Binary(mir::MirBinOp::And, prev, c));
+                                self.emit(
+                                    t.clone(),
+                                    mir::Rvalue::Binary(mir::MirBinOp::And, prev, c),
+                                );
                                 mir::Operand::var(t)
                             }
                         });
@@ -14481,7 +14744,11 @@ fn build_run_wrapper(
 /// parameters copied from the call arguments. This is the value produced when an
 /// async call is used inside `.await` (as opposed to `__run`, which drives the
 /// future to completion).
-fn build_ctor_wrapper(f: &ast::Function, fut_struct: &str, aliases: &AliasTable) -> mir::MirFunction {
+fn build_ctor_wrapper(
+    f: &ast::Function,
+    fut_struct: &str,
+    aliases: &AliasTable,
+) -> mir::MirFunction {
     let mut func = mir::MirFunction {
         name: format!("{}__ctor", f.name.node),
         params: Vec::new(),

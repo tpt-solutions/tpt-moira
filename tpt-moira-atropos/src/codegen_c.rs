@@ -186,8 +186,8 @@ const C_RESERVED: &[&str] = &[
     "isdigit", "isalnum", "isxdigit", "isupper", "islower", "tolower", "toupper", "sqrt", "pow",
     "rand", "time", "clock", "assert", "remove", "rename", "system", "atoi", "atol", "strtol",
     // POSIX names that the C headers declare (`dirent.h` and MinGW's `io.h` declare `open`).
-    "open", "close", "read", "write", "access", "stat", "opendir", "readdir", "closedir",
-    "unlink", "mkdir", "getenv", "fopen", "fclose", "fread", "fwrite", "feof", "ferror",
+    "open", "close", "read", "write", "access", "stat", "opendir", "readdir", "closedir", "unlink",
+    "mkdir", "getenv", "fopen", "fclose", "fread", "fwrite", "feof", "ferror",
 ];
 
 /// The C spelling of a MIR name: a C reserved word gets a trailing `_`.
@@ -239,7 +239,9 @@ fn escape_function(f: &mut mir::MirFunction, defined: &std::collections::HashSet
         }
         let b = &mut f.blocks[bi];
         match &mut b.term {
-            mir::Terminator::If(op, _, _) | mir::Terminator::Switch(op, _, _) => escape_op(op, defined),
+            mir::Terminator::If(op, _, _) | mir::Terminator::Switch(op, _, _) => {
+                escape_op(op, defined)
+            }
             mir::Terminator::Return(Some(op)) => escape_op(op, defined),
             _ => {}
         }
@@ -483,7 +485,11 @@ fn mark_runtime_static(c: &str) -> String {
         {
             if let Some(paren) = body.find('(') {
                 let head = &body[..paren];
-                let name = head.rsplit(' ').next().unwrap_or("").trim_start_matches('*');
+                let name = head
+                    .rsplit(' ')
+                    .next()
+                    .unwrap_or("")
+                    .trim_start_matches('*');
                 if PREFIXES.iter().any(|p| name.starts_with(p)) {
                     out.push_str("static ");
                 }
@@ -842,7 +848,8 @@ fn slice_helpers(elem: &str, struct_names: &std::collections::HashSet<&str>) -> 
     let name = mir::slice_c_name(elem);
     let ec = c_type(elem, struct_names);
     let sub = mir::slice_fn_name(elem, "sub");
-    let contains = contains_helper(&name, &ec, &mir::slice_fn_name(elem, "contains")).unwrap_or_default();
+    let contains =
+        contains_helper(&name, &ec, &mir::slice_fn_name(elem, "contains")).unwrap_or_default();
     // A byte slice can view a string's bytes: `from_str(s)` aliases the NUL-terminated text.
     let from_str = if elem == "u8" {
         let f = mir::slice_fn_name(elem, "from_str");
@@ -944,7 +951,11 @@ fn vec_helpers(elem: &str, struct_names: &std::collections::HashSet<&str>) -> St
     // `to_vec` of a slice or vector: a new vector of the first `n` elements. String elements are
     // duplicated; other elements are copied by value.
     let copy_n = mir::vec_fn_name(elem, "copy_n");
-    let elem_copy = if ec == "char*" { "moira_str_dup(data[i])" } else { "data[i]" };
+    let elem_copy = if ec == "char*" {
+        "moira_str_dup(data[i])"
+    } else {
+        "data[i]"
+    };
     s.push_str(&format!(
         "static {name} {copy_n}({ec}* data, long long n) {{ {name} v = {new}(); for (long long i = 0; i < n; i++) {push}(&v, {elem_copy}); return v; }}
 "
@@ -979,14 +990,35 @@ fn vec_helpers(elem: &str, struct_names: &std::collections::HashSet<&str>) -> St
     ));
     let is_scalar = matches!(
         ec.as_str(),
-        "long long" | "unsigned long long" | "int" | "unsigned int" | "short" | "unsigned short"
-            | "char" | "unsigned char" | "signed char" | "_Bool" | "bool" | "double" | "float"
-            | "int64_t" | "uint64_t" | "int32_t" | "uint32_t" | "int16_t" | "uint16_t"
-            | "int8_t" | "uint8_t"
+        "long long"
+            | "unsigned long long"
+            | "int"
+            | "unsigned int"
+            | "short"
+            | "unsigned short"
+            | "char"
+            | "unsigned char"
+            | "signed char"
+            | "_Bool"
+            | "bool"
+            | "double"
+            | "float"
+            | "int64_t"
+            | "uint64_t"
+            | "int32_t"
+            | "uint32_t"
+            | "int16_t"
+            | "uint16_t"
+            | "int8_t"
+            | "uint8_t"
     );
     if ec == "char*" || is_scalar {
         let dedup = mir::vec_fn_name(elem, "dedup");
-        let same = if ec == "char*" { "strcmp(v->data[i], v->data[w - 1]) == 0" } else { "v->data[i] == v->data[w - 1]" };
+        let same = if ec == "char*" {
+            "strcmp(v->data[i], v->data[w - 1]) == 0"
+        } else {
+            "v->data[i] == v->data[w - 1]"
+        };
         s.push_str(&format!(
             "static long long {dedup}({name}* v) {{ if (v->len == 0) return 0; long long w = 1; for (long long i = 1; i < v->len; i++) if (!({same})) v->data[w++] = v->data[i]; v->len = w; return 0; }}
 "
@@ -1454,13 +1486,19 @@ fn map_helpers(
         "    r.tag = (i < 0) ? 1 : 0;\n    if (i >= 0) r.f0 = m->vals[i];\n    return r;\n}\n",
     );
     // `get_ptr`: a pointer to the value of `k`, or NULL (the checker's `Option<&V>` payload).
-    s.push_str(&format!("static {vc}* {get_ptr}({name}* m, {kc} k) {{
-"));
-    s.push_str(&format!("    long long i = {find}(m, k);
-"));
-    s.push_str("    return i < 0 ? NULL : &m->vals[i];
+    s.push_str(&format!(
+        "static {vc}* {get_ptr}({name}* m, {kc} k) {{
+"
+    ));
+    s.push_str(&format!(
+        "    long long i = {find}(m, k);
+"
+    ));
+    s.push_str(
+        "    return i < 0 ? NULL : &m->vals[i];
 }
-");
+",
+    );
     s.push_str(&format!(
         "static long long {contains}({name}* m, {kc} k) {{ return {find}(m, k) >= 0; }}\n"
     ));
@@ -1471,7 +1509,9 @@ fn map_helpers(
     s.push_str(&format!("    long long i = {find}(m, k);\n"));
     s.push_str("    r.tag = (i < 0) ? 1 : 0;\n");
     s.push_str("    if (i >= 0) {\n        r.f0 = m->vals[i];\n        m->len--;\n");
-    s.push_str("        m->keys[i] = m->keys[m->len];\n        m->vals[i] = m->vals[m->len];\n    }\n");
+    s.push_str(
+        "        m->keys[i] = m->keys[m->len];\n        m->vals[i] = m->vals[m->len];\n    }\n",
+    );
     s.push_str("    return r;\n}\n");
     // `entry(k).or_insert(v)`: a pointer to the value of `k`, inserting `v` first if absent.
     let entry = mir::map_fn_name(k, v, "entry_or_insert");

@@ -1380,7 +1380,8 @@ impl TypeChecker {
                     break;
                 }
             }
-            self.expr_types.insert((init_span.start, init_span.end), coll_ty);
+            self.expr_types
+                .insert((init_span.start, init_span.end), coll_ty);
         }
         self.env.pop();
         self.generic_scope.pop();

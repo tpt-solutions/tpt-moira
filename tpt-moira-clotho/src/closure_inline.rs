@@ -75,7 +75,9 @@ fn closure_param(f: &Function) -> Option<(usize, Vec<Type>)> {
         }
         match &ty.kind {
             TypeKind::Path(path, args)
-                if path.segments.len() == 1 && path.segments[0].node == "fn" && !args.is_empty() =>
+                if path.segments.len() == 1
+                    && path.segments[0].node == "fn"
+                    && !args.is_empty() =>
             {
                 Some((i, args.clone()))
             }
@@ -96,9 +98,10 @@ fn body_is_expandable(body: &Block, closure_fns: &HashSet<String>, allow_match: 
         &mut e,
         &mut ok,
         &mut |x: &mut Expr, ok: &mut bool| match &x.kind {
-            ExprKind::Return(_) | ExprKind::Try(_) | ExprKind::Macro(_) | ExprKind::Closure { .. } => {
-                *ok = false
-            }
+            ExprKind::Return(_)
+            | ExprKind::Try(_)
+            | ExprKind::Macro(_)
+            | ExprKind::Closure { .. } => *ok = false,
             ExprKind::Match(..) if !allow_match => *ok = false,
             ExprKind::For(pat, _, _) if !matches!(pat, Pat::Ident(_)) => *ok = false,
             ExprKind::Call(callee, _) => {
@@ -314,7 +317,8 @@ fn expand_call(e: &mut Expr, helpers: &HashMap<String, Helper>, fresh: &mut usiz
     );
     let closure_ret: Option<Type> = ret.clone().or_else(|| h.fn_args.last().cloned());
     let closure_param_tys: Vec<Type> = h.fn_args[..closure_arg_names.len()].to_vec();
-    let ret_is_unit = matches!(&closure_ret, Some(t) if matches!(&t.kind, TypeKind::Tuple(v) if v.is_empty()));
+    let ret_is_unit =
+        matches!(&closure_ret, Some(t) if matches!(&t.kind, TypeKind::Tuple(v) if v.is_empty()));
     let mut call_counter = 0usize;
     replace_closure_calls(
         &mut body_expr,
@@ -412,10 +416,7 @@ fn replace_closure_calls(root: &mut Expr, call: &ClosureCall<'_>, counter: &mut 
                         stmts,
                         tail: Some(Box::new(Expr {
                             kind: ExprKind::Path(Path {
-                                segments: vec![Spanned {
-                                    node: result,
-                                    span,
-                                }],
+                                segments: vec![Spanned { node: result, span }],
                             }),
                             span,
                         })),

@@ -1133,7 +1133,10 @@ impl Parser {
                     continue;
                 };
                 let init = local.init.clone().ok_or_else(|| {
-                    Diag::error("`let ... else` needs an initializer".to_string(), Some(Span::new(start, start)))
+                    Diag::error(
+                        "`let ... else` needs an initializer".to_string(),
+                        Some(Span::new(start, start)),
+                    )
                 })?;
                 let scrut_name = format!("__let_else_{start}");
                 let scrut_span = Span::new(start, start);

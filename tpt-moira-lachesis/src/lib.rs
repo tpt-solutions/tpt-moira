@@ -130,12 +130,18 @@ pub fn borrow_check_program_with_externs(
     let mir = tpt_moira_atropos::lower_program_for_borrow_check(prog, hints, &extra)
         .map_err(|e| vec![Diag::error(format!("lowering error: {e}"), None)])?;
     if timing {
-        eprintln!("moira: timing check/lower-to-MIR {:.3} ms", t.elapsed().as_secs_f64() * 1000.0);
+        eprintln!(
+            "moira: timing check/lower-to-MIR {:.3} ms",
+            t.elapsed().as_secs_f64() * 1000.0
+        );
     }
     let t = std::time::Instant::now();
     let result = borrow_check(&mir);
     if timing {
-        eprintln!("moira: timing check/NLL borrow-check {:.3} ms", t.elapsed().as_secs_f64() * 1000.0);
+        eprintln!(
+            "moira: timing check/NLL borrow-check {:.3} ms",
+            t.elapsed().as_secs_f64() * 1000.0
+        );
     }
     result
 }
@@ -159,7 +165,10 @@ pub fn check(prog: &Program) -> Result<(), Vec<Diag>> {
     let timing = std::env::var_os("MOIRA_TIMINGS").is_some();
     let stage = |name: &str, start: std::time::Instant| {
         if timing {
-            eprintln!("moira: timing check/{name} {:.3} ms", start.elapsed().as_secs_f64() * 1000.0);
+            eprintln!(
+                "moira: timing check/{name} {:.3} ms",
+                start.elapsed().as_secs_f64() * 1000.0
+            );
         }
     };
     let t = std::time::Instant::now();

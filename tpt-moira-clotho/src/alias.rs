@@ -177,7 +177,8 @@ impl AliasTable {
             1 => true,
             _ => {
                 let first = &path.segments[0].node;
-                matches!(first.as_str(), "crate" | "self" | "super") || first.starts_with("tpt_moira")
+                matches!(first.as_str(), "crate" | "self" | "super")
+                    || first.starts_with("tpt_moira")
             }
         };
         if !qualified_here {

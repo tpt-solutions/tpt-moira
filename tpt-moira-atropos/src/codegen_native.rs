@@ -322,7 +322,7 @@ fn emit_function_asm(func: &SsaFunction) -> Result<String, String> {
     }
 
     for (bi, block) in func.blocks.iter().enumerate() {
-        out.push_str(&format!("b{}:\n", bi));
+        out.push_str(&format!("{}_b{}:\n", func.name, bi));
         for &idx in &block.stmts {
             let v = &func.values[idx];
             let asm = em.emit_op(&v.op)?;
@@ -331,11 +331,11 @@ fn emit_function_asm(func: &SsaFunction) -> Result<String, String> {
             out.push_str(&format!("    pop {}\n", em.off(slot)));
         }
         match &block.term {
-            SsaTerm::Goto(t) => out.push_str(&format!("    jmp b{}\n", t)),
+            SsaTerm::Goto(t) => out.push_str(&format!("    jmp {}_b{}\n", func.name, t)),
             SsaTerm::If(c, _t, e) => {
                 out.push_str(&em.gen_val(c));
                 out.push_str("    pop rax\n    test rax, rax\n");
-                out.push_str(&format!("    jz b{}\n", e));
+                out.push_str(&format!("    jz {}_b{}\n", func.name, e));
             }
             SsaTerm::Return(Some(v)) => {
                 out.push_str(&em.gen_val(v));
@@ -388,9 +388,16 @@ pub fn emit_asm(prog: &SsaProgram) -> Result<String, String> {
     // is self-contained when linked with the system C compiler.
     out.push_str(
         "\nprint_i32:\n    mov rsi, rdi\n    lea rdi, [rip + .Lfmt]\n    xor eax, eax\n    \
-         call printf\n    ret\n.Lfmt:\n    db \"%lld\", 10, 0\n",
+         call printf\n    ret\n.Lfmt:\n    .asciz \"%lld\\n\"\n",
     );
 
+    // `print!` writers: no newline, so the caller ends the line with its own "\n" piece.
+    out.push_str(
+        "\n__moira_w_i64:\n    mov rsi, rdi\n    lea rdi, [rip + .Lfmt_w_i64]\n    xor eax, eax\n    \
+         call printf\n    ret\n.Lfmt_w_i64:\n    .asciz \"%lld\"\n__moira_w_str:\n    mov rsi, rdi\n    \
+         lea rdi, [rip + .Lfmt_w_str]\n    xor eax, eax\n    call printf\n    ret\n.Lfmt_w_str:\n    \
+         .asciz \"%s\"\n",
+    );
     Ok(out)
 }
 

@@ -335,26 +335,28 @@ fn main() {
                     std::process::exit(2);
                 }
             },
-            "--rustc-mode" => match args.get(i + 1) {
-                Some(m) => {
-                    match m.as_str() {
-                        "metadata" => rustc_mode = RustcMode::Metadata,
-                        "full" => rustc_mode = RustcMode::Full,
-                        "full-opt" => rustc_mode = RustcMode::FullOpt,
-                        other => {
-                            eprintln!(
+            "--rustc-mode" => {
+                match args.get(i + 1) {
+                    Some(m) => {
+                        match m.as_str() {
+                            "metadata" => rustc_mode = RustcMode::Metadata,
+                            "full" => rustc_mode = RustcMode::Full,
+                            "full-opt" => rustc_mode = RustcMode::FullOpt,
+                            other => {
+                                eprintln!(
                                 "error: --rustc-mode expects `metadata` or `full`, found `{other}`"
                             );
-                            std::process::exit(2);
+                                std::process::exit(2);
+                            }
                         }
+                        i += 1;
                     }
-                    i += 1;
+                    None => {
+                        eprintln!("error: --rustc-mode requires an argument (`metadata`|`full`|`full-opt`)");
+                        std::process::exit(2);
+                    }
                 }
-                None => {
-                    eprintln!("error: --rustc-mode requires an argument (`metadata`|`full`|`full-opt`)");
-                    std::process::exit(2);
-                }
-            },
+            }
             "--results" => match args.get(i + 1) {
                 Some(d) => {
                     results_dir = PathBuf::from(d);
@@ -477,8 +479,12 @@ fn run_benchmark(
         cc_label
     );
     if moira_mode == MoiraMode::E2e {
-        println!("  note: `--e2e` times `moira --emit c` and `cc -O2` together against rustc's full");
-        println!("        build. Record it in its own results directory (`--results`), not the default.");
+        println!(
+            "  note: `--e2e` times `moira --emit c` and `cc -O2` together against rustc's full"
+        );
+        println!(
+            "        build. Record it in its own results directory (`--results`), not the default."
+        );
     }
     if moira_mode == MoiraMode::Check {
         println!("  note: `--full` measures Moira's complete semantic pipeline; the rustc");

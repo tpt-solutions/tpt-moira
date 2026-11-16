@@ -92,7 +92,11 @@ pub fn monomorphize(prog: &Program, externs: &[(&str, &Program)]) -> Program {
         .map(|(k, st)| {
             (
                 k.clone(),
-                st.generics.params.iter().map(|p| p.name.node.clone()).collect(),
+                st.generics
+                    .params
+                    .iter()
+                    .map(|p| p.name.node.clone())
+                    .collect(),
             )
         })
         .collect();
