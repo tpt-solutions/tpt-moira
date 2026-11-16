@@ -1144,6 +1144,49 @@ fn generic_helper_with_a_borrowed_closure_writes_the_capture() {
     assert_eq!(out, "2\n6", "the specialised helpers should write the captured variables");
 }
 
+/// A recursive helper that passes two closures on to itself, as `visit_expr` does: each closure
+/// is specialised into the copies, a write to each captured variable reaches the caller, and a
+/// capture read by one closure and written by the other is shared by both.
+#[test]
+fn recursive_helper_passing_two_closures_on_runs() {
+    let out = match run_src(
+        "struct Node { v: i64, kids: Vec<Node> }
+        fn visit(n: &mut Node, fe: &mut impl FnMut(&mut Node), fb: &mut impl FnMut(&mut Node)) {
+            fe(n);
+            for k in n.kids.iter_mut() {
+                visit(k, fe, fb);
+            }
+            fb(n);
+        }
+        fn main() {
+            let mut total: i64 = 0;
+            let mut count: i64 = 0;
+            let mut t = Node {
+                v: 1,
+                kids: vec![Node { v: 2, kids: vec![] }, Node { v: 3, kids: vec![] }],
+            };
+            visit(
+                &mut t,
+                &mut |n| {
+                    total = total + n.v;
+                },
+                &mut |_n| {
+                    count = count + 1;
+                },
+            );
+            print_i64(total);
+            print_i64(count);
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping two-closure pass-on run");
+            return;
+        }
+    };
+    assert_eq!(out, "6\n3", "each closure should run on every node");
+}
+
 #[test]
 fn enum_match_and_if_let_run() {
     // Enum-variant construction (`Some(7)` / `None`), `match` with

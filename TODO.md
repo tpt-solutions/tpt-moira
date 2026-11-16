@@ -710,6 +710,19 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
             the checker types it so; test `option_as_ref_over_string_and_integer_runs`.)
             `Arc<TypeHints>` fields in the compiler's own lowering (cross-crate smart pointer),
             and `Hasher::finish`.
+          - Status (2026-11-16, pass-on): a generic or `impl FnMut` helper that takes several
+            capturing closures and passes them on to itself (`visit_expr`) is specialised for all
+            of them at once. The copy takes the union of their captures as leading parameters
+            (a capture any closure writes is a pointer, shared by all), each closure parameter is
+            bound to its lifted function, and the call passes the same operands. A recursive call
+            inside the copy reuses it. Test: `recursive_helper_passing_two_closures_on_runs`.
+            The `a call passes more than one capturing closure` error is gone, and so are the
+            capture-passing blockers in clotho's `visit_expr` callers. The self-host count reads
+            140: the probe reports the first error per function, so functions that got past the
+            capture errors now report the next gap (method and receiver typing), which the
+            probe used to hide. Remaining capture-related blockers are in `Lower__literal_captures`,
+            `insert_captures` and `Mono__captures_of`, which are methods on types the codegen
+            does not model yet.
           - Status (2026-11-16, closure values through specialisation): the route that works now
             is specialisation, not a new closure ABI. A generic helper taking its closure as
             `F`, `&mut F` or `impl FnMut` is specialised for each closure literal or bound
