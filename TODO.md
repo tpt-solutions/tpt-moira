@@ -114,7 +114,15 @@ Target: compile a strict subset of Rust (no complex trait resolution, no async/a
       Tests: `tpt-moira-atropos/tests/native.rs` and `tpt-moira-lachesis/tests/native_structs.rs`.
       **Still missing:** `Vec` (it needs heap storage and helper routines in assembly), tuples,
       arrays, floats and enums. Run-time performance of the generated code is not measured.
-      Next: `Vec`, then time run-time performance against `rustc -O`.
+      **Bugs found and fixed while measuring (2026-11-17):** a conditional branch fell through to
+      the next block in layout order instead of jumping to its then block, so an `if` body was
+      skipped when it was not next (this gave wrong results, not a crash); and the native build
+      wrote its assembly to one shared file, so parallel builds overwrote each other.
+      **Run time (median of 5, same integer programs, outputs match):** native is about 0.2x
+      the speed of `rustc -O` and of the C build (k=50: 1167 ms native, 241 ms `rustc -O`,
+      188 ms gcc -O2; k=200: 4852, 891 and 683 ms). The gap is code quality: every value is
+      spilled to a stack slot. Closing it needs register allocation, a separate project.
+      Next: `Vec`.
     - **End-to-end build speed (2026-11-17).** Cause of the 0.42x: every generated C file
       carried the whole runtime, and its non-`static` helpers were compiled at full `gcc -O2`
       even when unused (about 220 ms of the 346 ms on `xlarge`). `mark_runtime_static`

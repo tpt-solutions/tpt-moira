@@ -548,10 +548,12 @@ fn emit_function_asm(
         }
         match &block.term {
             SsaTerm::Goto(t) => out.push_str(&format!("    jmp {}_b{}\n", func.name, t)),
-            SsaTerm::If(c, _t, e) => {
+            SsaTerm::If(c, t, e) => {
                 out.push_str(&em.gen_val(c));
                 out.push_str("    pop rax\n    test rax, rax\n");
                 out.push_str(&format!("    jz {}_b{}\n", func.name, e));
+                // Fall-through is the next block in layout order, not necessarily the then block.
+                out.push_str(&format!("    jmp {}_b{}\n", func.name, t));
             }
             SsaTerm::Return(Some(v)) => {
                 out.push_str(&em.gen_val(v));
@@ -764,7 +766,13 @@ pub fn compile_to_native(prog: &SsaProgram, out_path: &Path) -> Result<(), Strin
     })?;
 
     let dir = out_path.parent().unwrap_or_else(|| Path::new("."));
-    let asm_path = dir.join("moira_native.s");
+    // The assembly is named after the output, so builds that run at the same time (in one
+    // directory) do not overwrite each other's intermediate file.
+    let stem = out_path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "moira".to_string());
+    let asm_path = dir.join(format!("{stem}.moira_native.s"));
     std::fs::write(&asm_path, asm).map_err(|e| format!("write asm: {e}"))?;
 
     let status = Command::new(&cc)

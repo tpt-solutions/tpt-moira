@@ -53,3 +53,26 @@ fn native_arithmetic_branches_loops_and_strings_run() {
     assert_eq!(out, "23\n3\n3\n4\n42\n45\ndone 45\n", "native output should match Rust");
 }
 
+
+#[test]
+fn native_if_then_block_out_of_layout_order_runs() {
+    // The then block of an `if` is not the next block in layout order: the branch must jump to it.
+    let out = match build_and_run(
+        "ifthen",
+        "fn f(n: i64) -> i64 {
+            let mut acc: i64 = 0;
+            let mut i: i64 = 0;
+            while i < n {
+                acc = acc + i * 1 - (i % 7);
+                if acc > 1000000 { acc = acc - 1000000; }
+                i = i + 1;
+            }
+            acc
+        }
+        fn main() { print_i64(f(100000)); print_i64(f(3000000)); }",
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "650005\n1999993500006\n", "the then block must run when the condition holds");
+}
