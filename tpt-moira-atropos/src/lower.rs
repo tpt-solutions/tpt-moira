@@ -692,6 +692,8 @@ struct IterChain<'a> {
     keyed: bool,
     /// A sorted set (`BTreeSet`): its items come in ascending key order, read through `rank`.
     sorted: bool,
+    /// The source is reversed (`v.iter().rev()`): the items come from the last element back.
+    rev: bool,
     stages: Vec<(String, Option<&'a Expr>)>,
 }
 
@@ -3319,6 +3321,7 @@ impl Lower {
     fn iter_chain_of<'a>(&self, e: &'a Expr) -> Option<IterChain<'a>> {
         let mut stages: Vec<(String, Option<&'a Expr>)> = Vec::new();
         let mut cur: &'a Expr = unparen(e);
+        let mut reversed = false;
         loop {
             // A range source: `(lo..hi).map(..)` iterates the integers.
             if let Some((Some(lo), Some(hi), inclusive)) = range_bounds(cur) {
@@ -3332,6 +3335,7 @@ impl Lower {
                     split: None,
                     mapview: None,
                     setop: None,
+                    rev: false,
                     stages,
                 });
             }
@@ -3341,6 +3345,14 @@ impl Lower {
             };
             let name = m.node.as_str();
             match name {
+                "rev" if args.is_empty() => {
+                    // `.rev()` reverses the source only when it is directly on a sequence's `iter()`.
+                    match &r.kind {
+                        ExprKind::MethodCall(_, m2, a2) if m2.node == "iter" && a2.is_empty() => {}
+                        _ => return None,
+                    }
+                    reversed = true;
+                }
                 "iter" | "into_iter" if args.is_empty() => {
                     stages.reverse();
                     let seq: &'a Expr = r;
@@ -3354,6 +3366,7 @@ impl Lower {
                             split: None,
                             mapview: None,
                             setop: None,
+                            rev: reversed,
                             stages,
                         })
                     } else if let Some(sorted) = self.set_source_kind(seq) {
@@ -3369,6 +3382,7 @@ impl Lower {
                             split: None,
                             mapview: None,
                             setop: None,
+                            rev: false,
                             stages,
                         })
                     } else {
@@ -3406,6 +3420,7 @@ impl Lower {
                         split: None,
                         setop: None,
                         mapview: Some((&**r, name == "values")),
+                        rev: false,
                         stages,
                     });
                 }
@@ -3427,6 +3442,7 @@ impl Lower {
                         split: None,
                         mapview: None,
                         setop: Some((&**r, other, name == "union")),
+                        rev: false,
                         stages,
                     });
                 }
@@ -3442,6 +3458,7 @@ impl Lower {
                         split: Some((&**r, &args[0])),
                         mapview: None,
                         setop: None,
+                        rev: false,
                         stages,
                     });
                 }
@@ -3459,6 +3476,7 @@ impl Lower {
                         split: None,
                         mapview: None,
                         setop: None,
+                        rev: false,
                         stages,
                     });
                 }
@@ -3679,6 +3697,40 @@ impl Lower {
         // The source: a sequence's name, element type and pointer-ness, or a range's
         // bounds (lowered now, before the loop).
         let source = match (chain.seq, chain.range) {
+            // `.rev()`: the loop walks a reversed copy of the sequence, so the copy is what the
+            // adapters and the terminal see (the source itself is left as it was).
+            (Some(seq), _) if chain.rev => {
+                let (sn, selem, sptr) = self.chain_sequence(seq)?;
+                let data = self.fresh_temp(format!("{selem}*"));
+                self.emit(
+                    data.clone(),
+                    mir::Rvalue::Field(mir::Operand::var(sn.clone()), "data".into(), sptr),
+                );
+                let len = self.fresh_temp("long long");
+                self.emit(
+                    len.clone(),
+                    mir::Rvalue::Field(mir::Operand::var(sn), "len".into(), sptr),
+                );
+                let copy = self.fresh_temp(mir::vec_type(&selem));
+                self.emit(
+                    copy.clone(),
+                    mir::Rvalue::Call(
+                        mir::Operand::Func(mir::vec_fn_name(&selem, "copy_n")),
+                        vec![mir::Operand::var(data), mir::Operand::var(len)],
+                    ),
+                );
+                let ptr = self.fresh_temp(format!("{}*", mir::vec_type(&selem)));
+                self.emit(ptr.clone(), mir::Rvalue::Ref(mir::Operand::var(copy.clone()), true));
+                let reversed = self.fresh_temp("long long");
+                self.emit(
+                    reversed,
+                    mir::Rvalue::Call(
+                        mir::Operand::Func(mir::vec_fn_name(&selem, "reverse")),
+                        vec![mir::Operand::var(ptr)],
+                    ),
+                );
+                Ok((copy, selem, false))
+            }
             (Some(seq), _) => Ok(self.chain_sequence(seq)?),
             (None, Some((lo, hi, inclusive))) => {
                 let lo_op = self.lower_expr(lo)?;
@@ -6973,6 +7025,61 @@ impl Lower {
         Ok(mir::Operand::Unit)
     }
 
+    /// `base.f.clear()`, `base.f.reverse()`, `base.f.remove(i)` on a vector field: the field is
+    /// read into a local, the vector helper works on a pointer to that local, and the field is
+    /// written back. `remove` returns the removed element. `None` if the field is not a vector.
+    fn lower_vec_field_helper(
+        &mut self,
+        base: &Expr,
+        field: &ast::Spanned<String>,
+        recv: &Expr,
+        method: &str,
+        args: &[Expr],
+    ) -> Result<Option<mir::Operand>> {
+        let Some(hint) = self.hint_of_expr(recv) else {
+            return Ok(None);
+        };
+        let Some(elem) = mir::vec_elem(&hint).map(|s| s.to_string()) else {
+            return Ok(None);
+        };
+        let b = self.lower_expr(base)?;
+        let bname = match &b {
+            mir::Operand::Var(n) => n.clone(),
+            _ => return Err(LowerError("a vector field needs a named struct".into())),
+        };
+        let ptr_base = self.scrutinee_is_pointer(&b);
+        let cur = self.fresh_temp(mir::vec_type(&elem));
+        self.emit(
+            cur.clone(),
+            mir::Rvalue::Field(mir::Operand::var(bname.clone()), field.node.clone(), ptr_base),
+        );
+        let ptr = self.fresh_temp(format!("{}*", mir::vec_type(&elem)));
+        self.emit(ptr.clone(), mir::Rvalue::Ref(mir::Operand::var(cur.clone()), true));
+        let mut operands = vec![mir::Operand::var(ptr)];
+        for a in args {
+            self.expect_ty = Some(elem.clone());
+            let o = self.lower_expr(a);
+            self.expect_ty = None;
+            operands.push(o?);
+        }
+        let result_ty = if method == "remove" { elem.clone() } else { "long long".to_string() };
+        let t = self.fresh_temp(result_ty);
+        self.emit(
+            t.clone(),
+            mir::Rvalue::Call(mir::Operand::Func(mir::vec_fn_name(&elem, method)), operands),
+        );
+        self.emit(
+            "__scratch".to_string(),
+            mir::Rvalue::StoreField(
+                mir::Operand::var(bname),
+                field.node.clone(),
+                mir::Operand::var(cur),
+                ptr_base,
+            ),
+        );
+        Ok(Some(if method == "remove" { mir::Operand::var(t) } else { mir::Operand::Unit }))
+    }
+
     /// `base.f.push(x)` / `base.f.extend(v)` on a vector field: the field is read into a local,
     /// the local grows, and the field is written back. `None` for other receivers.
     fn lower_vec_field_method(
@@ -6984,6 +7091,9 @@ impl Lower {
         let ExprKind::Field(base, field) = &recv.kind else {
             return Ok(None);
         };
+        if matches!(method, "clear" | "reverse" | "remove") {
+            return self.lower_vec_field_helper(base, field, recv, method, args);
+        }
         if !(method == "push" || method == "extend" || method == "append") || args.len() != 1 {
             return Ok(None);
         }
@@ -9124,6 +9234,10 @@ impl Lower {
         if !matches!(place.kind, ExprKind::Path(_) | ExprKind::Field(..)) {
             return Ok(None);
         }
+        // A string place: the old string moves out and the place becomes an empty string.
+        if matches!(self.hint_of_expr(place).as_deref(), Some("str") | Some("String")) {
+            return self.lower_mem_take_string(place).map(Some);
+        }
         // The place's type from the checker, or, for a vector local whose element type was
         // only fixed by a later `push`, the local's own lowered type.
         let elem = match self.hint_of_expr(place).as_deref().and_then(mir::vec_elem) {
@@ -9165,6 +9279,38 @@ impl Lower {
             _ => {}
         }
         Ok(Some(mir::Operand::var(old)))
+    }
+
+    /// `std::mem::take(&mut place)` for a string place (a local or a field): the old string
+    /// is returned and the place is set to an empty string.
+    fn lower_mem_take_string(&mut self, place: &Expr) -> Result<mir::Operand> {
+        let old_src = self.lower_expr(place)?;
+        let old = self.fresh_temp("char*");
+        self.emit(old.clone(), mir::Rvalue::Use(old_src));
+        let empty = self.heap_string(mir::Operand::CStr(String::new()))?;
+        match &place.kind {
+            ExprKind::Path(_) => match self.lower_expr(place)? {
+                mir::Operand::Var(n) => self.emit(n, mir::Rvalue::Use(empty)),
+                _ => return Err(LowerError("mem::take target must be a variable".into())),
+            },
+            ExprKind::Field(base, field) => {
+                let b = self.lower_expr(base)?;
+                let deref = match &b {
+                    mir::Operand::Var(n) => self.temp_type_of(n).ends_with('*'),
+                    _ => false,
+                };
+                let fname = match field.node.parse::<usize>() {
+                    Ok(i) => format!("f{i}"),
+                    Err(_) => field.node.clone(),
+                };
+                self.emit(
+                    "__scratch".to_string(),
+                    mir::Rvalue::StoreField(b, fname, empty, deref),
+                );
+            }
+            _ => {}
+        }
+        Ok(mir::Operand::var(old))
     }
 
     fn lower_enum_method(
@@ -10887,7 +11033,8 @@ impl Lower {
                 // `String::from(s)`: a string is already its `char*`, so the value is `s`.
                 if let ExprKind::Path(p) = &callee.kind {
                     let segs: Vec<&str> = p.segments.iter().map(|s| s.node.as_str()).collect();
-                    if segs == ["String", "from"] && args.len() == 1 {
+                    // `PathBuf::from(s)` is the same text: a path is modelled as its string.
+                    if (segs == ["String", "from"] || segs == ["PathBuf", "from"]) && args.len() == 1 {
                         let v = self.lower_expr(&args[0])?;
                         return self.heap_string(v);
                     }
@@ -10932,6 +11079,12 @@ impl Lower {
                         return Ok(mir::Operand::var(r));
                     }
                     if segs == ["String", "new"] && args.is_empty() {
+                        return self.heap_string(mir::Operand::CStr(String::new()));
+                    }
+                    // `String::with_capacity(n)`: the capacity hint is not used by the
+                    // runtime, so this is an empty string. The argument is still evaluated.
+                    if segs == ["String", "with_capacity"] && args.len() == 1 {
+                        self.lower_expr(&args[0])?;
                         return self.heap_string(mir::Operand::CStr(String::new()));
                     }
                 }
@@ -11754,6 +11907,17 @@ impl Lower {
                 Ok(mir::Operand::Unit)
             }
             ExprKind::Match(scrutinee, arms) => self.lower_match(scrutinee, arms),
+            // `find_map(f)` is `filter_map(f)` followed by `next()`: the first payload of a
+            // `Some` the closure returns, as an `Option`.
+            ExprKind::MethodCall(recv, method, args)
+                if method.node == "find_map" && args.len() == 1 && self.iter_chain_of(recv).is_some() =>
+            {
+                let mut chain = self
+                    .iter_chain_of(recv)
+                    .expect("guard checked the chain");
+                chain.stages.push(("filter_map".to_string(), Some(&args[0])));
+                self.lower_iter_chain(e, chain, "next", &[])
+            }
             ExprKind::MethodCall(recv, method, args)
                 if is_iter_terminal(&method.node)
                     && (args.is_empty()
@@ -12025,6 +12189,7 @@ impl Lower {
                         "remove" | "append" if !slice_local && args.len() == 1 => {
                             Some(method.node.clone())
                         }
+                        "insert" if !slice_local && args.len() == 2 => Some(method.node.clone()),
                         // Strings compare by content; scalars with `==`.
                         "contains"
                             if args.len() == 1
@@ -12044,14 +12209,16 @@ impl Lower {
                             mir::Operand::var(p)
                         };
                         let mut operands = vec![recv_ptr];
-                        for a in args {
+                        for (k, a) in args.iter().enumerate() {
                             // `contains(&x)` takes the element itself: the helper compares values.
                             let value: &Expr = match &a.kind {
                                 ExprKind::Ref(inner, _) if method.node == "contains" => inner,
                                 _ => a,
                             };
-                            // The pushed value has the element type (a tuple takes it).
-                            self.expect_ty = Some(elem.clone());
+                            // The pushed value has the element type (a tuple takes it). The index
+                            // of `insert(i, x)` is an integer, not an element.
+                            let is_index = method.node == "insert" && k == 0;
+                            self.expect_ty = if is_index { None } else { Some(elem.clone()) };
                             let o = self.lower_expr(value);
                             self.expect_ty = None;
                             operands.push(o?);

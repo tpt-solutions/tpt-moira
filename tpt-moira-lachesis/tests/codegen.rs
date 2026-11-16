@@ -302,7 +302,10 @@ fn let_else_runs_the_else_block_when_the_pattern_fails() {
             return;
         }
     };
-    assert_eq!(out, "8\n-1", "the else block must run when the pattern does not match");
+    assert_eq!(
+        out, "8\n-1",
+        "the else block must run when the pattern does not match"
+    );
 }
 
 /// `s.as_bytes()` is a `&[u8]` over the string's bytes: it has the string's length, indexes
@@ -337,7 +340,10 @@ fn as_bytes_views_the_string_bytes_and_runs() {
             return;
         }
     };
-    assert_eq!(out, "2\n66\n131\n0\n3", "as_bytes should view the string's bytes");
+    assert_eq!(
+        out, "2\n66\n131\n0\n3",
+        "as_bytes should view the string's bytes"
+    );
 }
 
 /// `v.contains(&x)` compares the element with `x`: the reference is not passed to the
@@ -363,7 +369,10 @@ fn contains_with_a_reference_compares_scalar_elements() {
             return;
         }
     };
-    assert_eq!(out, "true\ntrue\nfalse", "contains(&x) should compare values");
+    assert_eq!(
+        out, "true\ntrue\nfalse",
+        "contains(&x) should compare values"
+    );
 }
 
 /// A `vec![..]` literal passed to a map's `insert` takes the map's value type: the element
@@ -384,7 +393,10 @@ fn vec_literal_as_map_value_takes_the_value_type() {
             return;
         }
     };
-    assert_eq!(out, "1", "the inserted vector should have the map's value type");
+    assert_eq!(
+        out, "1",
+        "the inserted vector should have the map's value type"
+    );
 }
 
 /// `Option::is_none_or(f)`: an absent option is `true`, a present one applies `f`.
@@ -406,7 +418,10 @@ fn option_is_none_or_runs_for_both_variants() {
             return;
         }
     };
-    assert_eq!(out, "true\nfalse\ntrue", "is_none_or should test only a present payload");
+    assert_eq!(
+        out, "true\nfalse\ntrue",
+        "is_none_or should test only a present payload"
+    );
 }
 
 /// `filter_map` keeps the payloads of the `Some` results and drops the `None`s, and the
@@ -429,7 +444,10 @@ fn filter_map_keeps_some_payloads_for_sum_and_collect() {
             return;
         }
     };
-    assert_eq!(out, "120\n2\n105", "filter_map should keep only the Some payloads");
+    assert_eq!(
+        out, "120\n2\n105",
+        "filter_map should keep only the Some payloads"
+    );
 }
 
 /// `Result::map` maps the `Ok` payload and passes an `Err` through; `Result::map_err` maps
@@ -460,7 +478,10 @@ fn result_map_and_map_err_map_one_arm_and_pass_the_other() {
             return;
         }
     };
-    assert_eq!(out, "7\n7\n4\n-5", "map maps Ok and passes Err; map_err maps Err and passes Ok");
+    assert_eq!(
+        out, "7\n7\n4\n-5",
+        "map maps Ok and passes Err; map_err maps Err and passes Ok"
+    );
 }
 
 /// `r.map(Some)` wraps an `Ok` payload in an `Option`: the mapping function is the bare
@@ -519,7 +540,10 @@ fn vec_reverse_remove_and_append_run() {
             return;
         }
     };
-    assert_eq!(out, "4\n1\n3\n3\n2\n3\n0\n3", "reverse, remove and append should match Rust");
+    assert_eq!(
+        out, "4\n1\n3\n3\n2\n3\n0\n3",
+        "reverse, remove and append should match Rust"
+    );
 }
 
 /// `Option::or(other)` is the receiver when it holds a value, else `other`.
@@ -579,7 +603,10 @@ fn user_function_named_like_a_c_library_call_runs() {
             return;
         }
     };
-    assert_eq!(out, "5\n3", "a user `exit` must not collide with the C `exit`");
+    assert_eq!(
+        out, "5\n3",
+        "a user `exit` must not collide with the C `exit`"
+    );
 }
 
 /// `for part in s.split(sep)` yields the pieces between separators, empty ones included, as
@@ -606,7 +633,10 @@ fn for_over_str_split_yields_rust_pieces() {
             return;
         }
     };
-    assert_eq!(out, "[a]\n[]\n[b]\n[]\n2", "split should yield every piece, empty ones included");
+    assert_eq!(
+        out, "[a]\n[]\n[b]\n[]\n2",
+        "split should yield every piece, empty ones included"
+    );
 }
 
 /// `s.split(sep)` as an iterator chain source: `collect` into a `Vec<&str>`, a `map` and
@@ -630,7 +660,10 @@ fn split_chain_collects_maps_and_counts_pieces() {
             return;
         }
     };
-    assert_eq!(out, "4\n0\n6\n4", "split should be a chain source of its pieces");
+    assert_eq!(
+        out, "4\n0\n6\n4",
+        "split should be a chain source of its pieces"
+    );
 }
 
 /// `let x: T = s.parse().unwrap()` and `.unwrap_or(d)` for a numeric `T`: a signed or unsigned
@@ -663,7 +696,10 @@ fn let_parse_unwrap_takes_the_annotated_numeric_type() {
             return;
         }
     };
-    assert_eq!(out, "43\n-7\n-3\n9\n5", "parse should take the annotated type");
+    assert_eq!(
+        out, "43\n-7\n-3\n9\n5",
+        "parse should take the annotated type"
+    );
 }
 
 /// `to_string()` on a reference to a string (a `HashMap::get` payload, which is a pointer)
@@ -695,7 +731,10 @@ fn to_string_through_a_string_reference_copies_the_string() {
             return;
         }
     };
-    assert_eq!(out, "int\nnone", "to_string should read through the reference");
+    assert_eq!(
+        out, "int\nnone",
+        "to_string should read through the reference"
+    );
 }
 
 /// `len()` and `is_empty()` on a fixed-size array (a local or a constant) are its length, and
@@ -723,7 +762,10 @@ fn fixed_array_len_and_integer_max_min_run() {
             return;
         }
     };
-    assert_eq!(out, "2\nfalse\n3\n9\n3\n4", "array length and integer max/min should match Rust");
+    assert_eq!(
+        out, "2\nfalse\n3\n9\n3\n4",
+        "array length and integer max/min should match Rust"
+    );
 }
 
 /// `HashMap::get_mut` gives a mutable view of the value (a write through it persists), and
@@ -760,7 +802,10 @@ fn map_get_mut_writes_through_and_iterator_nth_indexes() {
             return;
         }
     };
-    assert_eq!(out, "6\n0\ntrue\n0\n6", "get_mut should write through and nth should index");
+    assert_eq!(
+        out, "6\n0\ntrue\n0\n6",
+        "get_mut should write through and nth should index"
+    );
 }
 
 /// `Option::as_ref()` on an `Option<String>` and on an `Option<i64>`: the view has the
@@ -790,7 +835,10 @@ fn option_as_ref_over_string_and_integer_runs() {
             return;
         }
     };
-    assert_eq!(out, "true\n2\n5", "as_ref should view the payload with its checked type");
+    assert_eq!(
+        out, "true\n2\n5",
+        "as_ref should view the payload with its checked type"
+    );
 }
 
 /// `HashSet::intersection(&b)` keeps the keys of `a` that `b` holds, `union(&b)` keeps every key
@@ -855,7 +903,10 @@ fn set_operation_through_a_reference_parameter() {
             return;
         }
     };
-    assert_eq!(out, "1", "a set behind a reference should intersect like an owned set");
+    assert_eq!(
+        out, "1",
+        "a set behind a reference should intersect like an owned set"
+    );
 }
 
 /// `Vec::clear` empties a vector of any element type; `Vec::dedup` drops consecutive equal
@@ -913,7 +964,10 @@ fn map_values_and_keys_are_iterator_sources() {
             return;
         }
     };
-    assert_eq!(out, "5\n2\n3", "map keys and values should iterate as Rust does");
+    assert_eq!(
+        out, "5\n2\n3",
+        "map keys and values should iterate as Rust does"
+    );
 }
 
 /// `Option::as_mut()` views the payload mutably: a write through it persists in the option.
@@ -974,7 +1028,10 @@ fn split_once_and_vec_split_last_run() {
             return;
         }
     };
-    assert_eq!(out, "key val=x\n2\n3\n2\n0", "split_once and split_last should match Rust");
+    assert_eq!(
+        out, "key val=x\n2\n3\n2\n0",
+        "split_once and split_last should match Rust"
+    );
 }
 
 /// Constructors and `None` take the type the context expects: a returned tuple's components
@@ -1011,7 +1068,10 @@ fn constructors_take_the_expected_type_in_returns_and_pushes() {
             return;
         }
     };
-    assert_eq!(out, "0\ntrue\n3\n0\n1", "constructors should take the expected type");
+    assert_eq!(
+        out, "0\ntrue\n3\n0\n1",
+        "constructors should take the expected type"
+    );
 }
 
 /// A closure passed for an `impl Fn(A) -> R` parameter takes `A` and `R` from it: a struct
@@ -1031,7 +1091,10 @@ fn closure_parameters_take_the_declared_struct_and_result_types() {
             return;
         }
     };
-    assert_eq!(out, "7", "the closure should receive an Option and return an i64");
+    assert_eq!(
+        out, "7",
+        "the closure should receive an Option and return an i64"
+    );
 }
 
 /// A helper that takes a closure is expanded at its call site: the closure body runs where the
@@ -1072,7 +1135,10 @@ fn helper_taking_a_closure_is_expanded_at_its_call_site() {
             return;
         }
     };
-    assert_eq!(out, "2\n19", "the expanded helper should write the captured variable");
+    assert_eq!(
+        out, "2\n19",
+        "the expanded helper should write the captured variable"
+    );
 }
 
 /// A let-bound closure that writes a captured variable writes the caller's variable: the
@@ -1141,7 +1207,10 @@ fn generic_helper_with_a_borrowed_closure_writes_the_capture() {
             return;
         }
     };
-    assert_eq!(out, "2\n6", "the specialised helpers should write the captured variables");
+    assert_eq!(
+        out, "2\n6",
+        "the specialised helpers should write the captured variables"
+    );
 }
 
 /// A recursive helper that passes two closures on to itself, as `visit_expr` does: each closure
@@ -1212,7 +1281,173 @@ fn path_text_methods_run() {
             return;
         }
     };
-    assert_eq!(out, "dir/sub\ntrue\nfalse\na/b", "path methods should match Rust");
+    assert_eq!(
+        out, "dir/sub\ntrue\nfalse\na/b",
+        "path methods should match Rust"
+    );
+}
+
+/// `v.iter().rev()` walks the sequence from its last element; the source is left unchanged.
+#[test]
+fn iter_rev_chain_reverses_the_source_run() {
+    let out = match run_src(
+        "fn main() {
+            let v: Vec<i32> = vec![1, 2, 3];
+            let w: Vec<i32> = v.iter().rev().cloned().collect();
+            println!(\"{} {} {} {}\", w[0], w[1], w[2], v[0]);
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping rev chain run");
+            return;
+        }
+    };
+    assert_eq!(out, "3 2 1 1", "rev should walk from the last element");
+}
+
+/// `insert(i, x)` puts the element at index `i` (front, middle and end).
+#[test]
+fn vec_insert_at_each_position_run() {
+    let out = match run_src(
+        "fn main() {
+            let mut v: Vec<i32> = vec![1, 3];
+            v.insert(1, 2);
+            v.insert(0, 0);
+            v.insert(4, 4);
+            println!(\"{} {} {} {} {} {}\", v.len(), v[0], v[1], v[2], v[3], v[4]);
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping insert run");
+            return;
+        }
+    };
+    assert_eq!(
+        out, "5 0 1 2 3 4",
+        "insert should place each element at its index"
+    );
+}
+
+/// `remove`, `reverse` and `clear` on a vector field write the change back into the struct.
+#[test]
+fn vec_field_remove_reverse_clear_run() {
+    let out = match run_src(
+        "struct Store { items: Vec<i32> }
+        impl Store {
+            fn drop_first(&mut self) -> i32 { self.items.remove(0) }
+            fn flip(&mut self) { self.items.reverse(); }
+            fn clear_all(&mut self) { self.items.clear(); }
+        }
+        fn main() {
+            let mut s = Store { items: vec![1, 2, 3, 4] };
+            println!(\"{}\", s.drop_first());
+            s.flip();
+            println!(\"{}\", s.items.len());
+            s.clear_all();
+            println!(\"{}\", s.items.len());
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping vec field run");
+            return;
+        }
+    };
+    assert_eq!(out, "1\n3\n0", "field vector helpers should write back");
+}
+
+/// `find_map` returns the first `Some` the closure produces, and `None` when there is none.
+#[test]
+fn find_map_returns_first_some_run() {
+    let out = match run_src(
+        "fn pick(v: &Vec<i32>, limit: i32) -> Option<i32> {
+            v.iter().find_map(|x| if *x > limit { Some(*x * 10) } else { None })
+        }
+        fn main() {
+            let v: Vec<i32> = vec![1, 2, 3, 4];
+            match pick(&v, 2) {
+                Some(n) => println!(\"{}\", n),
+                None => println!(\"none\"),
+            }
+            match pick(&v, 9) {
+                Some(n) => println!(\"{}\", n),
+                None => println!(\"none\"),
+            }
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping find_map run");
+            return;
+        }
+    };
+    assert_eq!(out, "30\nnone", "find_map should yield the first Some");
+}
+
+/// `std::mem::take(&mut s)` on a string local returns the old text and leaves `s` empty.
+#[test]
+fn mem_take_string_local_run() {
+    let out = match run_src(
+        "fn main() {
+            let mut s = String::from(\"abc\");
+            let t = std::mem::take(&mut s);
+            println!(\"{}|{}|{}\", t, s, s.len());
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping mem::take run");
+            return;
+        }
+    };
+    assert_eq!(
+        out, "abc||0",
+        "mem::take should move the string out and leave it empty"
+    );
+}
+
+/// `PathBuf::from(s)` is the same text as the path it was given.
+#[test]
+fn pathbuf_from_run() {
+    let out = match run_src(
+        "fn main() {
+            let p = PathBuf::from(\"dir/file.txt\");
+            match p.parent() {
+                Some(d) => println!(\"{}\", d),
+                None => println!(\"none\"),
+            }
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping pathbuf run");
+            return;
+        }
+    };
+    assert_eq!(out, "dir", "PathBuf::from should keep the path text");
+}
+
+/// `String::with_capacity(n)` in an untyped `let` position is an empty string; the capacity
+/// argument is evaluated but does not change the value.
+#[test]
+fn string_with_capacity_run() {
+    let out = match run_src(
+        "fn main() {
+            let mut out = String::with_capacity(16);
+            println!(\"{}\", out.len());
+            out.push_str(\"ab\");
+            println!(\"{}\", out);
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping string run");
+            return;
+        }
+    };
+    assert_eq!(out, "0\nab", "String::with_capacity should start empty");
 }
 
 #[test]
@@ -1925,7 +2160,8 @@ fn returned_capturing_closure_with_pure_lets_runs_when_bound_by_let() {
         }
     };
     assert_eq!(
-        out, "9
+        out,
+        "9
 10
 12",
         "the let-bound value must be recomputed per call and captured by the closure"
@@ -1974,9 +2210,13 @@ fn returned_capturing_closure_from_method_runs_when_bound_by_let() {
             return;
         }
     };
-    assert_eq!(out, "6
+    assert_eq!(
+        out,
+        "6
 42
-103", "each method's closure should see its receiver");
+103",
+        "each method's closure should see its receiver"
+    );
 }
 
 #[test]
@@ -2584,7 +2824,10 @@ fn hashmap_new_in_struct_field_runs() {
             return;
         }
     };
-    assert_eq!(out, "0", "`HashMap::new()` in a struct field takes its types from the field");
+    assert_eq!(
+        out, "0",
+        "`HashMap::new()` in a struct field takes its types from the field"
+    );
 }
 
 #[test]
@@ -2624,7 +2867,10 @@ fn local_closure_shadows_same_named_function_and_runs() {
             return;
         }
     };
-    assert_eq!(out, "40", "a local binding shadows a function of the same name");
+    assert_eq!(
+        out, "40",
+        "a local binding shadows a function of the same name"
+    );
 }
 
 #[test]
@@ -2675,7 +2921,10 @@ fn extern_generic_struct_literal_in_generic_impl_runs() {
             return;
         }
     };
-    assert_eq!(out, "7", "the generic struct literal takes the instance's arguments");
+    assert_eq!(
+        out, "7",
+        "the generic struct literal takes the instance's arguments"
+    );
 }
 
 #[test]
@@ -2694,7 +2943,10 @@ fn tuple_struct_constructor_and_positional_fields_run() {
             return;
         }
     };
-    assert_eq!(out, "7", "`Pair(3, 4)` builds the struct; `p.0` reads its first field");
+    assert_eq!(
+        out, "7",
+        "`Pair(3, 4)` builds the struct; `p.0` reads its first field"
+    );
 }
 
 #[test]
@@ -2847,7 +3099,10 @@ fn btreeset_iterator_chains_read_in_key_order_and_run() {
             return;
         }
     };
-    assert_eq!(out, "42", "the first item of a sorted set is its smallest key");
+    assert_eq!(
+        out, "42",
+        "the first item of a sorted set is its smallest key"
+    );
 }
 
 #[test]
@@ -2868,7 +3123,10 @@ fn saturating_integer_methods_run() {
             return;
         }
     };
-    assert_eq!(out, "-394", "signed saturation goes negative; unsigned `saturating_sub` stops at 0");
+    assert_eq!(
+        out, "-394",
+        "signed saturation goes negative; unsigned `saturating_sub` stops at 0"
+    );
 }
 
 #[test]
@@ -2921,7 +3179,10 @@ fn map_get_forms_run() {
             return;
         }
     };
-    assert_eq!(out, "5575", "`get` yields a reference: unwrap, copied, match and if-let all read it");
+    assert_eq!(
+        out, "5575",
+        "`get` yields a reference: unwrap, copied, match and if-let all read it"
+    );
 }
 
 #[test]
@@ -2952,7 +3213,10 @@ fn literal_elements_take_the_returned_collections_types() {
             return;
         }
     };
-    assert_eq!(out, "215", "unsuffixed literals take the element types of the returned collection");
+    assert_eq!(
+        out, "215",
+        "unsuffixed literals take the element types of the returned collection"
+    );
 }
 
 #[test]
@@ -2972,7 +3236,10 @@ fn push_through_last_mut_reaches_the_inner_vector() {
             return;
         }
     };
-    assert_eq!(out, "2", "a push on `last_mut().unwrap()` goes into the last inner vector");
+    assert_eq!(
+        out, "2",
+        "a push on `last_mut().unwrap()` goes into the last inner vector"
+    );
 }
 
 #[test]
@@ -2999,7 +3266,10 @@ fn hashset_in_a_struct_field_takes_insert_and_contains() {
             return;
         }
     };
-    assert_eq!(out, "11", "a set in a struct field takes insert and contains through its pointer");
+    assert_eq!(
+        out, "11",
+        "a set in a struct field takes insert and contains through its pointer"
+    );
 }
 
 #[test]
@@ -3019,7 +3289,10 @@ fn fresh_vec_passed_by_mut_reference_takes_the_parameter_type() {
             return;
         }
     };
-    assert_eq!(out, "1", "`&mut Vec::new()` takes the element type of the `&mut Vec<T>` parameter");
+    assert_eq!(
+        out, "1",
+        "`&mut Vec::new()` takes the element type of the `&mut Vec<T>` parameter"
+    );
 }
 
 #[test]
@@ -3038,7 +3311,10 @@ fn suffixed_literal_arguments_type_an_unannotated_map() {
             return;
         }
     };
-    assert_eq!(out, "1", "a suffixed literal has its own type, so the map's element types are known");
+    assert_eq!(
+        out, "1",
+        "a suffixed literal has its own type, so the map's element types are known"
+    );
 }
 
 #[test]
@@ -3065,8 +3341,12 @@ fn append_and_map_remove_work_through_struct_fields() {
             return;
         }
     };
-    assert_eq!(out, "11
-0", "append moves the items and empties the source; remove takes the entry out");
+    assert_eq!(
+        out,
+        "11
+0",
+        "append moves the items and empties the source; remove takes the entry out"
+    );
 }
 
 #[test]
@@ -3087,7 +3367,10 @@ fn vec_literal_passed_by_mut_reference_takes_the_parameter_element_type() {
             return;
         }
     };
-    assert_eq!(out, "3", "an unannotated `vec![..]` takes the element type of the `&mut Vec<T>` parameter");
+    assert_eq!(
+        out, "3",
+        "an unannotated `vec![..]` takes the element type of the `&mut Vec<T>` parameter"
+    );
 }
 
 #[test]
@@ -3110,7 +3393,10 @@ fn position_counts_the_items_that_reach_it() {
             return;
         }
     };
-    assert_eq!(out, "1109", "position is the index among the items the chain yields; a miss is None");
+    assert_eq!(
+        out, "1109",
+        "position is the index among the items the chain yields; a miss is None"
+    );
 }
 
 #[test]
@@ -3131,7 +3417,10 @@ fn untyped_extend_and_btree_constructors_take_their_element_types() {
             return;
         }
     };
-    assert_eq!(out, "21", "extend takes the element type of its argument; BTreeMap::new takes it from insert");
+    assert_eq!(
+        out, "21",
+        "extend takes the element type of its argument; BTreeMap::new takes it from insert"
+    );
 }
 
 #[test]
@@ -3151,7 +3440,10 @@ fn clone_of_a_vector_reference_types_an_if_with_a_new_else() {
             return;
         }
     };
-    assert_eq!(out, "10", "clone of `&Vec<T>` is a Vec<T>, so the else branch's Vec::new takes that type");
+    assert_eq!(
+        out, "10",
+        "clone of `&Vec<T>` is a Vec<T>, so the else branch's Vec::new takes that type"
+    );
 }
 
 #[test]
@@ -3174,7 +3466,10 @@ fn as_deref_reads_an_option_string_through_a_reference() {
             return;
         }
     };
-    assert_eq!(out, "33", "as_deref of an Option<String> is the string, through a reference too");
+    assert_eq!(
+        out, "33",
+        "as_deref of an Option<String> is the string, through a reference too"
+    );
 }
 
 #[test]
@@ -3198,7 +3493,10 @@ fn and_then_on_an_option_reference_runs_the_closure() {
             return;
         }
     };
-    assert_eq!(out, "64", "and_then through a reference applies the closure to the payload");
+    assert_eq!(
+        out, "64",
+        "and_then through a reference applies the closure to the payload"
+    );
 }
 
 #[test]
@@ -3218,7 +3516,10 @@ fn and_then_takes_a_named_function() {
             return;
         }
     };
-    assert_eq!(out, "8", "a named function given to and_then is called with the payload");
+    assert_eq!(
+        out, "8",
+        "a named function given to and_then is called with the payload"
+    );
 }
 
 #[test]
@@ -3246,5 +3547,8 @@ fn contains_on_const_and_local_slices() {
             return;
         }
     };
-    assert_eq!(out, "111", "contains on a const slice of integers or strings, and on a local slice");
+    assert_eq!(
+        out, "111",
+        "contains on a const slice of integers or strings, and on a local slice"
+    );
 }

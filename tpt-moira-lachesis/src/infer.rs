@@ -4348,6 +4348,8 @@ impl TypeChecker {
                 self.closure_result(&args[0], &Ty::Ref(Box::new(item.clone())));
                 Some(Ty::Apply("Option".to_string(), vec![item]))
             }
+            // `find_map(|x| opt)`: the first `Some` the closure returns, as that `Option`.
+            ("find_map", 1) => Some(self.closure_result(&args[0], &item)),
             // `nth(i)`: the `i`-th item by value, if there is one.
             ("nth", 1) => {
                 let i = self.infer_expr(&args[0]);

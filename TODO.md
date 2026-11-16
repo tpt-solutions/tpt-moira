@@ -827,6 +827,46 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
             `to_string_through_a_string_reference_copies_the_string`.
             Still open: `chars().take(n)` (no iterator adapter for a `chars` source), and the
             hint-less receivers that remain in the report.
+          - Status (2026-11-16, String::with_capacity): `String::with_capacity(n)` lowers to an
+            empty heap string (the capacity is evaluated and ignored, as `Vec::with_capacity` is).
+            The `with_capacity` path-call blockers (4, all `let mut out = String::with_capacity(..)`
+            in `atropos`/`lachesis`) are gone. Test: `string_with_capacity_run`.
+            `PathBuf::from(s)` lowers like `String::from` (a path is its text), which clears one
+            of the four `from` blockers. Test: `pathbuf_from_run`. Note: `moira` must be rebuilt
+            (`cargo build`) before `x.py self-host`, or the probe runs the stale binary; I saw
+            this happen. Still `1/5`; `take` (3) and the other `from` (3) blockers remain.
+          - Status (2026-11-16, mem::take on strings): `std::mem::take(&mut s)` on a `String`
+            local or field returns the old text and leaves an empty string (`lower_mem_take_string`).
+            Test: `mem_take_string_local_run`. Blockers: `take` 3 -> 2. The `from` count is 3
+            (the `i128::from(bool)` integer conversions in `lower.rs` are the next candidates; they
+            lower as casts). Receiver-type blockers went 132 -> 133: one function now reaches a
+            receiver gap that the `take` error used to hide, as the probe reports the first error
+            per function. Still `1/5`.
+          - Status (2026-11-16, receiver typing batch): receiver-type blockers 133 -> 128; still `1/5`.
+            * `find_map(f)` on an iterator chain: lowered as a `filter_map(f)` stage followed by
+              `next()`, and typed by the checker as the closure's `Option`. Test:
+              `find_map_returns_first_some_run`. Clears the `closure_param` blocker.
+            * `clear()`, `reverse()` and `remove(i)` on a vector *field* (`self.items.remove(0)`):
+              the field is read, the vector helper runs on a pointer to it, and the field is written
+              back (`lower_vec_field_helper`). Test: `vec_field_remove_reverse_clear_run`.
+            Still open: `flat_map` and `chain` stages (6 and 2 uses in the compiler source), `insert`,
+            `retain`, `extend` on non-field receivers, `Map::iter()` (pairs), `parse`,
+            `unwrap_or_default`, and `entry`. The probe reports one error per function, so the
+            counts shift as functions get past their first gap.
+          - Status (2026-11-16, insert and rev batch): still `1/5`. Blocked functions per crate:
+            clotho 20 -> 17, atropos 96 -> 94; receiver-type blockers 128 -> 127 (the probe reports
+            one error per function, so the receiver count moves less than the function count).
+            * `Vec::insert(i, x)` on a vector local (generated C helper with `push` + `memmove`,
+              panics on an index past the end). The index is lowered as an integer, not an element.
+              Test: `vec_insert_at_each_position_run`.
+            * `v.iter().rev()` in an iterator chain: a `rev` flag on the source. The loop walks a
+              reversed copy (`copy_n` then `reverse`), so `rev` before the adapters is correct.
+              `rev` is accepted only directly on `iter()`; `cloned().rev()` is rejected with a
+              lowering error (it needs a double-ended adapter). Test: `iter_rev_chain_reverses_the_source_run`.
+            Still open: `flat_map` (nested loops; `bundle.rs` and `borrow.rs` use it), `chain` in a
+            chain (not in a `for`), `retain`/`extend` on non-field receivers, `Map::iter()` (pairs),
+            `parse`, `unwrap_or_default`, `entry`, `as_str`/`as_ref`, and the `new`/`from`/`replace`
+            path calls in untyped positions.
           - Status (2026-11-16, parse): `let x: T = s.parse().unwrap()` and `.unwrap_or(d)`
             lower for numeric `T` (signed/unsigned by bit width, `f64`), with C helpers
             `moira_parse_{s,u,f}` that reject trailing text, range-check the width and panic

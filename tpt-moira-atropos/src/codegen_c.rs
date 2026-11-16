@@ -933,6 +933,12 @@ fn vec_helpers(elem: &str, struct_names: &std::collections::HashSet<&str>) -> St
     s.push_str(&format!(
         "static long long {append}({name}* v, {name}* w) {{ for (long long i = 0; i < w->len; i++) {push}(v, w->data[i]); w->len = 0; return 0; }}\n"
     ));
+    // `insert(i, x)`: the element goes at index `i`, after the tail moves right by one. An index
+    // past the end panics, as in Rust.
+    let insert = mir::vec_fn_name(elem, "insert");
+    s.push_str(&format!(
+        "static long long {insert}({name}* v, long long i, {ec} x) {{ if (i < 0 || i > v->len) __moira_panic(); {push}(v, x); memmove(&v->data[i + 1], &v->data[i], (size_t)(v->len - 1 - i) * sizeof({ec})); v->data[i] = x; return 0; }}\n"
+    ));
     // `clear` empties the vector; `dedup` drops each item equal to the one before it (strings by
     // content, scalars with `==`). Other element types have no equality, so no `dedup`.
     let clear = mir::vec_fn_name(elem, "clear");
