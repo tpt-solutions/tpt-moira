@@ -171,16 +171,16 @@ impl<'a> Emitter<'a> {
             Val::Unit => "    xor rax, rax\n    push rax\n".to_string(),
             Val::Name(n) => {
                 let slot = self.slots.named[n];
-                format!("    push QWORD {}\n", self.off(slot))
+                format!("    push QWORD PTR {}\n", self.off(slot))
             }
             Val::Value(i) => {
                 let slot = self.slots.value[*i];
-                format!("    push QWORD {}\n", self.off(slot))
+                format!("    push QWORD PTR {}\n", self.off(slot))
             }
             // A C string constant has no register-level representation in the
             // integer subset; emit 0 (the native backend does not yet run
             // print-macro programs).
-            Val::CStr(_) => "    xor rax, rax\n    push rax\n".to_string(),
+            Val::CStr(text) => format!("    lea rax, [rip + {}]\n    push rax\n", str_label(text)),
         }
     }
 
@@ -362,6 +362,70 @@ fn emit_function_asm(func: &SsaFunction) -> Result<String, String> {
 /// Each function is emitted on its own thread and the results are joined in the
 /// original function order, so the output (and the first error reported) is
 /// deterministic regardless of scheduling.
+/// The data label of a string constant: a hash of its bytes, so every use of the same text shares
+/// one label, and the labels are the same for every function.
+fn str_label(text: &str) -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in text.bytes() {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    format!(".Lstr{h:016x}")
+}
+
+/// The text of a string constant as an assembler string literal.
+fn asm_string(text: &str) -> String {
+    let mut out = String::new();
+    for b in text.bytes() {
+        match b {
+            b'"' => out.push_str("\\\""),
+            b'\\' => out.push_str("\\\\"),
+            b'\n' => out.push_str("\\n"),
+            b'\t' => out.push_str("\\t"),
+            0x20..=0x7e => out.push(b as char),
+            _ => out.push_str(&format!("\\{:03o}", b)),
+        }
+    }
+    out
+}
+
+/// Every string constant a function uses, in the operations and the terminators.
+fn collect_strings(f: &SsaFunction, out: &mut std::collections::BTreeSet<String>) {
+    fn val(v: &Val, out: &mut std::collections::BTreeSet<String>) {
+        if let Val::CStr(t) = v {
+            out.insert(t.clone());
+        }
+    }
+    for value in &f.values {
+        match &value.op {
+            Op::Const(_) => {}
+            Op::Copy(v) | Op::Unary(_, v) | Op::Field(v, _) | Op::Ref(v) => val(v, out),
+            Op::Binary(_, l, r) => {
+                val(l, out);
+                val(r, out);
+            }
+            Op::Call(c, args) => {
+                val(c, out);
+                for a in args {
+                    val(a, out);
+                }
+            }
+            Op::StructLit(_, fields) => {
+                for (_, v) in fields {
+                    val(v, out);
+                }
+            }
+        }
+    }
+    for block in &f.blocks {
+        match &block.term {
+            SsaTerm::If(c, _, _) => val(c, out),
+            SsaTerm::Return(Some(v)) => val(v, out),
+            _ => {}
+        }
+    }
+}
+
 pub fn emit_asm(prog: &SsaProgram) -> Result<String, String> {
     let bodies: Vec<Result<String, String>> = std::thread::scope(|s| {
         let handles: Vec<_> = prog
@@ -388,6 +452,17 @@ pub fn emit_asm(prog: &SsaProgram) -> Result<String, String> {
     for body in bodies {
         out.push_str(&body?);
     }
+
+    // The string constants of the program, each once, as NUL-terminated data.
+    let mut strings: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for f in &prog.functions {
+        collect_strings(f, &mut strings);
+    }
+    out.push_str("\n.data\n");
+    for text in &strings {
+        out.push_str(&format!("{}:\n    .asciz \"{}\"\n", str_label(text), asm_string(text)));
+    }
+    out.push_str(".text\n");
 
     // The runtime helpers are called with the stack aligned as the ABI requires, and each sets up
     // its own frame so that its `printf` call is aligned too.
