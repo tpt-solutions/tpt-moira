@@ -1034,6 +1034,47 @@ fn closure_parameters_take_the_declared_struct_and_result_types() {
     assert_eq!(out, "7", "the closure should receive an Option and return an i64");
 }
 
+/// A helper that takes a closure is expanded at its call site: the closure body runs where the
+/// helper calls it, so a write to a captured variable reaches the caller's variable, and a
+/// `match` in the closure body lowers as written.
+#[test]
+fn helper_taking_a_closure_is_expanded_at_its_call_site() {
+    let out = match run_src(
+        "fn each(items: &[i64], f: &mut impl FnMut(i64, Option<i64>)) {
+            for x in items {
+                let y = *x + 1;
+                f(y, if *x > 1 { Some(*x) } else { None });
+            }
+        }
+        fn apply(v: i64, f: impl Fn(Option<i64>) -> i64) -> i64 {
+            let t = v * 2;
+            f(Some(t)) + 1
+        }
+        fn main() {
+            let mut n = 0;
+            each(&[1, 2, 3], &mut |a, b| {
+                if b.is_none() {
+                    n = n + a;
+                }
+            });
+            let k = 10;
+            let r = apply(4, |o| match o {
+                Some(x) => x + k,
+                None => 0,
+            });
+            print_i64(n);
+            print_i64(r);
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping closure expansion run");
+            return;
+        }
+    };
+    assert_eq!(out, "2\n19", "the expanded helper should write the captured variable");
+}
+
 #[test]
 fn enum_match_and_if_let_run() {
     // Enum-variant construction (`Some(7)` / `None`), `match` with

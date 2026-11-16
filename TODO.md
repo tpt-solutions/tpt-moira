@@ -710,6 +710,23 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
             the checker types it so; test `option_as_ref_over_string_and_integer_runs`.)
             `Arc<TypeHints>` fields in the compiler's own lowering (cross-crate smart pointer),
             and `Hasher::finish`.
+          - Status (2026-11-16, option 2, inlining closure helpers): a helper that takes an
+            `impl Fn`/`&mut impl FnMut`/`fn` closure parameter is expanded at each call that
+            passes a closure literal (`clotho/src/closure_inline.rs`). Each call of the closure
+            parameter inside the helper becomes the closure body, with its parameters bound to
+            the call's arguments, so writes to captured variables reach the caller. The helper's
+            own names are renamed fresh. Eligibility: no `return`, `?`, macro, `match`, or nested
+            closure in the helper; `match` is allowed in the closure body; the closure parameter
+            is only called; no other closure-taking helper is called from the body. Test:
+            `helper_taking_a_closure_is_expanded_at_its_call_site`.
+            Found while doing this: a let-bound closure that writes a captured variable was
+            silently miscompiled (captures are copies: `n = n + a` printed 0 for Rust's 5). It is
+            now a lowering error (`assigning to the captured variable ... is not supported yet`)
+            until captures are by reference.
+            Limits: a call inside a macro's arguments (`println!("{}", helper(..))`) is token
+            data and is not expanded; the helper stays and still lowers as before.
+            Self-host blockers: 133 -> 134 (the capture-assignment error now reports the
+            compiler's own closures that write captured variables, which were silent before).
           - Status (2026-11-16, closure ABI, non-capturing part): a closure passed for an
             `impl Fn(A) -> R` (or `&mut impl FnMut`, `fn`) parameter lowers with the declared
             struct and result types: the checker gives the closure the parameter's result type,
