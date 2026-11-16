@@ -195,3 +195,29 @@ fn native_strings_build_compare_and_measure_run() {
     };
     assert_eq!(out, "1\n3\n6\n3\nabc\n", "strings should behave as in Rust");
 }
+
+#[test]
+fn native_string_conversions_search_trim_and_chars_run() {
+    let out = match build_and_run(
+        "strings2",
+        "fn main() {
+            let n: i64 = 42;
+            let s = n.to_string();
+            print_i64(s.len() as i64);
+            let t = format!(\"{}-{}\", 7, 8);
+            println!(\"{}\", t);
+            let mut c: i64 = 0;
+            for ch in t.chars() {
+                if ch == '-' { c = c + 1; }
+            }
+            print_i64(c);
+            print_i64(t.starts_with(\"7\") as i64);
+            let u = String::from(\"  pad  \");
+            println!(\"[{}]\", u.trim());
+        }",
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "2\n7-8\n1\n1\n[pad]\n", "string conversions should match Rust");
+}

@@ -135,6 +135,13 @@ Target: compile a strict subset of Rust (no complex trait resolution, no async/a
       with status 101 but does not print the message); generic struct instances share the base
       layout; the native backend types temporaries bound to names. Test:
       `native_vector_methods_and_option_run`.
+      **Strings (2026-11-17):** `String::from`, `push_str`, `len`, `==`, `to_string` on integers,
+      `format!`, `starts_with`, `trim`, and `chars()` iteration. `&` of a local is its frame
+      slot's address. The string routines are assembly over the C library through wrappers that
+      follow the platform convention; `char` elements load one byte. Test:
+      `native_strings_build_compare_and_measure_run` and `native_string_conversions_search_trim_and_chars_run`.
+      **Not yet:** string keys in maps, string `<`/`>`, `split`/`lines`, `replace`, and
+      `StoreIndex`/`IndexRef` on bytes.
       **HashMap (2026-11-17):** `Map<K,V>` for word-sized keys and values (integers, bools,
       pointers): a linear table like the C runtime's, with `new`, `insert` (returns `Option<V>`),
       `get_ptr`, `contains_key`, `len`, `is_empty`, and iteration. String keys are rejected

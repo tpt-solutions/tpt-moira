@@ -446,6 +446,16 @@ impl<'a> Emitter<'a> {
                     ))
                     }
                 };
+                // The MIR calls a few C library functions by their own names; the native backend
+                // reaches them through its wrappers (which take the internal convention).
+                let name = if matches!(
+                    name.as_str(),
+                    "malloc" | "strlen" | "strcpy" | "strcmp" | "strncmp" | "memcpy" | "sprintf"
+                ) {
+                    format!("moira_rt_{name}")
+                } else {
+                    name
+                };
                 let returns_struct = self.struct_fns.contains(&name);
                 let n = args.len() + usize::from(returns_struct);
                 if n > 6 {
@@ -488,7 +498,13 @@ impl<'a> Emitter<'a> {
             Op::Index(b, i) => {
                 let mut s = self.gen_val(b);
                 s.push_str(&self.gen_val(i));
-                s.push_str("    pop rcx\n    pop rax\n    mov rax, QWORD PTR [rax + rcx*8]\n    push rax\n");
+                // A `char` element is one byte (a string's bytes); other elements are words.
+                let load = if self.value_ty.get(idx).map(|t| t.as_str()) == Some("char") {
+                    "    movzx rax, BYTE PTR [rax + rcx]\n"
+                } else {
+                    "    mov rax, QWORD PTR [rax + rcx*8]\n"
+                };
+                s.push_str(&format!("    pop rcx\n    pop rax\n{load}    push rax\n"));
                 Ok(s)
             }
             Op::IndexRef(b, i) => {
@@ -1040,9 +1056,9 @@ fn libc_wrapper_asm(sym: &str, nargs: usize) -> String {
         if nargs >= 1 {
             s.push_str("    mov rcx, rdi\n");
         }
-        s.push_str(&format!("    call {sym}\n    mov rsp, rbp\n    pop rbp\n    ret\n"));
+        s.push_str(&format!("    xor eax, eax\n    call {sym}\n    mov rsp, rbp\n    pop rbp\n    ret\n"));
     } else {
-        s.push_str(&format!("    call {sym}\n    pop rbp\n    ret\n"));
+        s.push_str(&format!("    xor eax, eax\n    call {sym}\n    pop rbp\n    ret\n"));
     }
     s
 }
@@ -1055,6 +1071,9 @@ fn str_helpers_asm() -> String {
     out.push_str(&libc_wrapper_asm("strlen", 1));
     out.push_str(&libc_wrapper_asm("strcpy", 2));
     out.push_str(&libc_wrapper_asm("strcmp", 2));
+    out.push_str(&libc_wrapper_asm("strncmp", 3));
+    out.push_str(&libc_wrapper_asm("memcpy", 3));
+    out.push_str(&libc_wrapper_asm("sprintf", 3));
     out.push_str(
         r#"
 moira_str_dup:
@@ -1084,6 +1103,94 @@ moira_str_eq:
     test rax, rax
     sete al
     movzx eax, al
+    pop rbp
+    ret
+moira_int_to_string:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 64
+    mov QWORD PTR [rbp - 8], rdi
+    lea rdi, [rbp - 64]
+    lea rsi, [rip + .Lfmt_int_str]
+    mov rdx, QWORD PTR [rbp - 8]
+    call moira_rt_sprintf
+    lea rdi, [rbp - 64]
+    call moira_str_dup
+    mov rsp, rbp
+    pop rbp
+    ret
+moira_str_starts_with:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 32
+    mov QWORD PTR [rbp - 8], rdi
+    mov QWORD PTR [rbp - 16], rsi
+    mov rdi, rsi
+    call moira_rt_strlen
+    mov rdx, rax
+    mov rdi, QWORD PTR [rbp - 8]
+    mov rsi, QWORD PTR [rbp - 16]
+    call moira_rt_strncmp
+    test rax, rax
+    sete al
+    movzx eax, al
+    mov rsp, rbp
+    pop rbp
+    ret
+moira_str_trim:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 48
+    mov rsi, rdi
+moira_str_trim_lead:
+    movzx eax, BYTE PTR [rsi]
+    cmp al, 32
+    je moira_str_trim_lead_next
+    cmp al, 9
+    je moira_str_trim_lead_next
+    cmp al, 10
+    je moira_str_trim_lead_next
+    cmp al, 13
+    je moira_str_trim_lead_next
+    jmp moira_str_trim_lead_done
+moira_str_trim_lead_next:
+    add rsi, 1
+    jmp moira_str_trim_lead
+moira_str_trim_lead_done:
+    mov QWORD PTR [rbp - 16], rsi
+    mov rdi, rsi
+    call moira_rt_strlen
+    mov rcx, QWORD PTR [rbp - 16]
+moira_str_trim_tail:
+    test rax, rax
+    jz moira_str_trim_tail_done
+    movzx edx, BYTE PTR [rcx + rax - 1]
+    cmp dl, 32
+    je moira_str_trim_tail_next
+    cmp dl, 9
+    je moira_str_trim_tail_next
+    cmp dl, 10
+    je moira_str_trim_tail_next
+    cmp dl, 13
+    je moira_str_trim_tail_next
+    jmp moira_str_trim_tail_done
+moira_str_trim_tail_next:
+    sub rax, 1
+    jmp moira_str_trim_tail
+moira_str_trim_tail_done:
+    mov QWORD PTR [rbp - 24], rax
+    lea rdi, [rax + 1]
+    call moira_rt_malloc
+    mov QWORD PTR [rbp - 32], rax
+    mov rdi, rax
+    mov rsi, QWORD PTR [rbp - 16]
+    mov rdx, QWORD PTR [rbp - 24]
+    call moira_rt_memcpy
+    mov rcx, QWORD PTR [rbp - 32]
+    mov rdx, QWORD PTR [rbp - 24]
+    mov BYTE PTR [rcx + rdx], 0
+    mov rax, QWORD PTR [rbp - 32]
+    mov rsp, rbp
     pop rbp
     ret
 moira_str_push_str:
@@ -1345,6 +1452,7 @@ pub fn emit_asm(prog: &SsaProgram) -> Result<String, String> {
     }
     out.push_str(&realloc_wrapper_asm());
     out.push_str(&str_helpers_asm());
+    out.push_str(".Lfmt_int_str:\n    .asciz \"%lld\"\n");
     out.push_str(&panic_asm());
 
     // The string constants of the program, each once, as NUL-terminated data.
