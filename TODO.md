@@ -67,8 +67,22 @@ Target: compile a strict subset of Rust (no complex trait resolution, no async/a
       0.33x, 0.16x and 0.18x of `rustc -O` (geomean 0.21x). At 800 functions: Moira emit
       about 1.3 s, `gcc -O0` 1.0 s, `gcc -O1` 2.3 s, `gcc -O2` 5.5 s, `rustc -O` 1.2 s.
       The 10x target is **not met** on either measure.
-      Next: profile Moira's front end and emit on the 800-function program; the emitted C is
-      goto-based with one temporary per operation, which `gcc -O2` compiles slowly.
+      **Front-end profile and fixes (2026-11-17).** `MOIRA_TIMINGS=1` now prints each check
+      stage. At 800 functions the check was 817 ms: type-check 375 ms, lower-to-MIR 170 ms,
+      NLL borrow-check under 0.3 ms. Causes and fixes:
+      1. `infer.rs` `solver_ok`: every operator check ran a full trait-solver query, even when
+         the built-in table already answered. The query is now lazy. Type-check: 375 -> 10 ms.
+      2. `lower.rs` driver: every function copied whole tables (methods, parameter types,
+         variants, all function ASTs), which made lowering quadratic. The tables are now shared
+         through `Arc`. Lower-to-MIR: 170 -> 35 ms.
+      Re-measured (median of 10, `--emit check` vs `rustc --emit=metadata`): 50 functions
+      12.5 ms vs 69 ms (5.5x); 200 functions 26 vs 101 ms (3.9x); 800 functions 90 vs 234 ms
+      (2.6x). The front end is now ahead of rustc at every size measured.
+      End to end (`--e2e`, median of 30, `rustc -O` / Moira-to-binary): 0.37x, 0.20x and 0.20x
+      (geomean 0.24x, was 0.21x). `gcc -O2` on the emitted C is about 5.2 s of the 5.4 s at 800
+      functions, so the remaining end-to-end gap is the C backend, not the front end.
+      Next: change the shape of the emitted C (structured loops, fewer temporaries) and measure
+      `gcc -O2` again.
     - **End-to-end build speed (2026-11-17).** Cause of the 0.42x: every generated C file
       carried the whole runtime, and its non-`static` helpers were compiled at full `gcc -O2`
       even when unused (about 220 ms of the 346 ms on `xlarge`). `mark_runtime_static`
