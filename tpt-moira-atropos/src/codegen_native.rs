@@ -508,6 +508,15 @@ impl<'a> Emitter<'a> {
             }
             // A reference to a struct is the struct's pointer.
             Op::Ref(v) if self.struct_of(v).is_some() => Ok(self.gen_val(v)),
+            // A reference to a value that lives in a frame slot is the slot's address.
+            Op::Ref(Val::Name(n)) if self.slots.named.contains_key(n) => {
+                let slot = self.slots.named[n];
+                Ok(format!("    lea rax, [rbp - {}]\n    push rax\n", (slot + 1) * 8))
+            }
+            Op::Ref(Val::Value(i)) => {
+                let slot = self.slots.value[*i];
+                Ok(format!("    lea rax, [rbp - {}]\n    push rax\n", (slot + 1) * 8))
+            }
             Op::Ref(..) => Err(
                 "references are handled by the Stage-0 C backend, not the from-scratch native \
                  backend (restricted subset)"
@@ -1015,6 +1024,99 @@ fn map_helpers_asm(k: &str, v: &str) -> String {
     )
 }
 
+/// A wrapper that calls a C library function `sym` with up to three integer arguments, given in
+/// the internal convention (rdi, rsi, rdx). On Windows the arguments move to rcx, rdx and r8 and
+/// the caller reserves the shadow space.
+fn libc_wrapper_asm(sym: &str, nargs: usize) -> String {
+    let mut s = format!("\nmoira_rt_{sym}:\n    push rbp\n    mov rbp, rsp\n");
+    if cfg!(windows) {
+        s.push_str("    sub rsp, 32\n");
+        if nargs >= 3 {
+            s.push_str("    mov r8, rdx\n");
+        }
+        if nargs >= 2 {
+            s.push_str("    mov rdx, rsi\n");
+        }
+        if nargs >= 1 {
+            s.push_str("    mov rcx, rdi\n");
+        }
+        s.push_str(&format!("    call {sym}\n    mov rsp, rbp\n    pop rbp\n    ret\n"));
+    } else {
+        s.push_str(&format!("    call {sym}\n    pop rbp\n    ret\n"));
+    }
+    s
+}
+
+/// The string routines the MIR calls, in assembly over the C library. A `String` is a
+/// NUL-terminated heap buffer; `push_str` takes the address of the `String` so it can grow it.
+fn str_helpers_asm() -> String {
+    let mut out = String::new();
+    out.push_str(&libc_wrapper_asm("malloc", 1));
+    out.push_str(&libc_wrapper_asm("strlen", 1));
+    out.push_str(&libc_wrapper_asm("strcpy", 2));
+    out.push_str(&libc_wrapper_asm("strcmp", 2));
+    out.push_str(
+        r#"
+moira_str_dup:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 32
+    mov QWORD PTR [rbp - 8], rdi
+    call moira_rt_strlen
+    lea rdi, [rax + 1]
+    call moira_rt_malloc
+    mov rdi, rax
+    mov rsi, QWORD PTR [rbp - 8]
+    call moira_rt_strcpy
+    mov rsp, rbp
+    pop rbp
+    ret
+moira_str_len:
+    push rbp
+    mov rbp, rsp
+    call moira_rt_strlen
+    pop rbp
+    ret
+moira_str_eq:
+    push rbp
+    mov rbp, rsp
+    call moira_rt_strcmp
+    test rax, rax
+    sete al
+    movzx eax, al
+    pop rbp
+    ret
+moira_str_push_str:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 48
+    mov QWORD PTR [rbp - 8], rdi
+    mov QWORD PTR [rbp - 16], rsi
+    mov rdi, QWORD PTR [rdi]
+    call moira_rt_strlen
+    mov QWORD PTR [rbp - 24], rax
+    mov rdi, QWORD PTR [rbp - 16]
+    call moira_rt_strlen
+    mov rcx, QWORD PTR [rbp - 24]
+    lea rsi, [rax + rcx + 1]
+    mov rdi, QWORD PTR [rbp - 8]
+    mov rdi, QWORD PTR [rdi]
+    call moira_rt_realloc
+    mov rdi, QWORD PTR [rbp - 8]
+    mov QWORD PTR [rdi], rax
+    mov rcx, QWORD PTR [rbp - 24]
+    lea rdi, [rax + rcx]
+    mov rsi, QWORD PTR [rbp - 16]
+    call moira_rt_strcpy
+    xor eax, eax
+    mov rsp, rbp
+    pop rbp
+    ret
+"#,
+    );
+    out
+}
+
 /// The allocation wrapper the vector helpers call: `realloc(rdi, rsi)` with the platform's C
 /// calling convention (Windows x64 passes the arguments in rcx and rdx, with shadow space).
 fn realloc_wrapper_asm() -> String {
@@ -1242,6 +1344,7 @@ pub fn emit_asm(prog: &SsaProgram) -> Result<String, String> {
         out.push_str(&map_helpers_asm(k, v));
     }
     out.push_str(&realloc_wrapper_asm());
+    out.push_str(&str_helpers_asm());
     out.push_str(&panic_asm());
 
     // The string constants of the program, each once, as NUL-terminated data.

@@ -169,3 +169,29 @@ fn native_hashmap_insert_get_contains_iterate_run() {
     };
     assert_eq!(out, "40\n9\n-1\n5\n1\n0\n25996\n", "the map should behave as in Rust");
 }
+
+#[test]
+fn native_strings_build_compare_and_measure_run() {
+    let out = match build_and_run(
+        "strings",
+        "fn greet(name: &str) -> usize {
+            let mut s = String::from(\"hi \");
+            s.push_str(name);
+            s.len()
+        }
+        fn main() {
+            let a = String::from(\"abc\");
+            let b = String::from(\"abc\");
+            print_i64((a == b) as i64);
+            print_i64(a.len() as i64);
+            print_i64(greet(\"bob\") as i64);
+            let t = \"xyz\";
+            print_i64(t.len() as i64);
+            println!(\"{}\", a);
+        }",
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "1\n3\n6\n3\nabc\n", "strings should behave as in Rust");
+}
