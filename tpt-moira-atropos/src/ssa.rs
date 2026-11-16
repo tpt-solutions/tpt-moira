@@ -206,8 +206,16 @@ fn build_function(f: &mir::MirFunction) -> Result<SsaFunction, String> {
                         resolve(i, &last_def),
                         resolve(v, &last_def),
                     ),
-                    mir::Rvalue::Array(..)
-                    | mir::Rvalue::Tuple(..) => return Err(
+                    // A tuple is a struct of its components, f0, f1, ...
+                    mir::Rvalue::Tuple(ty, elems) => Op::StructLit(
+                        ty.clone(),
+                        elems
+                            .iter()
+                            .enumerate()
+                            .map(|(i, o)| (format!("f{i}"), resolve(o, &last_def)))
+                            .collect(),
+                    ),
+                    mir::Rvalue::Array(..) => return Err(
                         "the native backend does not support arrays/indexing/tuples (use the C \
                           backend, `--emit c`)"
                             .to_string(),
@@ -395,7 +403,10 @@ pub fn dce(func: &mut SsaFunction) -> bool {
             }
         }
         // Calls and stores have side effects: always keep.
-        if matches!(func.values[i].op, Op::Call(..) | Op::Store(..) | Op::StoreIndex(..)) {
+        if matches!(
+            func.values[i].op,
+            Op::Call(..) | Op::Store(..) | Op::StoreIndex(..)
+        ) {
             seed_live.insert(i);
         }
     }
@@ -628,13 +639,9 @@ impl std::fmt::Display for SsaProgram {
                         }
                         Op::Index(a, i) => writeln!(f, "{}[{}]", show_val(a), show_val(i))?,
                         Op::IndexRef(a, i) => writeln!(f, "&{}[{}]", show_val(a), show_val(i))?,
-                        Op::StoreIndex(a, i, v) => writeln!(
-                            f,
-                            "{}[{}] = {}",
-                            show_val(a),
-                            show_val(i),
-                            show_val(v)
-                        )?,
+                        Op::StoreIndex(a, i, v) => {
+                            writeln!(f, "{}[{}] = {}", show_val(a), show_val(i), show_val(v))?
+                        }
                         Op::Ref(o) => writeln!(f, "&{}", show_val(o))?,
                     }
                 }

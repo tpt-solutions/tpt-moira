@@ -1457,7 +1457,11 @@ pub fn emit_asm(prog: &SsaProgram) -> Result<String, String> {
         let Some((base, args)) = crate::mir::split_generic(ty) else {
             continue;
         };
-        let layout = if base == "Map" {
+        let layout = if base == "Tuple" {
+            // A tuple's fields are its components, f0, f1, ... (a component that is a struct is
+            // stored as that struct's pointer, the move the tuple makes).
+            (0..args.len()).map(|i| format!("f{i}")).collect()
+        } else if base == "Map" {
             vec![
                 "keys".to_string(),
                 "vals".to_string(),
@@ -1470,9 +1474,10 @@ pub fn emit_asm(prog: &SsaProgram) -> Result<String, String> {
             };
             layout
         };
-        if args
-            .iter()
-            .any(|a| structs.contains_key(*a) || a.starts_with("Vec<"))
+        if base != "Tuple"
+            && args
+                .iter()
+                .any(|a| structs.contains_key(*a) || a.starts_with("Vec<"))
         {
             return Err(format!(
                 "the native backend does not support `{ty}` (a struct or vector payload)"

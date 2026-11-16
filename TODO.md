@@ -141,7 +141,12 @@ Target: compile a strict subset of Rust (no complex trait resolution, no async/a
       follow the platform convention; `char` elements load one byte. Test:
       `native_strings_build_compare_and_measure_run` and `native_string_conversions_search_trim_and_chars_run`.
       `HashMap` with string keys (compared with `strcmp`) also works natively.
-      **Not yet:** string `<`/`>`, `split`/`lines`, `replace`, and
+      **Tuples (2026-11-17):** a tuple is a struct of `f0`, `f1`, ...; a component that is a struct
+      is stored as its pointer (the move a tuple makes). Enums with word payloads already work. The
+      native backend matches `rustc` on all programs in the demo and phase-1 corpora it can build.
+      Note: the C backend fails to compile the tuple test program (`struct Tuple_i64_i64` vs `long
+      long`), so `rustc` is its reference.
+      **Not yet:** arrays (`[T; N]`), string `<`/`>`, `split`/`lines`, `replace`, and
       `StoreIndex`/`IndexRef` on bytes.
       **HashMap (2026-11-17):** `Map<K,V>` for word-sized keys and values (integers, bools,
       pointers): a linear table like the C runtime's, with `new`, `insert` (returns `Option<V>`),

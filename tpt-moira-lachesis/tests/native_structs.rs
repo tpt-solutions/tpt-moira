@@ -243,3 +243,26 @@ fn native_hashmap_with_string_keys_run() {
     };
     assert_eq!(out, "2\n7\n0\n0\n", "string-keyed maps should match Rust");
 }
+
+#[test]
+fn native_tuples_build_destructure_and_hold_structs_run() {
+    let out = match build_and_run(
+        "tuples",
+        "struct P { x: i64 }
+        fn pair(a: i64, b: i64) -> (i64, i64) { (a + b, a * b) }
+        fn main() {
+            let t = pair(3, 4);
+            print_i64(t.0);
+            print_i64(t.1);
+            let (s, p) = pair(5, 6);
+            print_i64(s);
+            print_i64(p);
+            let u = (P { x: 9 }, 2);
+            print_i64(u.0.x + u.1);
+        }",
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "7\n12\n11\n30\n11\n", "tuples should match Rust");
+}
