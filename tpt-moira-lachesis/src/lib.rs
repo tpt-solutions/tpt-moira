@@ -125,9 +125,19 @@ pub fn borrow_check_program_with_externs(
     externs: &[(String, Program)],
 ) -> Result<(), Vec<Diag>> {
     let extra: Vec<&Program> = externs.iter().map(|(_, p)| p).collect();
+    let timing = std::env::var_os("MOIRA_TIMINGS").is_some();
+    let t = std::time::Instant::now();
     let mir = tpt_moira_atropos::lower_program_for_borrow_check(prog, hints, &extra)
         .map_err(|e| vec![Diag::error(format!("lowering error: {e}"), None)])?;
-    borrow_check(&mir)
+    if timing {
+        eprintln!("moira: timing check/lower-to-MIR {:.3} ms", t.elapsed().as_secs_f64() * 1000.0);
+    }
+    let t = std::time::Instant::now();
+    let result = borrow_check(&mir);
+    if timing {
+        eprintln!("moira: timing check/NLL borrow-check {:.3} ms", t.elapsed().as_secs_f64() * 1000.0);
+    }
+    result
 }
 
 /// Full end-to-end Lachesis pass: type inference + MIR lowering + borrow check
@@ -145,8 +155,19 @@ pub fn borrow_check_program_with_externs(
 /// for the test suite; the coherence / well-formedness reports are appended
 /// after the two passes settle.
 pub fn check(prog: &Program) -> Result<(), Vec<Diag>> {
+    // `MOIRA_TIMINGS=1` prints how long each stage of the check takes (to stderr).
+    let timing = std::env::var_os("MOIRA_TIMINGS").is_some();
+    let stage = |name: &str, start: std::time::Instant| {
+        if timing {
+            eprintln!("moira: timing check/{name} {:.3} ms", start.elapsed().as_secs_f64() * 1000.0);
+        }
+    };
+    let t = std::time::Instant::now();
     let (type_res, hints) = type_check_typed(prog, &[]);
+    stage("type-check", t);
+    let t = std::time::Instant::now();
     let borrow_res = borrow_check_program_typed(prog, &hints);
+    stage("borrow-check (lower + NLL)", t);
 
     let mut errs: Vec<Diag> = Vec::new();
     match type_res {
@@ -157,8 +178,12 @@ pub fn check(prog: &Program) -> Result<(), Vec<Diag>> {
         Ok(()) => {}
         Err(mut e) => errs.append(&mut e),
     }
+    let t = std::time::Instant::now();
     errs.extend(coherence_report(prog));
+    stage("coherence", t);
+    let t = std::time::Instant::now();
     errs.extend(well_formedness_report(prog));
+    stage("well-formedness", t);
     if errs.is_empty() {
         Ok(())
     } else {

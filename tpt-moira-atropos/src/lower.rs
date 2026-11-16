@@ -386,6 +386,19 @@ fn lower_program_impl(
             out.structs.push(st.clone());
         }
     }
+    // The per-program tables are shared with every function's lowering through `Arc`s: each
+    // function takes a pointer copy instead of a copy of the whole table (which made lowering
+    // quadratic in the number of functions).
+    let shared_async_fns: std::sync::Arc<_> = std::sync::Arc::new(async_names.clone());
+    let shared_all_fn_names: std::sync::Arc<_> = std::sync::Arc::new(all_fn_names.clone());
+    let shared_const_values: std::sync::Arc<_> = std::sync::Arc::new(const_values.clone());
+    let shared_variants: std::sync::Arc<_> = std::sync::Arc::new(variants.clone());
+    let shared_qualified_variants: std::sync::Arc<_> = std::sync::Arc::new(qualified.clone());
+    let shared_payload_tys: std::sync::Arc<_> = std::sync::Arc::new(payload_tys.clone());
+    let shared_variant_fields: std::sync::Arc<_> = std::sync::Arc::new(variant_fields.clone());
+    let shared_struct_names: std::sync::Arc<_> = std::sync::Arc::new(struct_names.clone());
+    let shared_methods: std::sync::Arc<_> = std::sync::Arc::new(methods.clone());
+    let shared_fn_param_tys: std::sync::Arc<_> = std::sync::Arc::new(fn_param_tys.clone());
     // Every struct of the program is known to each function, whatever its position:
     // a function may use a struct declared after it.
     let mut known_structs: Vec<mir::MirStructDef> = out.structs.clone();
@@ -471,17 +484,17 @@ fn lower_program_impl(
                     g.name.node = format!("{ty}__{}", f.name.node);
                     let mut l = Lower::new(&known_structs, shared.clone());
                     l.lenient_calls = lenient;
-                    l.async_fns = async_names.clone();
-                    l.all_fn_names = all_fn_names.clone();
-                    l.const_values = const_values.clone();
+                    l.async_fns = shared_async_fns.clone();
+                    l.all_fn_names = shared_all_fn_names.clone();
+                    l.const_values = shared_const_values.clone();
                     l.const_exprs = const_exprs.clone();
-                    l.variants = variants.clone();
-                    l.qualified_variants = qualified.clone();
-                    l.payload_tys = payload_tys.clone();
-                    l.variant_fields = variant_fields.clone();
-                    l.struct_names = struct_names.clone();
-                    l.methods = methods.clone();
-                    l.fn_param_tys = fn_param_tys.clone();
+                    l.variants = shared_variants.clone();
+                    l.qualified_variants = shared_qualified_variants.clone();
+                    l.payload_tys = shared_payload_tys.clone();
+                    l.variant_fields = shared_variant_fields.clone();
+                    l.struct_names = shared_struct_names.clone();
+                    l.methods = shared_methods.clone();
+                    l.fn_param_tys = shared_fn_param_tys.clone();
                     l.self_ty = Some(ty.clone());
                     l.aliases = impl_aliases.clone();
                     let func = match l.lower_function(&g) {
@@ -514,9 +527,9 @@ fn lower_program_impl(
                 if f.is_async {
                     let mut l = Lower::new(&known_structs, shared.clone());
                     l.lenient_calls = lenient;
-                    l.async_fns = async_names.clone();
-                    l.all_fn_names = all_fn_names.clone();
-                    l.const_values = const_values.clone();
+                    l.async_fns = shared_async_fns.clone();
+                    l.all_fn_names = shared_all_fn_names.clone();
+                    l.const_values = shared_const_values.clone();
                     l.const_exprs = const_exprs.clone();
                     l.aliases = aliases.clone();
                     let ad = match l.lower_async_function(f) {
@@ -540,17 +553,17 @@ fn lower_program_impl(
                 } else {
                     let mut l = Lower::new(&known_structs, shared.clone());
                     l.lenient_calls = lenient;
-                    l.async_fns = async_names.clone();
-                    l.all_fn_names = all_fn_names.clone();
-                    l.const_values = const_values.clone();
+                    l.async_fns = shared_async_fns.clone();
+                    l.all_fn_names = shared_all_fn_names.clone();
+                    l.const_values = shared_const_values.clone();
                     l.const_exprs = const_exprs.clone();
-                    l.variants = variants.clone();
-                    l.qualified_variants = qualified.clone();
-                    l.payload_tys = payload_tys.clone();
-                    l.variant_fields = variant_fields.clone();
-                    l.struct_names = struct_names.clone();
-                    l.methods = methods.clone();
-                    l.fn_param_tys = fn_param_tys.clone();
+                    l.variants = shared_variants.clone();
+                    l.qualified_variants = shared_qualified_variants.clone();
+                    l.payload_tys = shared_payload_tys.clone();
+                    l.variant_fields = shared_variant_fields.clone();
+                    l.struct_names = shared_struct_names.clone();
+                    l.methods = shared_methods.clone();
+                    l.fn_param_tys = shared_fn_param_tys.clone();
                     l.fn_asts = fn_asts.clone();
                     l.aliases = aliases.clone();
                     let func = match l.lower_function(f) {
@@ -1432,7 +1445,7 @@ struct Lower {
     loops: Vec<(usize, usize)>,
     /// Names of `async fn`s, so calls to them can target the generated
     /// run-wrapper / future-constructor instead of the (absent) bare body.
-    async_fns: std::collections::HashSet<String>,
+    async_fns: std::sync::Arc<std::collections::HashSet<String>>,
     /// Lengths of `let`-bound array literals (e.g. `let xs = [1, 2, 3];`), so a
     /// later `for x in xs { .. }` can iterate the known-length array.
     array_lens: HashMap<String, usize>,
@@ -1448,21 +1461,21 @@ struct Lower {
     array_elems: HashMap<String, String>,
     /// Literal top-level constants (`const X: i32 = 3;`) folded into uses:
     /// `lower_expr` substitutes the constant operand for the path.
-    const_values: HashMap<String, i128>,
+    const_values: std::sync::Arc<HashMap<String, i128>>,
     /// Non-literal constants: the initializer and the declared slice type, if any.
     const_exprs: std::sync::Arc<HashMap<String, (ast::Expr, Option<String>)>>,
     /// Enum-variant registry: variant constructor name -> (enum struct name,
     /// tag index, payload arity). Enums are represented as tagged structs
     /// `{ long long tag; long long f0; }`; construction lowers to a struct
     /// literal and variant patterns lower to a tag test + field projections.
-    variants: HashMap<String, (String, i128, usize)>,
+    variants: std::sync::Arc<HashMap<String, (String, i128, usize)>>,
     /// The same variants keyed `Enum::Variant`, for paths that name their enum.
-    qualified_variants: HashMap<String, (String, i128, usize)>,
+    qualified_variants: std::sync::Arc<HashMap<String, (String, i128, usize)>>,
     /// The C type of each user-enum payload field, by `(enum, variant tag)`.
-    payload_tys: HashMap<(String, i128), Vec<String>>,
+    payload_tys: std::sync::Arc<HashMap<(String, i128), Vec<String>>>,
     /// The field names of each struct-like variant, by `(enum, variant tag)`, in
     /// declaration order (the payload slots are positional).
-    variant_fields: HashMap<(String, i128), Vec<String>>,
+    variant_fields: std::sync::Arc<HashMap<(String, i128), Vec<String>>>,
     /// The item types the next closure lifted takes as its parameters (set by the
     /// iterator chain that applies it, consumed by `lower_closure`).
     closure_param_hint: Option<Vec<String>>,
@@ -1492,14 +1505,14 @@ struct Lower {
     /// For each lifted closure, the captures it writes: they are passed as pointers.
     closure_ref_caps: HashMap<String, std::collections::HashSet<String>>,
     /// The C parameter types of each top-level function and impl method, by C name.
-    fn_param_tys: HashMap<String, Vec<String>>,
+    fn_param_tys: std::sync::Arc<HashMap<String, Vec<String>>>,
     /// The methods of every `impl` block: `(type, method) -> (C function name, kind)`,
     /// kind 0 for an associated function, 1 for a `&self` method, 2 for `self`.
-    methods: HashMap<(String, String), (String, u8, String)>,
+    methods: std::sync::Arc<HashMap<(String, String), (String, u8, String)>>,
     /// The type of the `impl` block being lowered (what `Self` names), if any.
     self_ty: Option<String>,
     /// The names of the structs in the program and its extra crates.
-    struct_names: std::collections::HashSet<String>,
+    struct_names: std::sync::Arc<std::collections::HashSet<String>>,
     /// Captured variables per lambda-lifted closure (lifted fn name ->
     /// captured local names, in the order they appear as leading parameters).
     closure_captures: HashMap<String, Vec<String>>,
@@ -1536,7 +1549,7 @@ struct Lower {
     /// Names of every top-level (and `async`) function in the program, so a bare
     /// call path can be told apart from an indirect call through a function-pointer
     /// local (a closure value).
-    all_fn_names: std::collections::HashSet<String>,
+    all_fn_names: std::sync::Arc<std::collections::HashSet<String>>,
     /// Top-level `type` aliases, expanded before any type is converted to C.
     aliases: AliasTable,
 }
@@ -1840,14 +1853,14 @@ impl Lower {
             lenient_calls: false,
             deferred: Vec::new(),
             array_elems: HashMap::new(),
-            const_values: HashMap::new(),
+            const_values: std::sync::Arc::new(HashMap::new()),
             const_exprs: std::sync::Arc::new(HashMap::new()),
-            variants: HashMap::new(),
-            qualified_variants: HashMap::new(),
-            payload_tys: HashMap::new(),
-            variant_fields: HashMap::new(),
-            methods: HashMap::new(),
-            fn_param_tys: HashMap::new(),
+            variants: std::sync::Arc::new(HashMap::new()),
+            qualified_variants: std::sync::Arc::new(HashMap::new()),
+            payload_tys: std::sync::Arc::new(HashMap::new()),
+            variant_fields: std::sync::Arc::new(HashMap::new()),
+            methods: std::sync::Arc::new(HashMap::new()),
+            fn_param_tys: std::sync::Arc::new(HashMap::new()),
             self_ty: None,
             expect_ty: None,
             dead_blocks: Vec::new(),
@@ -1861,20 +1874,20 @@ impl Lower {
             renames_stack: Vec::new(),
             closure_param_hint: None,
             closure_ret_hint: None,
-            struct_names: std::collections::HashSet::new(),
+            struct_names: std::sync::Arc::new(std::collections::HashSet::new()),
             closure_captures: HashMap::new(),
             closure_bindings: HashMap::new(),
             fn_asts: std::sync::Arc::new(HashMap::new()),
             spec_done: std::collections::HashSet::new(),
             specs: Vec::new(),
             leading_caps: Vec::new(),
-            async_fns: std::collections::HashSet::new(),
+            async_fns: std::sync::Arc::new(std::collections::HashSet::new()),
             async_ctx: None,
             expecting_future: false,
             tuple_structs: HashMap::new(),
             closure_counter: 0,
             closures: Vec::new(),
-            all_fn_names: std::collections::HashSet::new(),
+            all_fn_names: std::sync::Arc::new(std::collections::HashSet::new()),
             aliases: AliasTable::default(),
         }
     }
@@ -2438,7 +2451,7 @@ impl Lower {
         // Structural capture analysis: a single-segment path name that is neither a
         // closure parameter nor a function is a captured variable. Variant constructors
         // (`Some`, `None`) are not captured variables either.
-        let mut not_captured = self.all_fn_names.clone();
+        let mut not_captured: std::collections::HashSet<String> = (*self.all_fn_names).clone();
         not_captured.extend(self.variants.keys().cloned());
         Ok(closure_captures(body, &param_names, &not_captured))
     }

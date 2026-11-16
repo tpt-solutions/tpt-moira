@@ -5794,7 +5794,9 @@ impl TypeChecker {
                 "String" | "Vec" | "Option" | "Result" | "Path" | "PathBuf"
                     | "Cow" | "TokenKind"
             ));
-        let solver_ok = match ty {
+        // The solver's impl search is run only when the built-in table does not already answer
+        // (it is the costly part of every operator check).
+        let solver_ok = || match ty {
             Ty::Generic(_) | Ty::Unknown | Ty::Never => false,
             t => {
                 let query_ty = if matches!(t, Ty::Int) {
@@ -5832,7 +5834,7 @@ impl TypeChecker {
             Ty::Apply(n, elems) if crate::solver::is_collection_name(n) => {
                 elems.iter().all(|e| self.op_holds_quietly(e, tr, span))
             }
-            _ => std_lenient || solver_ok || TraitDb::implements(tr, ty),
+            _ => std_lenient || TraitDb::implements(tr, ty) || solver_ok(),
         };
         if !ok {
             self.err(
