@@ -15,6 +15,7 @@
 pub mod alias;
 pub mod ast;
 pub mod cfg;
+pub mod closure_inline;
 pub mod closure_return;
 pub mod derive;
 pub mod error;
@@ -33,8 +34,10 @@ use std::path::{Path, PathBuf};
 /// Parse a complete program from a source string.
 pub fn parse_source(src: &str) -> Result<ast::Program, error::Diag> {
     let mut p = parser::Parser::from_source(src);
-    Ok(closure_return::inline_returned_closures(
-        let_conditions::desugar_let_conditions(std_imports::resolve_std_paths(p.parse_program()?)),
+    Ok(closure_inline::inline_closure_calls(
+        closure_return::inline_returned_closures(let_conditions::desugar_let_conditions(
+            std_imports::resolve_std_paths(p.parse_program()?),
+        )),
     ))
 }
 
