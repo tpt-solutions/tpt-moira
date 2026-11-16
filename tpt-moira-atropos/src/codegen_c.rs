@@ -460,6 +460,37 @@ pub fn emit_c(prog: &mir::MirProgram) -> String {
         out.push('\n');
     }
 
+    mark_runtime_static(&out)
+}
+
+/// Make the runtime helpers (`moira_*`, `print_*`, `__moira_*`) file-local. Every program carries
+/// the whole runtime, and a non-`static` helper is compiled at full optimisation even when the
+/// program never calls it; `static` lets the C compiler drop the unused ones before optimising.
+/// Only top-level definitions and their prototypes are changed (a header line ends in `{`, `}` or `;`), so
+/// prototypes and user functions are left alone.
+fn mark_runtime_static(c: &str) -> String {
+    const PREFIXES: [&str; 3] = ["moira_", "print_", "__moira_"];
+    let mut out = String::with_capacity(c.len() + 512);
+    for line in c.split_inclusive('\n') {
+        let body = line.trim_end();
+        let top_level = !body.is_empty() && !body.starts_with([' ', '\t', '#', '}']);
+        // Prototypes are marked too, so a helper's declaration and definition agree (a `static`
+        // definition after a plain prototype is a C error; the lifted closures are declared so).
+        if top_level
+            && (body.ends_with('{') || body.ends_with('}') || body.ends_with(';'))
+            && !body.starts_with("static ")
+            && !body.starts_with("typedef")
+        {
+            if let Some(paren) = body.find('(') {
+                let head = &body[..paren];
+                let name = head.rsplit(' ').next().unwrap_or("").trim_start_matches('*');
+                if PREFIXES.iter().any(|p| name.starts_with(p)) {
+                    out.push_str("static ");
+                }
+            }
+        }
+        out.push_str(line);
+    }
     out
 }
 

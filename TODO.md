@@ -33,8 +33,9 @@ Target: compile a strict subset of Rust (no complex trait resolution, no async/a
 - [ ] Validate 10x speedup target for the subset
   - Status: harness extended and re-run; **10x is not yet met for the canonical
     front-end + SSA mid-end vs `rustc --emit=metadata` measurement (~7.0x
-    geomean), but a full `rustc` build+link baseline shows ~17.9x geomean**, so
-    the gap is in Moira's own mid-end/codegen rather than end-to-end wall time.
+    geomean). **Headline (2026-11-17): the front-end figure.** The end-to-end
+    comparison (Moira C + `gcc -O2` vs `rustc -O`) is about 0.4x and is tracked as a separate
+    open item below; the earlier ~17.9x full-build figure is withdrawn (not like-for-like).
     Three measurements now exist, all recorded via `tpt-moira-bench --record`:
     * **front-end + SSA mid-end** vs `rustc --emit=metadata` → **~7.0x** geomean
       (5 programs: small/medium/large/xlarge/nested; battery grown with two
@@ -56,9 +57,19 @@ Target: compile a strict subset of Rust (no complex trait resolution, no async/a
       own emit is about 16 ms of about 390 ms on `xlarge`; the rest is `gcc -O2`, of which about
       117 ms is fixed process cost (an empty C file). Front end only: `moira --emit check` is about
       10 ms against `rustc --emit=metadata`, the fair comparison, which gives the ~7x above.
-      Decision pending: the 10x target is **not met** end to end; the open question is whether
-      the headline is front end (about 7x, bounded by process startup) or end to end (needs a
-      faster backend than `gcc -O2` on the emitted C).
+      Decision (2026-11-17): the headline is the front-end comparison (about 7x against
+      `rustc --emit=metadata`, bounded by process startup). The 10x target is **not met**
+      end to end. Source-to-binary speed is tracked separately under "End-to-end build speed"
+      below.
+    - **End-to-end build speed (2026-11-17).** Cause of the 0.42x: every generated C file
+      carried the whole runtime, and its non-`static` helpers were compiled at full `gcc -O2`
+      even when unused (about 220 ms of the 346 ms on `xlarge`). `mark_runtime_static`
+      (`tpt-moira-atropos/src/codegen_c.rs`) makes the `moira_*`, `print_*` and `__moira_*`
+      definitions and prototypes `static`, so unused helpers are dropped early. Output is
+      unchanged. Re-measured, same five programs: Moira `--emit c` plus `gcc -O2` is at parity
+      with `rustc -O` (geomean 1.01x; `rustc -O` / Moira-to-binary). The 10x target is still not
+      met end to end. Remaining work: the ratio is now bounded by process startup, so a larger
+      corpus is needed before any further end-to-end claim.
     - **Host floor (2026-11-15): 10x is not reachable by wall-clock on this host.**
       Every timed run is a process launch. Measured here: an empty C executable
       7.2 ms, `moira --emit ssa` on an empty file 8.8-9.5 ms, `rustc --emit=metadata`
