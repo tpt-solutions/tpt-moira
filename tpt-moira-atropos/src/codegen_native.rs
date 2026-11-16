@@ -319,9 +319,15 @@ impl<'a> Emitter<'a> {
                 s.push_str("    pop rax\n");
                 for i in 0..k {
                     s.push_str(&format!("    mov rcx, QWORD PTR [rax + {}]\n", i * 8));
-                    s.push_str(&format!("    mov QWORD PTR {}, rcx\n", Emitter::block_word(base, k, i)));
+                    s.push_str(&format!(
+                        "    mov QWORD PTR {}, rcx\n",
+                        Emitter::block_word(base, k, i)
+                    ));
                 }
-                s.push_str(&format!("    lea rax, [rbp - {}]\n    push rax\n", (base + k) * 8));
+                s.push_str(&format!(
+                    "    lea rax, [rbp - {}]\n    push rax\n",
+                    (base + k) * 8
+                ));
                 Ok(s)
             }
             Op::StructLit(name, fields) => {
@@ -333,9 +339,15 @@ impl<'a> Emitter<'a> {
                     let i = self.field_index(name, fname)?;
                     s.push_str(&self.gen_val(v));
                     s.push_str("    pop rcx\n");
-                    s.push_str(&format!("    mov QWORD PTR {}, rcx\n", Emitter::block_word(base, k, i)));
+                    s.push_str(&format!(
+                        "    mov QWORD PTR {}, rcx\n",
+                        Emitter::block_word(base, k, i)
+                    ));
                 }
-                s.push_str(&format!("    lea rax, [rbp - {}]\n    push rax\n", (base + k) * 8));
+                s.push_str(&format!(
+                    "    lea rax, [rbp - {}]\n    push rax\n",
+                    (base + k) * 8
+                ));
                 Ok(s)
             }
             Op::Field(obj, fname) => {
@@ -344,13 +356,16 @@ impl<'a> Emitter<'a> {
                     .ok_or_else(|| format!("field `{fname}` of a value that is not a struct"))?;
                 let i = self.field_index(&name, fname)?;
                 let mut s = self.gen_val(obj);
-                s.push_str(&format!("    pop rax\n    mov rax, QWORD PTR [rax + {}]\n    push rax\n", i * 8));
+                s.push_str(&format!(
+                    "    pop rax\n    mov rax, QWORD PTR [rax + {}]\n    push rax\n",
+                    i * 8
+                ));
                 Ok(s)
             }
             Op::Store(obj, fname, v) => {
-                let name = self
-                    .struct_of(obj)
-                    .ok_or_else(|| format!("assignment to `{fname}` of a value that is not a struct"))?;
+                let name = self.struct_of(obj).ok_or_else(|| {
+                    format!("assignment to `{fname}` of a value that is not a struct")
+                })?;
                 let i = self.field_index(&name, fname)?;
                 let mut s = self.gen_val(obj);
                 s.push_str(&self.gen_val(v));
@@ -446,7 +461,10 @@ impl<'a> Emitter<'a> {
                         .blocks
                         .get(&idx)
                         .ok_or_else(|| format!("call of `{name}` has no result block"))?;
-                    s.push_str(&format!("    lea rax, [rbp - {}]\n    push rax\n", (base + k) * 8));
+                    s.push_str(&format!(
+                        "    lea rax, [rbp - {}]\n    push rax\n",
+                        (base + k) * 8
+                    ));
                 }
                 for a in args {
                     s.push_str(&self.gen_val(a));
@@ -528,13 +546,20 @@ fn emit_function_asm(
         value_ty.push(ty);
     }
     let slots = compute_slots(func, structs, &value_ty);
+    // The type of every name: a local, or a named SSA value (a temporary bound to a name).
+    let mut name_ty: HashMap<String, String> = local_ty.clone();
+    for (i, v) in func.values.iter().enumerate() {
+        if let Some(n) = &v.name {
+            name_ty.entry(n.clone()).or_insert_with(|| value_ty[i].clone());
+        }
+    }
     let mut em = Emitter {
         slots: &slots,
         label: 0,
         structs,
         struct_fns,
         value_ty: &value_ty,
-        local_ty: &local_ty,
+        local_ty: &name_ty,
     };
     out.push_str(&format!("\n{}:\n", fn_label(&func.name)));
     out.push_str("    push rbp\n    mov rbp, rsp\n");
@@ -561,17 +586,28 @@ fn emit_function_asm(
     // A struct parameter is copied into the callee's own block; the parameter then points there.
     for (p, base, k) in &slots.param_blocks {
         let off = em.off(slots.named[p]);
-        out.push_str(&format!("    mov rax, QWORD PTR {off}
-"));
+        out.push_str(&format!(
+            "    mov rax, QWORD PTR {off}
+"
+        ));
         for i in 0..*k {
-            out.push_str(&format!("    mov rcx, QWORD PTR [rax + {}]
-", i * 8));
-            out.push_str(&format!("    mov QWORD PTR {}, rcx
-", Emitter::block_word(*base, *k, i)));
+            out.push_str(&format!(
+                "    mov rcx, QWORD PTR [rax + {}]
+",
+                i * 8
+            ));
+            out.push_str(&format!(
+                "    mov QWORD PTR {}, rcx
+",
+                Emitter::block_word(*base, *k, i)
+            ));
         }
-        out.push_str(&format!("    lea rax, [rbp - {}]
+        out.push_str(&format!(
+            "    lea rax, [rbp - {}]
     mov QWORD PTR {off}, rax
-", (base + k) * 8));
+",
+            (base + k) * 8
+        ));
     }
     for (bi, block) in func.blocks.iter().enumerate() {
         out.push_str(&format!("{}_b{}:\n", func.name, bi));
@@ -697,6 +733,137 @@ fn vec_helpers_asm(elem: &str) -> String {
     )
 }
 
+/// The other `Vec` methods the MIR calls: `remove(i)` (returns the element), `insert(i, x)`,
+/// `reverse()` and, for word-compared elements, `contains(x)`. An index out of range traps (`ud2`).
+fn vec_more_helpers_asm(elem: &str) -> String {
+    let push = crate::mir::vec_fn_name(elem, "push");
+    let remove = crate::mir::vec_fn_name(elem, "remove");
+    let insert = crate::mir::vec_fn_name(elem, "insert");
+    let reverse = crate::mir::vec_fn_name(elem, "reverse");
+    let contains = crate::mir::vec_fn_name(elem, "contains");
+    let mut out = format!(
+        r#"
+{remove}:
+    mov rax, QWORD PTR [rdi + 8]
+    cmp rsi, rax
+    jae {remove}_trap
+    mov rcx, QWORD PTR [rdi]
+    mov rdx, QWORD PTR [rcx + rsi*8]
+    lea r9, [rax - 1]
+{remove}_shift:
+    cmp rsi, r9
+    jae {remove}_done
+    mov r10, QWORD PTR [rcx + rsi*8 + 8]
+    mov QWORD PTR [rcx + rsi*8], r10
+    add rsi, 1
+    jmp {remove}_shift
+{remove}_done:
+    mov QWORD PTR [rdi + 8], r9
+    mov rax, rdx
+    ret
+{remove}_trap:
+    ud2
+{insert}:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 32
+    mov QWORD PTR [rbp - 8], rdi
+    mov QWORD PTR [rbp - 16], rsi
+    mov QWORD PTR [rbp - 24], rdx
+    mov rax, QWORD PTR [rdi + 8]
+    cmp rsi, rax
+    ja {insert}_trap
+    mov rsi, rdx
+    call {push}
+    mov rdi, QWORD PTR [rbp - 8]
+    mov rcx, QWORD PTR [rbp - 16]
+    mov rdx, QWORD PTR [rdi + 8]
+    mov r8, QWORD PTR [rdi]
+    lea r9, [rdx - 1]
+{insert}_shift:
+    cmp r9, rcx
+    jbe {insert}_place
+    mov r10, QWORD PTR [r8 + r9*8 - 8]
+    mov QWORD PTR [r8 + r9*8], r10
+    sub r9, 1
+    jmp {insert}_shift
+{insert}_place:
+    mov r10, QWORD PTR [rbp - 24]
+    mov QWORD PTR [r8 + rcx*8], r10
+    xor eax, eax
+    mov rsp, rbp
+    pop rbp
+    ret
+{insert}_trap:
+    ud2
+{reverse}:
+    mov rcx, QWORD PTR [rdi]
+    mov rax, QWORD PTR [rdi + 8]
+    xor edx, edx
+    lea r8, [rax - 1]
+{reverse}_loop:
+    cmp rdx, r8
+    jge {reverse}_done
+    mov r9, QWORD PTR [rcx + rdx*8]
+    mov r10, QWORD PTR [rcx + r8*8]
+    mov QWORD PTR [rcx + rdx*8], r10
+    mov QWORD PTR [rcx + r8*8], r9
+    add rdx, 1
+    sub r8, 1
+    jmp {reverse}_loop
+{reverse}_done:
+    xor eax, eax
+    ret
+"#
+    );
+    if elem != "str" {
+        out.push_str(&format!(
+            r#"
+{contains}:
+    mov rcx, QWORD PTR [rdi]
+    mov rax, QWORD PTR [rdi + 8]
+    xor edx, edx
+{contains}_loop:
+    cmp rdx, rax
+    jge {contains}_no
+    cmp QWORD PTR [rcx + rdx*8], rsi
+    je {contains}_yes
+    add rdx, 1
+    jmp {contains}_loop
+{contains}_yes:
+    mov eax, 1
+    ret
+{contains}_no:
+    xor eax, eax
+    ret
+"#
+        ));
+    }
+    out
+}
+
+/// A failed `panic!`/`unwrap`: exit with status 101, as the C runtime does.
+fn panic_asm() -> String {
+    if cfg!(windows) {
+        "
+__moira_panic:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 32
+    mov ecx, 101
+    call exit
+".to_string()
+    } else {
+        "
+__moira_panic:
+    push rbp
+    mov rbp, rsp
+    mov edi, 101
+    call exit
+".to_string()
+    }
+}
+
 /// The allocation wrapper the vector helpers call: `realloc(rdi, rsi)` with the platform's C
 /// calling convention (Windows x64 passes the arguments in rcx and rdx, with shadow space).
 fn realloc_wrapper_asm() -> String {
@@ -788,7 +955,12 @@ pub fn emit_asm(prog: &SsaProgram) -> Result<String, String> {
     let mut structs: HashMap<String, Vec<String>> = prog
         .structs
         .iter()
-        .map(|s| (s.name.clone(), s.fields.iter().map(|(n, _)| n.clone()).collect()))
+        .map(|s| {
+            (
+                s.name.clone(),
+                s.fields.iter().map(|(n, _)| n.clone()).collect(),
+            )
+        })
         .collect();
     // The vector types of the program. A `Vec<elem>` is a struct of `data`, `len` and `cap`; its
     // elements are one word each, so an element must be a word-sized value (not a struct).
@@ -815,6 +987,38 @@ pub fn emit_asm(prog: &SsaProgram) -> Result<String, String> {
             crate::mir::vec_type(e),
             vec!["data".to_string(), "len".to_string(), "cap".to_string()],
         );
+    }
+    // Generic instances of a struct (`Option<i64>`) share the base struct's layout. Their payloads
+    // must be one word: a struct or vector payload is not supported natively.
+    let mut instances: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for f in &prog.functions {
+        let tys = f
+            .locals
+            .iter()
+            .filter_map(|(_, t)| t.clone())
+            .chain(f.values.iter().map(|v| v.ty.clone()));
+        for ty in tys {
+            if !ty.ends_with('*') && ty.contains('<') {
+                instances.insert(ty);
+            }
+        }
+    }
+    for ty in &instances {
+        let Some((base, args)) = crate::mir::split_generic(ty) else {
+            continue;
+        };
+        let Some(layout) = structs.get(base).cloned() else {
+            continue;
+        };
+        if args
+            .iter()
+            .any(|a| structs.contains_key(*a) || a.starts_with("Vec<"))
+        {
+            return Err(format!(
+                "the native backend does not support `{ty}` (a struct or vector payload)"
+            ));
+        }
+        structs.insert(ty.clone(), layout);
     }
     let structs = &structs;
     let struct_fns: std::collections::HashSet<String> = prog
@@ -852,8 +1056,10 @@ pub fn emit_asm(prog: &SsaProgram) -> Result<String, String> {
     }
     for e in &vec_elems {
         out.push_str(&vec_helpers_asm(e));
+        out.push_str(&vec_more_helpers_asm(e));
     }
     out.push_str(&realloc_wrapper_asm());
+    out.push_str(&panic_asm());
 
     // The string constants of the program, each once, as NUL-terminated data.
     let mut strings: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
@@ -862,7 +1068,11 @@ pub fn emit_asm(prog: &SsaProgram) -> Result<String, String> {
     }
     out.push_str("\n.data\n");
     for text in &strings {
-        out.push_str(&format!("{}:\n    .asciz \"{}\"\n", str_label(text), asm_string(text)));
+        out.push_str(&format!(
+            "{}:\n    .asciz \"{}\"\n",
+            str_label(text),
+            asm_string(text)
+        ));
     }
     out.push_str(".text\n");
 

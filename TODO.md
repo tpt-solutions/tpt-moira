@@ -130,7 +130,12 @@ Target: compile a strict subset of Rust (no complex trait resolution, no async/a
       values are rejected. The native driver now lowers with the checker's types, as the C
       backend does. Test: `tpt-moira-lachesis/tests/native_structs.rs`, which matches the C
       output on growth, `&mut` and struct-field vectors, iteration and clear.
-      **Not yet:** the other `Vec` methods (`remove`, `insert`, `pop`, `reverse`, `contains`,
+      **Also (2026-11-17):** `remove`, `insert`, `reverse` and `contains` (word elements) for
+      vectors; `Option<T>` for word payloads (returns, `match`, `is_some`, `unwrap`; a panic exits
+      with status 101 but does not print the message); generic struct instances share the base
+      layout; the native backend types temporaries bound to names. Test:
+      `native_vector_methods_and_option_run`.
+      **Not yet:** the other `Vec` methods (`pop`, `extend`, `sort`, `dedup`, `retain`, ...)
       `extend`, `sort`, ...), slices, `HashMap`, strings beyond literals, floats, enums and
       tuples, and index bounds checks (an out-of-range index is not caught).
     - **End-to-end build speed (2026-11-17).** Cause of the 0.42x: every generated C file

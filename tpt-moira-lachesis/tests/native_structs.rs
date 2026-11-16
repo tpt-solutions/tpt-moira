@@ -18,11 +18,15 @@ fn build_and_run(name: &str, src: &str) -> Option<String> {
     let prog = tpt_moira_clotho::parse_source(src).expect("program should parse");
     let hints = tpt_moira_lachesis::expr_type_hints(&prog, &[]);
     let mir = tpt_moira_atropos::lower_program_typed(&prog, &hints).expect("program should lower");
-    let ssa = tpt_moira_atropos::ssa::SsaProgram::from_mir(&mir).expect("program should convert to SSA");
+    let ssa =
+        tpt_moira_atropos::ssa::SsaProgram::from_mir(&mir).expect("program should convert to SSA");
     let exe: PathBuf = std::env::temp_dir().join(format!("moira_native_{name}.exe"));
     tpt_moira_atropos::codegen_native::compile_to_native(&ssa, &exe).expect("native build");
     let out = Command::new(&exe).output().expect("run native program");
-    assert!(out.status.success(), "native program {name} exited with failure");
+    assert!(
+        out.status.success(),
+        "native program {name} exited with failure"
+    );
     Some(String::from_utf8_lossy(&out.stdout).replace("\r\n", "\n"))
 }
 
@@ -55,7 +59,10 @@ fn native_structs_copy_mutate_and_return_run() {
         Some(o) => o,
         None => return,
     };
-    assert_eq!(out, "1\n50\n101\n1\n7\n70\n", "struct values should copy, mutate and return as in Rust");
+    assert_eq!(
+        out, "1\n50\n101\n1\n7\n70\n",
+        "struct values should copy, mutate and return as in Rust"
+    );
 }
 
 #[test]
@@ -92,5 +99,42 @@ fn native_vectors_grow_index_iterate_and_clear_run() {
         Some(o) => o,
         None => return,
     };
-    assert_eq!(out, "0\n1\n100\n297\n14850\n27\n6\n1\n", "vectors should behave as in Rust");
+    assert_eq!(
+        out, "0\n1\n100\n297\n14850\n27\n6\n1\n",
+        "vectors should behave as in Rust"
+    );
+}
+
+#[test]
+fn native_vector_methods_and_option_run() {
+    let out = match build_and_run(
+        "vecmethods",
+        "fn half(n: i64) -> Option<i64> {
+            if n % 2 == 0 { Some(n / 2) } else { None }
+        }
+        fn main() {
+            let mut v: Vec<i64> = vec![5, 6, 7];
+            v.insert(1, 9);
+            print_i64(v.remove(0));
+            v.reverse();
+            print_i64(v.contains(&9) as i64);
+            print_i64(v.len() as i64);
+            for x in v.iter() { print_i64(*x); }
+            match half(10) {
+                Some(x) => print_i64(x),
+                None => print_i64(-1),
+            }
+            match half(7) {
+                Some(x) => print_i64(x),
+                None => print_i64(-1),
+            }
+            let o = half(8);
+            print_i64(o.is_some() as i64);
+            print_i64(o.unwrap());
+        }",
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "5\n1\n3\n7\n6\n9\n5\n-1\n1\n4\n", "vector methods and Option should match Rust");
 }
