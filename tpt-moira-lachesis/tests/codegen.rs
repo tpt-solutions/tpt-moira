@@ -1075,6 +1075,33 @@ fn helper_taking_a_closure_is_expanded_at_its_call_site() {
     assert_eq!(out, "2\n19", "the expanded helper should write the captured variable");
 }
 
+/// A let-bound closure that writes a captured variable writes the caller's variable: the
+/// variable is passed by pointer, and the closure body reads and writes it through that
+/// pointer. A closure that only reads a capture still passes it by value.
+#[test]
+fn let_bound_closure_writes_reach_the_captured_variable() {
+    let out = match run_src(
+        "fn main() {
+            let mut n = 0;
+            let k = 10;
+            let mut f = |a: i64| {
+                n = n + a;
+                n += k;
+            };
+            f(2);
+            f(3);
+            print_i64(n);
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping by-reference capture run");
+            return;
+        }
+    };
+    assert_eq!(out, "25", "each call should add to the captured variable");
+}
+
 #[test]
 fn enum_match_and_if_let_run() {
     // Enum-variant construction (`Some(7)` / `None`), `match` with

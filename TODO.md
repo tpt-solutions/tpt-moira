@@ -710,6 +710,16 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
             the checker types it so; test `option_as_ref_over_string_and_integer_runs`.)
             `Arc<TypeHints>` fields in the compiler's own lowering (cross-crate smart pointer),
             and `Hasher::finish`.
+          - Status (2026-11-16, by-reference captures): a closure whose body writes a captured
+            variable passes that variable by pointer (`__ref_<name>`), and its reads and writes
+            go through it. Call sites pass the caller's address (`capture_operands`). A let-bound
+            closure now prints the value Rust prints (`n = n + a` gives 5, not 0). Test:
+            `let_bound_closure_writes_reach_the_captured_variable`. Still open: a written capture
+            passed to a generic helper (`build_spec` passes captures by value, so it is reported),
+            and closures passed through a non-generic `impl FnMut` helper that passes them on
+            (`visit_expr`); both need the closure-value design. Also a generic `&mut F` helper
+            does not specialise (`call to each`), and `let f = ..; each(&mut f)` gives invalid
+            C, so the `impl Trait`-to-generic rewrite is not yet a safe route.
           - Status (2026-11-16, option 2, inlining closure helpers): a helper that takes an
             `impl Fn`/`&mut impl FnMut`/`fn` closure parameter is expanded at each call that
             passes a closure literal (`clotho/src/closure_inline.rs`). Each call of the closure
