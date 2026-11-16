@@ -864,6 +864,157 @@ __moira_panic:
     }
 }
 
+/// The assembly of the `Map<k, v>` helpers the MIR calls. A map is a struct of `keys`, `vals`,
+/// `len` and `cap` (a linear table, as the C runtime's). Keys and values are one word each.
+/// `new` and `insert` (which returns `Option<v>`) take the caller's destination block first.
+/// `get_ptr` returns the address of the value, or null when the key is absent.
+fn map_helpers_asm(k: &str, v: &str) -> String {
+    let new = crate::mir::map_fn_name(k, v, "new");
+    let find = crate::mir::map_fn_name(k, v, "find");
+    let insert = crate::mir::map_fn_name(k, v, "insert");
+    let get_ptr = crate::mir::map_fn_name(k, v, "get_ptr");
+    let contains = crate::mir::map_fn_name(k, v, "contains_key");
+    let len = crate::mir::map_fn_name(k, v, "len");
+    let is_empty = crate::mir::map_fn_name(k, v, "is_empty");
+    format!(
+        r#"
+{new}:
+    push rbp
+    mov rbp, rsp
+    mov QWORD PTR [rdi], 0
+    mov QWORD PTR [rdi + 8], 0
+    mov QWORD PTR [rdi + 16], 0
+    mov QWORD PTR [rdi + 24], 0
+    mov rax, rdi
+    pop rbp
+    ret
+{find}:
+    mov rcx, QWORD PTR [rdi + 16]
+    mov r8, QWORD PTR [rdi]
+    xor edx, edx
+{find}_loop:
+    cmp rdx, rcx
+    jge {find}_no
+    cmp QWORD PTR [r8 + rdx*8], rsi
+    je {find}_yes
+    add rdx, 1
+    jmp {find}_loop
+{find}_yes:
+    mov rax, rdx
+    ret
+{find}_no:
+    mov rax, -1
+    ret
+{get_ptr}:
+    push rbp
+    mov rbp, rsp
+    call {find}
+    cmp rax, 0
+    jl {get_ptr}_none
+    mov rdx, QWORD PTR [rdi + 8]
+    lea rax, [rdx + rax*8]
+    pop rbp
+    ret
+{get_ptr}_none:
+    xor eax, eax
+    pop rbp
+    ret
+{insert}:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 48
+    mov QWORD PTR [rbp - 8], rdi
+    mov QWORD PTR [rbp - 16], rsi
+    mov QWORD PTR [rbp - 24], rdx
+    mov QWORD PTR [rbp - 32], rcx
+    mov rdi, rsi
+    mov rsi, rdx
+    call {find}
+    cmp rax, 0
+    jl {insert}_new
+    mov rdi, QWORD PTR [rbp - 16]
+    mov rdx, QWORD PTR [rdi + 8]
+    mov rcx, QWORD PTR [rdx + rax*8]
+    mov r8, QWORD PTR [rbp - 32]
+    mov QWORD PTR [rdx + rax*8], r8
+    mov rdi, QWORD PTR [rbp - 8]
+    mov QWORD PTR [rdi], 0
+    mov QWORD PTR [rdi + 8], rcx
+    mov rax, rdi
+    mov rsp, rbp
+    pop rbp
+    ret
+{insert}_new:
+    mov rdi, QWORD PTR [rbp - 8]
+    mov QWORD PTR [rdi], 1
+    mov QWORD PTR [rdi + 8], 0
+    mov rdi, QWORD PTR [rbp - 16]
+    mov rax, QWORD PTR [rdi + 16]
+    cmp rax, QWORD PTR [rdi + 24]
+    jb {insert}_fits
+    mov rcx, QWORD PTR [rdi + 24]
+    test rcx, rcx
+    jnz {insert}_double
+    mov rcx, 4
+    jmp {insert}_have
+{insert}_double:
+    add rcx, rcx
+{insert}_have:
+    mov QWORD PTR [rbp - 40], rcx
+    mov rdi, QWORD PTR [rbp - 16]
+    mov rdi, QWORD PTR [rdi]
+    mov rsi, QWORD PTR [rbp - 40]
+    shl rsi, 3
+    call moira_rt_realloc
+    mov rdi, QWORD PTR [rbp - 16]
+    mov QWORD PTR [rdi], rax
+    mov rdi, QWORD PTR [rbp - 16]
+    mov rdi, QWORD PTR [rdi + 8]
+    mov rsi, QWORD PTR [rbp - 40]
+    shl rsi, 3
+    call moira_rt_realloc
+    mov rdi, QWORD PTR [rbp - 16]
+    mov QWORD PTR [rdi + 8], rax
+    mov rcx, QWORD PTR [rbp - 40]
+    mov QWORD PTR [rdi + 24], rcx
+{insert}_fits:
+    mov rdi, QWORD PTR [rbp - 16]
+    mov rax, QWORD PTR [rdi + 16]
+    mov rdx, QWORD PTR [rbp - 24]
+    mov rcx, QWORD PTR [rdi]
+    mov QWORD PTR [rcx + rax*8], rdx
+    mov r8, QWORD PTR [rbp - 32]
+    mov rcx, QWORD PTR [rdi + 8]
+    mov QWORD PTR [rcx + rax*8], r8
+    add rax, 1
+    mov QWORD PTR [rdi + 16], rax
+    mov rax, QWORD PTR [rbp - 8]
+    mov QWORD PTR [rax], 1
+    mov QWORD PTR [rax + 8], 0
+    mov rsp, rbp
+    pop rbp
+    ret
+{contains}:
+    push rbp
+    mov rbp, rsp
+    call {find}
+    cmp rax, 0
+    setge al
+    movzx eax, al
+    pop rbp
+    ret
+{len}:
+    mov rax, QWORD PTR [rdi + 16]
+    ret
+{is_empty}:
+    xor eax, eax
+    cmp QWORD PTR [rdi + 16], 0
+    sete al
+    ret
+"#
+    )
+}
+
 /// The allocation wrapper the vector helpers call: `realloc(rdi, rsi)` with the platform's C
 /// calling convention (Windows x64 passes the arguments in rcx and rdx, with shadow space).
 fn realloc_wrapper_asm() -> String {
@@ -1003,12 +1154,35 @@ pub fn emit_asm(prog: &SsaProgram) -> Result<String, String> {
             }
         }
     }
+    let mut maps: std::collections::BTreeSet<(String, String)> = std::collections::BTreeSet::new();
+    for ty in &instances {
+        if let Some(("Map", args)) = crate::mir::split_generic(ty) {
+            if let [k, v] = args[..] {
+                maps.insert((k.to_string(), v.to_string()));
+            }
+        }
+    }
     for ty in &instances {
         let Some((base, args)) = crate::mir::split_generic(ty) else {
             continue;
         };
-        let Some(layout) = structs.get(base).cloned() else {
-            continue;
+        let layout = if base == "Map" {
+            if args.first() == Some(&"str") {
+                return Err(format!(
+                    "the native backend does not support maps with string keys (`{ty}`)"
+                ));
+            }
+            vec![
+                "keys".to_string(),
+                "vals".to_string(),
+                "len".to_string(),
+                "cap".to_string(),
+            ]
+        } else {
+            let Some(layout) = structs.get(base).cloned() else {
+                continue;
+            };
+            layout
         };
         if args
             .iter()
@@ -1027,6 +1201,12 @@ pub fn emit_asm(prog: &SsaProgram) -> Result<String, String> {
         .filter(|f| f.ret.as_ref().is_some_and(|r| structs.contains_key(r)))
         .map(|f| f.name.clone())
         .chain(vec_elems.iter().map(|e| crate::mir::vec_fn_name(e, "new")))
+        .chain(maps.iter().flat_map(|(k, v)| {
+            [
+                crate::mir::map_fn_name(k, v, "new"),
+                crate::mir::map_fn_name(k, v, "insert"),
+            ]
+        }))
         .collect();
     let struct_fns = &struct_fns;
     let bodies: Vec<Result<String, String>> = std::thread::scope(|s| {
@@ -1057,6 +1237,9 @@ pub fn emit_asm(prog: &SsaProgram) -> Result<String, String> {
     for e in &vec_elems {
         out.push_str(&vec_helpers_asm(e));
         out.push_str(&vec_more_helpers_asm(e));
+    }
+    for (k, v) in &maps {
+        out.push_str(&map_helpers_asm(k, v));
     }
     out.push_str(&realloc_wrapper_asm());
     out.push_str(&panic_asm());

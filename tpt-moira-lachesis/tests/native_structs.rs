@@ -138,3 +138,34 @@ fn native_vector_methods_and_option_run() {
     };
     assert_eq!(out, "5\n1\n3\n7\n6\n9\n5\n-1\n1\n4\n", "vector methods and Option should match Rust");
 }
+
+#[test]
+fn native_hashmap_insert_get_contains_iterate_run() {
+    let out = match build_and_run(
+        "hashmap",
+        "use std::collections::HashMap;
+        fn build(n: i64) -> HashMap<i64, i64> {
+            let mut m: HashMap<i64, i64> = HashMap::new();
+            let mut i: i64 = 0;
+            while i < n { m.insert(i * 7, i * i); i = i + 1; }
+            m
+        }
+        fn main() {
+            let mut m = build(40);
+            print_i64(m.len() as i64);
+            match m.get(&21) { Some(x) => print_i64(*x), None => print_i64(-1) }
+            match m.get(&22) { Some(x) => print_i64(*x), None => print_i64(-1) }
+            m.insert(21, 5);
+            match m.get(&21) { Some(x) => print_i64(*x), None => print_i64(-1) }
+            print_i64(m.contains_key(&273) as i64);
+            print_i64(m.is_empty() as i64);
+            let mut total: i64 = 0;
+            for (k, v) in m.iter() { total = total + k + v; }
+            print_i64(total);
+        }",
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "40\n9\n-1\n5\n1\n0\n25996\n", "the map should behave as in Rust");
+}

@@ -135,7 +135,12 @@ Target: compile a strict subset of Rust (no complex trait resolution, no async/a
       with status 101 but does not print the message); generic struct instances share the base
       layout; the native backend types temporaries bound to names. Test:
       `native_vector_methods_and_option_run`.
-      **Not yet:** the other `Vec` methods (`pop`, `extend`, `sort`, `dedup`, `retain`, ...)
+      **HashMap (2026-11-17):** `Map<K,V>` for word-sized keys and values (integers, bools,
+      pointers): a linear table like the C runtime's, with `new`, `insert` (returns `Option<V>`),
+      `get_ptr`, `contains_key`, `len`, `is_empty`, and iteration. String keys are rejected
+      natively. `pop` and `extend` already lower through the MIR and work natively. Test:
+      `native_hashmap_insert_get_contains_iterate_run`, which matches the C output.
+      **Not yet:** `remove` on maps and `Vec` `sort`/`dedup`/`retain`, string keys, slices,
       `extend`, `sort`, ...), slices, `HashMap`, strings beyond literals, floats, enums and
       tuples, and index bounds checks (an out-of-range index is not caught).
     - **End-to-end build speed (2026-11-17).** Cause of the 0.42x: every generated C file
