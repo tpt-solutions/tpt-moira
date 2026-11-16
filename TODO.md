@@ -710,6 +710,19 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
             the checker types it so; test `option_as_ref_over_string_and_integer_runs`.)
             `Arc<TypeHints>` fields in the compiler's own lowering (cross-crate smart pointer),
             and `Hasher::finish`.
+          - Status (2026-11-16, closure values through specialisation): the route that works now
+            is specialisation, not a new closure ABI. A generic helper taking its closure as
+            `F`, `&mut F` or `impl FnMut` is specialised for each closure literal or bound
+            closure passed to it (`lower_specialized_call`), with the closure's captures passed
+            as leading parameters, and a written capture as a pointer (`__ref_<name>`). The
+            checker gives a borrowed closure literal its bound's parameter types, the
+            specialised call adapts `&arr` to a slice, and `Option`/`Result` closure parameters
+            take their checker type. Recursive helpers that pass the closure on work (`walk`).
+            Tests: `generic_helper_with_a_borrowed_closure_writes_the_capture`.
+            Still open: non-generic helpers that pass a capturing closure on (`visit_expr`)
+            still need the closure-value design, and the monomorphiser (`mono.rs`) does not
+            create instances for these calls (its own closure specialisation passes captures
+            by value, so it is left alone).
           - Status (2026-11-16, by-reference captures): a closure whose body writes a captured
             variable passes that variable by pointer (`__ref_<name>`), and its reads and writes
             go through it. Call sites pass the caller's address (`capture_operands`). A let-bound

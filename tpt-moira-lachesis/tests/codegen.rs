@@ -1102,6 +1102,48 @@ fn let_bound_closure_writes_reach_the_captured_variable() {
     assert_eq!(out, "25", "each call should add to the captured variable");
 }
 
+/// A generic helper that takes its closure by `&mut F` (or `impl FnMut`) is specialised for the
+/// closure: a write to a captured variable reaches the caller, the closure's `Option` parameter
+/// has its declared type, and a recursive helper that passes the closure on works.
+#[test]
+fn generic_helper_with_a_borrowed_closure_writes_the_capture() {
+    let out = match run_src(
+        "fn each<F: FnMut(i64, Option<i64>)>(items: &[i64], f: &mut F) {
+            for x in items {
+                let y = *x + 1;
+                f(y, if *x > 1 { Some(*x) } else { None });
+            }
+        }
+        fn walk<F: FnMut(i64)>(n: i64, f: &mut F) {
+            if n > 0 {
+                f(n);
+                walk(n - 1, f);
+            }
+        }
+        fn main() {
+            let mut n = 0;
+            each(&[1, 2, 3], &mut |a, b| {
+                if b.is_none() {
+                    n = n + a;
+                }
+            });
+            print_i64(n);
+            let mut s: i64 = 0;
+            walk(3, &mut |x| {
+                s = s + x;
+            });
+            print_i64(s);
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping generic closure run");
+            return;
+        }
+    };
+    assert_eq!(out, "2\n6", "the specialised helpers should write the captured variables");
+}
+
 #[test]
 fn enum_match_and_if_let_run() {
     // Enum-variant construction (`Some(7)` / `None`), `match` with
