@@ -421,7 +421,9 @@ fn lower_for_emit(
 fn lower_and_ssa(
     program: &tpt_moira_clotho::ast::Program,
 ) -> Result<tpt_moira_atropos::SsaProgram, String> {
-    let mir = tpt_moira_atropos::lower_program(program).map_err(|e| e.to_string())?;
+    // Typed lowering: method calls and fields need the checker's types, as the C backend has.
+    let hints = tpt_moira_lachesis::expr_type_hints(program, &[]);
+    let mir = tpt_moira_atropos::lower_program_typed(program, &hints).map_err(|e| e.to_string())?;
     let mut ssa = tpt_moira_atropos::build_ssa(&mir)?;
     ssa.optimize();
     Ok(ssa)

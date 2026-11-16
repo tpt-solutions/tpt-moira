@@ -213,6 +213,20 @@ fn collect_names_in_op(op: &Op, visit: &mut impl FnMut(&str)) {
                 }
             }
         }
+        Op::Index(a, b) | Op::IndexRef(a, b) => {
+            for x in [a, b] {
+                if let Val::Name(n) = x {
+                    visit(n);
+                }
+            }
+        }
+        Op::StoreIndex(a, b, c) => {
+            for x in [a, b, c] {
+                if let Val::Name(n) = x {
+                    visit(n);
+                }
+            }
+        }
         Op::Const(_) => {}
     }
 }
@@ -452,6 +466,28 @@ impl<'a> Emitter<'a> {
                 s.push_str("    push rax\n");
                 Ok(s)
             }
+            // An element of an array (a vector's data): words are 8 bytes.
+            Op::Index(b, i) => {
+                let mut s = self.gen_val(b);
+                s.push_str(&self.gen_val(i));
+                s.push_str("    pop rcx\n    pop rax\n    mov rax, QWORD PTR [rax + rcx*8]\n    push rax\n");
+                Ok(s)
+            }
+            Op::IndexRef(b, i) => {
+                let mut s = self.gen_val(b);
+                s.push_str(&self.gen_val(i));
+                s.push_str("    pop rcx\n    pop rax\n    lea rax, [rax + rcx*8]\n    push rax\n");
+                Ok(s)
+            }
+            Op::StoreIndex(b, i, v) => {
+                let mut s = self.gen_val(b);
+                s.push_str(&self.gen_val(i));
+                s.push_str(&self.gen_val(v));
+                s.push_str(
+                    "    pop rdx\n    pop rcx\n    pop rax\n    mov QWORD PTR [rax + rcx*8], rdx\n    xor eax, eax\n    push rax\n",
+                );
+                Ok(s)
+            }
             // A reference to a struct is the struct's pointer.
             Op::Ref(v) if self.struct_of(v).is_some() => Ok(self.gen_val(v)),
             Op::Ref(..) => Err(
@@ -585,6 +621,92 @@ fn emit_function_asm(
 /// Each function is emitted on its own thread and the results are joined in the
 /// original function order, so the output (and the first error reported) is
 /// deterministic regardless of scheduling.
+/// The assembly of the `Vec<elem>` helpers the MIR calls (`new`, `push`, `len`, `is_empty`,
+/// `clear`). A vector is a struct of `data`, `len` and `cap`; elements are one word each, so the
+/// element type only has to be a word-sized scalar, string or pointer. `new` takes the caller's
+/// destination block (the struct-return convention) and returns it.
+fn vec_helpers_asm(elem: &str) -> String {
+    let new = crate::mir::vec_fn_name(elem, "new");
+    let push = crate::mir::vec_fn_name(elem, "push");
+    let len = crate::mir::vec_fn_name(elem, "len");
+    let is_empty = crate::mir::vec_fn_name(elem, "is_empty");
+    let clear = crate::mir::vec_fn_name(elem, "clear");
+    format!(
+        r#"
+{new}:
+    push rbp
+    mov rbp, rsp
+    mov QWORD PTR [rdi], 0
+    mov QWORD PTR [rdi + 8], 0
+    mov QWORD PTR [rdi + 16], 0
+    mov rax, rdi
+    pop rbp
+    ret
+{push}:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 32
+    mov QWORD PTR [rbp - 8], rdi
+    mov QWORD PTR [rbp - 16], rsi
+    mov rax, QWORD PTR [rdi + 8]
+    cmp rax, QWORD PTR [rdi + 16]
+    jb {push}_fits
+    mov rcx, QWORD PTR [rdi + 16]
+    test rcx, rcx
+    jnz {push}_double
+    mov rcx, 4
+    jmp {push}_have
+{push}_double:
+    add rcx, rcx
+{push}_have:
+    mov QWORD PTR [rbp - 24], rcx
+    mov rdi, QWORD PTR [rbp - 8]
+    mov rdi, QWORD PTR [rdi]
+    mov rsi, QWORD PTR [rbp - 24]
+    shl rsi, 3
+    call moira_rt_realloc
+    mov rdi, QWORD PTR [rbp - 8]
+    mov QWORD PTR [rdi], rax
+    mov rcx, QWORD PTR [rbp - 24]
+    mov QWORD PTR [rdi + 16], rcx
+{push}_fits:
+    mov rdi, QWORD PTR [rbp - 8]
+    mov rax, QWORD PTR [rdi + 8]
+    mov rcx, QWORD PTR [rdi]
+    mov rdx, QWORD PTR [rbp - 16]
+    mov QWORD PTR [rcx + rax*8], rdx
+    add rax, 1
+    mov QWORD PTR [rdi + 8], rax
+    xor eax, eax
+    mov rsp, rbp
+    pop rbp
+    ret
+{len}:
+    mov rax, QWORD PTR [rdi + 8]
+    ret
+{is_empty}:
+    xor eax, eax
+    cmp QWORD PTR [rdi + 8], 0
+    sete al
+    ret
+{clear}:
+    mov QWORD PTR [rdi + 8], 0
+    xor eax, eax
+    ret
+"#
+    )
+}
+
+/// The allocation wrapper the vector helpers call: `realloc(rdi, rsi)` with the platform's C
+/// calling convention (Windows x64 passes the arguments in rcx and rdx, with shadow space).
+fn realloc_wrapper_asm() -> String {
+    if cfg!(windows) {
+        "\nmoira_rt_realloc:\n    push rbp\n    mov rbp, rsp\n    sub rsp, 32\n    mov rcx, rdi\n    mov rdx, rsi\n    call realloc\n    mov rsp, rbp\n    pop rbp\n    ret\n".to_string()
+    } else {
+        "\nmoira_rt_realloc:\n    push rbp\n    mov rbp, rsp\n    call realloc\n    pop rbp\n    ret\n".to_string()
+    }
+}
+
 /// The data label of a string constant: a hash of its bytes, so every use of the same text shares
 /// one label, and the labels are the same for every function.
 fn str_label(text: &str) -> String {
@@ -626,6 +748,15 @@ fn collect_strings(f: &SsaFunction, out: &mut std::collections::BTreeSet<String>
                 val(o, out);
                 val(v, out);
             }
+            Op::Index(a, b) | Op::IndexRef(a, b) => {
+                val(a, out);
+                val(b, out);
+            }
+            Op::StoreIndex(a, b, c) => {
+                val(a, out);
+                val(b, out);
+                val(c, out);
+            }
             Op::Copy(v) | Op::Unary(_, v) | Op::Field(v, _) | Op::Ref(v) => val(v, out),
             Op::Binary(_, l, r) => {
                 val(l, out);
@@ -654,17 +785,44 @@ fn collect_strings(f: &SsaFunction, out: &mut std::collections::BTreeSet<String>
 }
 
 pub fn emit_asm(prog: &SsaProgram) -> Result<String, String> {
-    let structs: HashMap<String, Vec<String>> = prog
+    let mut structs: HashMap<String, Vec<String>> = prog
         .structs
         .iter()
         .map(|s| (s.name.clone(), s.fields.iter().map(|(n, _)| n.clone()).collect()))
         .collect();
+    // The vector types of the program. A `Vec<elem>` is a struct of `data`, `len` and `cap`; its
+    // elements are one word each, so an element must be a word-sized value (not a struct).
+    let mut vec_elems: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for f in &prog.functions {
+        let tys = f
+            .locals
+            .iter()
+            .filter_map(|(_, t)| t.clone())
+            .chain(f.values.iter().map(|v| v.ty.clone()));
+        for ty in tys {
+            if let Some(e) = crate::mir::vec_elem(&ty) {
+                vec_elems.insert(e.to_string());
+            }
+        }
+    }
+    for e in &vec_elems {
+        if structs.contains_key(e) {
+            return Err(format!(
+                "the native backend does not support vectors of struct values (`Vec<{e}>`)"
+            ));
+        }
+        structs.insert(
+            crate::mir::vec_type(e),
+            vec!["data".to_string(), "len".to_string(), "cap".to_string()],
+        );
+    }
     let structs = &structs;
     let struct_fns: std::collections::HashSet<String> = prog
         .functions
         .iter()
         .filter(|f| f.ret.as_ref().is_some_and(|r| structs.contains_key(r)))
         .map(|f| f.name.clone())
+        .chain(vec_elems.iter().map(|e| crate::mir::vec_fn_name(e, "new")))
         .collect();
     let struct_fns = &struct_fns;
     let bodies: Vec<Result<String, String>> = std::thread::scope(|s| {
@@ -692,6 +850,10 @@ pub fn emit_asm(prog: &SsaProgram) -> Result<String, String> {
     for body in bodies {
         out.push_str(&body?);
     }
+    for e in &vec_elems {
+        out.push_str(&vec_helpers_asm(e));
+    }
+    out.push_str(&realloc_wrapper_asm());
 
     // The string constants of the program, each once, as NUL-terminated data.
     let mut strings: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();

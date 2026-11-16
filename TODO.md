@@ -122,7 +122,17 @@ Target: compile a strict subset of Rust (no complex trait resolution, no async/a
       the speed of `rustc -O` and of the C build (k=50: 1167 ms native, 241 ms `rustc -O`,
       188 ms gcc -O2; k=200: 4852, 891 and 683 ms). The gap is code quality: every value is
       spilled to a stack slot. Closing it needs register allocation, a separate project.
-      Next: `Vec`.
+      **Vec (2026-11-17).** A `Vec<E>` is a struct of `data`, `len` and `cap`; element access is
+      an index into `data` (new SSA operations `Index`, `IndexRef`, `StoreIndex`). The helpers
+      `new`, `push` (grows through a `realloc` wrapper that follows the platform calling
+      convention), `len`, `is_empty` and `clear` are generated in assembly per element type.
+      Elements must be word-sized (integers, bools, strings, pointers); vectors of struct
+      values are rejected. The native driver now lowers with the checker's types, as the C
+      backend does. Test: `tpt-moira-lachesis/tests/native_structs.rs`, which matches the C
+      output on growth, `&mut` and struct-field vectors, iteration and clear.
+      **Not yet:** the other `Vec` methods (`remove`, `insert`, `pop`, `reverse`, `contains`,
+      `extend`, `sort`, ...), slices, `HashMap`, strings beyond literals, floats, enums and
+      tuples, and index bounds checks (an out-of-range index is not caught).
     - **End-to-end build speed (2026-11-17).** Cause of the 0.42x: every generated C file
       carried the whole runtime, and its non-`static` helpers were compiled at full `gcc -O2`
       even when unused (about 220 ms of the 346 ms on `xlarge`). `mark_runtime_static`

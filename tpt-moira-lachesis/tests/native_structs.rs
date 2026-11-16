@@ -57,3 +57,40 @@ fn native_structs_copy_mutate_and_return_run() {
     };
     assert_eq!(out, "1\n50\n101\n1\n7\n70\n", "struct values should copy, mutate and return as in Rust");
 }
+
+#[test]
+fn native_vectors_grow_index_iterate_and_clear_run() {
+    let out = match build_and_run(
+        "vectors",
+        "struct Bag { items: Vec<i64>, label: i64 }
+        fn fill(v: &mut Vec<i64>, n: i64) {
+            let mut i: i64 = 0;
+            while i < n { v.push(i * 3); i = i + 1; }
+        }
+        fn total(v: &Vec<i64>) -> i64 {
+            let mut s: i64 = 0;
+            for x in v.iter() { s = s + x; }
+            s
+        }
+        fn main() {
+            let mut v: Vec<i64> = Vec::new();
+            print_i64(v.len() as i64);
+            print_i64(v.is_empty() as i64);
+            fill(&mut v, 100);
+            print_i64(v.len() as i64);
+            print_i64(v[99]);
+            print_i64(total(&v));
+            let mut b = Bag { items: Vec::new(), label: 7 };
+            b.items.push(5);
+            b.items.push(6);
+            print_i64(b.items.len() as i64 * 10 + b.label);
+            print_i64(b.items[1]);
+            v.clear();
+            print_i64(v.is_empty() as i64);
+        }",
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "0\n1\n100\n297\n14850\n27\n6\n1\n", "vectors should behave as in Rust");
+}

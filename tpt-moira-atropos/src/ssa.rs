@@ -47,6 +47,12 @@ pub enum Op {
     Field(Val, String),
     /// `obj.field = value`: a store into a struct's storage; its own value is unit.
     Store(Val, String, Val),
+    /// `base[index]`: the word at `index` of the array that `base` points to.
+    Index(Val, Val),
+    /// `&base[index]`: the address of that word.
+    IndexRef(Val, Val),
+    /// `base[index] = value`; its own value is unit.
+    StoreIndex(Val, Val, Val),
     Ref(Val),
 }
 
@@ -189,10 +195,18 @@ fn build_function(f: &mir::MirFunction) -> Result<SsaFunction, String> {
                         "the native backend does not support field addresses (use the C                           backend, `--emit c`)"
                             .to_string(),
                     ),
+                    mir::Rvalue::Index(b, i) => {
+                        Op::Index(resolve(b, &last_def), resolve(i, &last_def))
+                    }
+                    mir::Rvalue::IndexRef(b, i) => {
+                        Op::IndexRef(resolve(b, &last_def), resolve(i, &last_def))
+                    }
+                    mir::Rvalue::StoreIndex(b, i, v) => Op::StoreIndex(
+                        resolve(b, &last_def),
+                        resolve(i, &last_def),
+                        resolve(v, &last_def),
+                    ),
                     mir::Rvalue::Array(..)
-                    | mir::Rvalue::Index(..)
-                    | mir::Rvalue::IndexRef(..)
-                    | mir::Rvalue::StoreIndex(..)
                     | mir::Rvalue::Tuple(..) => return Err(
                         "the native backend does not support arrays/indexing/tuples (use the C \
                           backend, `--emit c`)"
@@ -381,7 +395,7 @@ pub fn dce(func: &mut SsaFunction) -> bool {
             }
         }
         // Calls and stores have side effects: always keep.
-        if matches!(func.values[i].op, Op::Call(..) | Op::Store(..)) {
+        if matches!(func.values[i].op, Op::Call(..) | Op::Store(..) | Op::StoreIndex(..)) {
             seed_live.insert(i);
         }
     }
@@ -484,6 +498,20 @@ fn collect_names(op: &Op, out: &mut HashSet<String>) {
                 }
             }
         }
+        Op::Index(a, b) | Op::IndexRef(a, b) => {
+            for x in [a, b] {
+                if let Val::Name(n) = x {
+                    out.insert(n.clone());
+                }
+            }
+        }
+        Op::StoreIndex(a, b, c) => {
+            for x in [a, b, c] {
+                if let Val::Name(n) = x {
+                    out.insert(n.clone());
+                }
+            }
+        }
         Op::Const(_) => {}
     }
 }
@@ -499,6 +527,8 @@ fn operands_of(op: &Op) -> Vec<Val> {
         }
         Op::StructLit(_, fields) => fields.iter().map(|(_, v)| v.clone()).collect(),
         Op::Store(o, _, v) => vec![o.clone(), v.clone()],
+        Op::Index(a, b) | Op::IndexRef(a, b) => vec![a.clone(), b.clone()],
+        Op::StoreIndex(a, b, c) => vec![a.clone(), b.clone(), c.clone()],
         Op::Const(_) => vec![],
     }
 }
@@ -525,6 +555,15 @@ fn rewrite_operands(op: &mut Op, remap: &HashMap<usize, usize>) {
         Op::Store(o, _, v) => {
             fix(o);
             fix(v);
+        }
+        Op::Index(a, b) | Op::IndexRef(a, b) => {
+            fix(a);
+            fix(b);
+        }
+        Op::StoreIndex(a, b, c) => {
+            fix(a);
+            fix(b);
+            fix(c);
         }
         Op::Const(_) => {}
     }
@@ -587,6 +626,15 @@ impl std::fmt::Display for SsaProgram {
                         Op::Store(o, fld, v) => {
                             writeln!(f, "{}.{} = {}", show_val(o), fld, show_val(v))?
                         }
+                        Op::Index(a, i) => writeln!(f, "{}[{}]", show_val(a), show_val(i))?,
+                        Op::IndexRef(a, i) => writeln!(f, "&{}[{}]", show_val(a), show_val(i))?,
+                        Op::StoreIndex(a, i, v) => writeln!(
+                            f,
+                            "{}[{}] = {}",
+                            show_val(a),
+                            show_val(i),
+                            show_val(v)
+                        )?,
                         Op::Ref(o) => writeln!(f, "&{}", show_val(o))?,
                     }
                 }
