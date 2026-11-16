@@ -91,12 +91,22 @@ Target: compile a strict subset of Rust (no complex trait resolution, no async/a
       restores rsp, so pending operands are not disturbed; the print helpers set up their own
       frames; and on Windows the native backend uses the Windows x64 convention (rcx/rdx,
       32-byte shadow space), with a `main` wrapper that preserves rsi/rdi. A one-`print` program
-      now prints correctly. **Still broken:** arithmetic (`3 + 4 * 5` prints 1), `%` and `-`
-      chains give wrong values, a `while` loop does not terminate, and string literals pass as
-      null (`println!` prints `(null)`). The native backend is a restricted subset and needs a
-      correctness pass on operators, branches and strings before it can be timed end to end.
-      Next: decide between that correctness pass and keeping the gcc-bound C path, and report
-      the trade-off explicitly.
+      now prints correctly.
+      **Correctness pass (2026-11-17), all in place:** (1) the native backend emitted `push QWORD
+      [rbp - 16]`, which GNU as encodes as `[rbp - 8]`; the operand is now `QWORD PTR`, the cause
+      of the wrong arithmetic and the hanging loop. (2) The parser gave `-`, `/` and the other
+      left-associative operators right-associative binding powers, so `9 - 4 - 2` was 7. Fixed in
+      `tpt-moira-clotho/src/parser.rs`; this changes the C backend's output too (both now give 3).
+      (3) String constants are data labels (`.asciz`, one per distinct text) and their addresses are
+      loaded with `lea`, so `println!` prints its text. Tests: `tpt-moira-atropos/tests/native.rs`
+      (arithmetic, branches, calls, loops and strings) and
+      `left_associative_operators_group_left_run`.
+      **Measured (median of 10, compile to executable, same scaling programs, outputs match
+      `rustc`):** native 138, 203 and 441 ms against `rustc -O` 228, 335 and 1244 ms: rustc/native
+      1.66x, 1.65x and 2.82x (geomean 1.97x). Caveats: the programs use the integer subset only;
+      only compile time is measured, not the run time of the generated code; and the native
+      backend still has no floats, tuples, structs or closures (those programs are rejected).
+      Next: widen the subset (structs and `Vec` in particular), and time run-time performance.
     - **End-to-end build speed (2026-11-17).** Cause of the 0.42x: every generated C file
       carried the whole runtime, and its non-`static` helpers were compiled at full `gcc -O2`
       even when unused (about 220 ms of the 346 ms on `xlarge`). `mark_runtime_static`

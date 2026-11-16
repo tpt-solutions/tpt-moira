@@ -1881,15 +1881,15 @@ impl Parser {
             | BinOp::ShlAssign
             | BinOp::ShrAssign => (1, 2), // right-associative, lowest
             BinOp::Range => (4, 3),
-            BinOp::Or => (5, 4),
-            BinOp::And => (7, 6),
-            BinOp::BitOr => (9, 8),
-            BinOp::BitXor => (11, 10),
-            BinOp::BitAnd => (13, 12),
-            BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge => (15, 14),
-            BinOp::Shl | BinOp::Shr => (17, 16),
-            BinOp::Add | BinOp::Sub => (19, 18),
-            BinOp::Mul | BinOp::Div | BinOp::Rem => (21, 20),
+            BinOp::Or => (5, 6),
+            BinOp::And => (7, 8),
+            BinOp::BitOr => (9, 10),
+            BinOp::BitXor => (11, 12),
+            BinOp::BitAnd => (13, 14),
+            BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge => (15, 16),
+            BinOp::Shl | BinOp::Shr => (17, 18),
+            BinOp::Add | BinOp::Sub => (19, 20),
+            BinOp::Mul | BinOp::Div | BinOp::Rem => (21, 22),
         };
         Some((l, r, op))
     }

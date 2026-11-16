@@ -1329,6 +1329,25 @@ fn pending_vec_local_takes_struct_field_type_run() {
     assert_eq!(out, "0", "the pending vector should take the field's type");
 }
 
+/// Binary operators of the same precedence group to the left: `9 - 4 - 2` is `(9 - 4) - 2`.
+#[test]
+fn left_associative_operators_group_left_run() {
+    let out = match run_src(
+        "fn main() {
+            print_i64(9 - 4 - 2);
+            print_i64(8 / 4 / 2);
+            print_i64(2 + 3 * 4);
+        }",
+    ) {
+        Some(o) => o,
+        None => {
+            eprintln!("no C compiler available; skipping associativity run");
+            return;
+        }
+    };
+    assert_eq!(out, "3\n1\n14", "subtraction and division should group to the left");
+}
+
 /// An untyped `Vec::new()` that only receives unsuffixed literals takes Rust's default `i32`.
 #[test]
 fn untyped_vec_of_literals_defaults_to_i32_run() {
