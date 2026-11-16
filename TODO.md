@@ -81,8 +81,17 @@ Target: compile a strict subset of Rust (no complex trait resolution, no async/a
       End to end (`--e2e`, median of 30, `rustc -O` / Moira-to-binary): 0.37x, 0.20x and 0.20x
       (geomean 0.24x, was 0.21x). `gcc -O2` on the emitted C is about 5.2 s of the 5.4 s at 800
       functions, so the remaining end-to-end gap is the C backend, not the front end.
-      Next: change the shape of the emitted C (structured loops, fewer temporaries) and measure
-      `gcc -O2` again.
+      **C shape is not the cause (2026-11-17).** The same 800 functions written as structured C
+      (`while`, no temporaries) take as long under `gcc -O2` as the goto-based output (6.2 s vs
+      6.1 s). No single gcc pass dominates; `-O1` is 2.2 s and `-Og` 1.1 s, but those produce
+      slower code, so they are not a fair end-to-end comparison with `rustc -O`.
+      **Native backend (`--emit native`) is not usable yet.** Fixed here: the print helper was
+      invalid GNU as syntax (`db`), block labels clashed across functions, and `print!` writers
+      were missing. Still broken: `print_i64` is not in the runtime, and each call does
+      `and rsp, -16`, which moves the stack pointer under values pushed earlier in the same
+      expression, so the native executable crashes. The fix is a frame-based call sequence.
+      Next: either fix the native call sequence (then time it end to end), or accept that the
+      C path is gcc-bound and report that trade-off explicitly.
     - **End-to-end build speed (2026-11-17).** Cause of the 0.42x: every generated C file
       carried the whole runtime, and its non-`static` helpers were compiled at full `gcc -O2`
       even when unused (about 220 ms of the 346 ms on `xlarge`). `mark_runtime_static`
