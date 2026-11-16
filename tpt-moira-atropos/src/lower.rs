@@ -2361,9 +2361,19 @@ impl Lower {
             };
             // A `(a, b)` pattern takes its two components from a `Tuple<..>` hint (a `zip`
             // pair); otherwise its names are untyped `long long`s, as an `(i, x)` pair is.
+            // An `Option`/`Result` parameter is a struct: its checker type names it.
+            let aggregate_hint = match &p.pat {
+                ast::Pat::Ident(sp) => self
+                    .hints
+                    .get(&(sp.span.start, sp.span.end))
+                    .filter(|h| h.starts_with("Option<") || h.starts_with("Result<"))
+                    .cloned(),
+                _ => None,
+            };
             let tys: Vec<String> = match (names_of_p.len(), param_tys.get(k)) {
                 (1, _) if annotated => vec![type_to_c(&p.ty, &self.aliases)],
                 (1, _) if pointer_hint.is_some() => vec![pointer_hint.unwrap_or_default()],
+                (1, _) if aggregate_hint.is_some() => vec![aggregate_hint.unwrap_or_default()],
                 (1, Some(t)) => vec![t.clone()],
                 (2, Some(t)) => match mir::split_generic(t) {
                     Some(("Tuple", a)) if a.len() == 2 => a.iter().map(|s| s.to_string()).collect(),
@@ -2453,9 +2463,14 @@ impl Lower {
         if f.params.len() != args.len() {
             return Ok(None);
         }
-        // The capturing closure argument: its position and its lifted function.
+        // The capturing closure argument: its position and its lifted function. A borrowed
+        // closure (`&mut |..|`, `&mut f`) is the closure itself.
         let mut found: Option<(usize, String)> = None;
-        for (i, a) in args.iter().enumerate() {
+        for (i, a0) in args.iter().enumerate() {
+            let a: &Expr = match &a0.kind {
+                ExprKind::Ref(inner, _) => inner,
+                _ => a0,
+            };
             let lifted = match &a.kind {
                 ExprKind::Path(ap) if ap.segments.len() == 1 => {
                     self.closure_bindings.get(&ap.segments[0].node).cloned()
@@ -2489,22 +2504,22 @@ impl Lower {
             .get(&lifted)
             .cloned()
             .unwrap_or_default();
-        if self.closure_ref_caps.get(&lifted).is_some_and(|r| !r.is_empty()) {
-            return Err(LowerError(format!(
-                "a closure that writes its captured variables cannot be passed to the generic `{fname}` yet"
-            )));
-        }
         let spec_name = format!("{fname}__with_{lifted}");
         if !self.spec_done.contains(&spec_name) {
             self.spec_done.insert(spec_name.clone());
             self.build_spec(&f, pidx, &lifted, &caps, &spec_name)?;
         }
-        let mut operands = Vec::new();
-        for c in &caps {
-            operands.push(mir::Operand::var(self.var_name(c)));
-        }
+        let mut operands = self.capture_operands(&lifted);
         for (i, a) in args.iter().enumerate() {
             if i != pidx {
+                // `&arr` passed for a slice parameter is the slice of the array, as in a call.
+                if let ExprKind::Ref(inner, _) = &a.kind {
+                    let pt = type_to_c(&f.params[i].ty, &self.aliases);
+                    if let Some(v) = self.array_arg_as_slice(inner, &pt)? {
+                        operands.push(v);
+                        continue;
+                    }
+                }
                 operands.push(self.lower_expr(a)?);
             }
         }
@@ -2536,6 +2551,8 @@ impl Lower {
         g.name.node = spec_name.to_string();
         g.params.remove(pidx);
         let mut leading = Vec::new();
+        let written: std::collections::HashSet<String> =
+            self.closure_ref_caps.get(lifted).cloned().unwrap_or_default();
         for cap in caps {
             let cap_ty = match self.types.get(cap).cloned() {
                 Some(t) => t,
@@ -2547,7 +2564,11 @@ impl Lower {
                     .and_then(|(_, t)| t.clone())
                     .unwrap_or_else(|| "long long".to_string()),
             };
-            leading.push((cap.clone(), cap_ty));
+            if written.contains(cap) {
+                leading.push((format!("__ref_{cap}"), format!("{cap_ty}*")));
+            } else {
+                leading.push((cap.clone(), cap_ty));
+            }
         }
         let mut l = Lower::new(&self.structs, self.hints.clone());
         l.lenient_calls = self.lenient_calls;
@@ -2565,6 +2586,8 @@ impl Lower {
         l.const_values = self.const_values.clone();
         l.const_exprs = self.const_exprs.clone();
         l.closure_captures = self.closure_captures.clone();
+        l.closure_ref_caps = self.closure_ref_caps.clone();
+        l.ref_names = written.clone();
         l.closure_bindings.insert(param_name, lifted.to_string());
         l.fn_asts = self.fn_asts.clone();
         l.spec_done = self.spec_done.clone();
@@ -11054,7 +11077,9 @@ impl Lower {
                 for a in args {
                     // A closure argument takes the parameter types of the callee's `Fn` parameter.
                     let pt_hint = param_tys.as_ref().and_then(|p| p.get(operands.len())).cloned();
-                    if let (ExprKind::Closure { .. }, Some(pt)) = (&a.kind, &pt_hint) {
+                    // A `&mut F` parameter is a pointer to the function value: its type is the same.
+                    let pt_fn = pt_hint.as_deref().map(|t| t.trim_end_matches('*').to_string());
+                    if let (ExprKind::Closure { .. }, Some(pt)) = (&a.kind, &pt_fn) {
                         if let Some(("Fn", parts)) = mir::split_generic(pt) {
                             if let Some((_, closure_params)) = parts.split_last() {
                                 self.closure_param_hint =

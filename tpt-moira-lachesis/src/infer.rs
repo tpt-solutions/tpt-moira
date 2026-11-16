@@ -2906,7 +2906,16 @@ impl TypeChecker {
                 })
                 .collect();
             for (a, pt) in args.iter().zip(sig.params.iter()) {
-                if let (ExprKind::Closure { .. }, Ty::Generic(gname)) = (&a.kind, pt) {
+                // A borrowed closure (`&mut |..|`) for a `&mut F` parameter takes the bound too.
+                let closure_arg: &Expr = match &a.kind {
+                    ExprKind::Ref(inner, _) => inner,
+                    _ => a,
+                };
+                let mut bound_pt = pt;
+                while let Ty::Ref(inner) | Ty::RefMut(inner) = bound_pt {
+                    bound_pt = inner;
+                }
+                if let (ExprKind::Closure { .. }, Ty::Generic(gname)) = (&closure_arg.kind, bound_pt) {
                     if let Some(Ty::Fn(ps, _)) = closure_bounds.get(gname) {
                         self.closure_expected = Some(ps.clone());
                     }
