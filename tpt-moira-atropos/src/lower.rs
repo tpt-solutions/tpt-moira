@@ -2463,9 +2463,9 @@ impl Lower {
         if f.params.len() != args.len() {
             return Ok(None);
         }
-        // The capturing closure argument: its position and its lifted function. A borrowed
+        // The capturing closure arguments: their positions and lifted functions. A borrowed
         // closure (`&mut |..|`, `&mut f`) is the closure itself.
-        let mut found: Option<(usize, String)> = None;
+        let mut found: Vec<(usize, String)> = Vec::new();
         for (i, a0) in args.iter().enumerate() {
             let a: &Expr = match &a0.kind {
                 ExprKind::Ref(inner, _) => inner,
@@ -2488,30 +2488,37 @@ impl Lower {
                 _ => None,
             };
             if let Some(lifted) = lifted {
-                if found.is_some() {
-                    return Err(LowerError(
-                        "a call passes more than one capturing closure (not supported)".into(),
-                    ));
-                }
-                found = Some((i, lifted));
+                found.push((i, lifted));
             }
         }
-        let Some((pidx, lifted)) = found else {
+        if found.is_empty() {
             return Ok(None);
-        };
-        let caps = self
-            .closure_captures
-            .get(&lifted)
-            .cloned()
-            .unwrap_or_default();
-        let spec_name = format!("{fname}__with_{lifted}");
+        }
+        // The captures of all the closures, each once, and the ones any of them writes.
+        let mut caps: Vec<String> = Vec::new();
+        let mut written: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for (_, lifted) in &found {
+            for c in self.closure_captures.get(lifted).cloned().unwrap_or_default() {
+                if !caps.contains(&c) {
+                    caps.push(c);
+                }
+            }
+            for w in self.closure_ref_caps.get(lifted).cloned().unwrap_or_default() {
+                written.insert(w);
+            }
+        }
+        let lifteds: Vec<&str> = found.iter().map(|(_, l)| l.as_str()).collect();
+        let spec_name = format!("{fname}__with_{}", lifteds.join("__"));
         if !self.spec_done.contains(&spec_name) {
             self.spec_done.insert(spec_name.clone());
-            self.build_spec(&f, pidx, &lifted, &caps, &spec_name)?;
+            self.build_spec(&f, &found, &caps, &written, &spec_name)?;
         }
-        let mut operands = self.capture_operands(&lifted);
+        let mut operands = Vec::new();
+        for c in &caps {
+            operands.push(self.leading_capture_operand(c, written.contains(c)));
+        }
         for (i, a) in args.iter().enumerate() {
-            if i != pidx {
+            if !found.iter().any(|(p, _)| *p == i) {
                 // `&arr` passed for a slice parameter is the slice of the array, as in a call.
                 if let ExprKind::Ref(inner, _) = &a.kind {
                     let pt = type_to_c(&f.params[i].ty, &self.aliases);
@@ -2536,23 +2543,56 @@ impl Lower {
         Ok(Some(mir::Operand::var(t)))
     }
 
-    /// Lower the copy of `f` for one capturing closure (`lifted`, capturing `caps`) that
-    /// is passed as parameter `pidx`. The closure parameter is bound to `lifted` in the copy.
+    /// The argument for capture `c` of a specialised function: its address when the function
+    /// writes it, its value otherwise. A capture this lowering already holds as a pointer is
+    /// passed on as that pointer, or read through it.
+    fn leading_capture_operand(&mut self, c: &str, want_ptr: bool) -> mir::Operand {
+        let held = self.ref_names.contains(c);
+        if want_ptr {
+            if held {
+                return mir::Operand::var(format!("__ref_{c}"));
+            }
+            let ty = self.capture_c_type(c);
+            let var = self.var_name(c);
+            let p = self.fresh_temp(format!("{ty}*"));
+            self.emit(p.clone(), mir::Rvalue::Ref(mir::Operand::var(var), true));
+            return mir::Operand::var(p);
+        }
+        if held {
+            let ty = self.capture_c_type(&format!("__ref_{c}"));
+            let v = self.fresh_temp(ty);
+            self.emit(
+                v.clone(),
+                mir::Rvalue::Unary(mir::MirUnOp::Deref, mir::Operand::var(format!("__ref_{c}"))),
+            );
+            return mir::Operand::var(v);
+        }
+        mir::Operand::var(self.var_name(c))
+    }
+    /// Lower the copy of `f` for the capturing closures passed as the parameters in `found`
+    /// (`(parameter index, lifted closure)`). Each closure parameter is bound to its lifted
+    /// function in the copy, and the captures of all of them are its leading parameters.
     fn build_spec(
         &mut self,
         f: &ast::Function,
-        pidx: usize,
-        lifted: &str,
+        found: &[(usize, String)],
         caps: &[String],
+        written: &std::collections::HashSet<String>,
         spec_name: &str,
     ) -> Result<()> {
-        let param_name = pat_name(&f.params[pidx].pat)?;
+        // The closure parameters are replaced by the lifted closures; the others stay.
+        let mut param_names = Vec::new();
+        for (pidx, lifted) in found {
+            param_names.push((pat_name(&f.params[*pidx].pat)?, lifted.clone()));
+        }
         let mut g = f.clone();
         g.name.node = spec_name.to_string();
-        g.params.remove(pidx);
+        // `found` is in parameter order, so removing its parameters last to first keeps the
+        // indices of the others.
+        for (pidx, _) in found.iter().rev() {
+            g.params.remove(*pidx);
+        }
         let mut leading = Vec::new();
-        let written: std::collections::HashSet<String> =
-            self.closure_ref_caps.get(lifted).cloned().unwrap_or_default();
         for cap in caps {
             let cap_ty = match self.types.get(cap).cloned() {
                 Some(t) => t,
@@ -2588,7 +2628,9 @@ impl Lower {
         l.closure_captures = self.closure_captures.clone();
         l.closure_ref_caps = self.closure_ref_caps.clone();
         l.ref_names = written.clone();
-        l.closure_bindings.insert(param_name, lifted.to_string());
+        for (param_name, lifted) in param_names {
+            l.closure_bindings.insert(param_name, lifted);
+        }
         l.fn_asts = self.fn_asts.clone();
         l.spec_done = self.spec_done.clone();
         l.closure_counter = self.closure_counter;
