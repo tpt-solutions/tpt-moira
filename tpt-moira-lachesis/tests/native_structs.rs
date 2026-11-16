@@ -221,3 +221,25 @@ fn native_string_conversions_search_trim_and_chars_run() {
     };
     assert_eq!(out, "2\n7-8\n1\n1\n[pad]\n", "string conversions should match Rust");
 }
+
+#[test]
+fn native_hashmap_with_string_keys_run() {
+    let out = match build_and_run(
+        "strmap",
+        "use std::collections::HashMap;
+        fn main() {
+            let mut m: HashMap<String, i64> = HashMap::new();
+            m.insert(String::from(\"apple\"), 3);
+            m.insert(String::from(\"pear\"), 5);
+            m.insert(String::from(\"apple\"), 7);
+            print_i64(m.len() as i64);
+            match m.get(&String::from(\"apple\")) { Some(x) => print_i64(*x), None => print_i64(-1) }
+            print_i64(m.contains_key(&String::from(\"kiwi\")) as i64);
+            print_i64(m.is_empty() as i64);
+        }",
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "2\n7\n0\n0\n", "string-keyed maps should match Rust");
+}

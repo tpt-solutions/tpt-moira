@@ -890,9 +890,9 @@ __moira_panic:
 }
 
 /// The assembly of the `Map<k, v>` helpers the MIR calls. A map is a struct of `keys`, `vals`,
-/// `len` and `cap` (a linear table, as the C runtime's). Keys and values are one word each.
-/// `new` and `insert` (which returns `Option<v>`) take the caller's destination block first.
-/// `get_ptr` returns the address of the value, or null when the key is absent.
+/// `len` and `cap` (a linear table, as the C runtime's). `new` and `insert` (which returns
+/// `Option<v>`) take the caller's destination block first. `get_ptr` returns the address of the
+/// value, or null when the key is absent. Word keys compare by value; string keys by `strcmp`.
 fn map_helpers_asm(k: &str, v: &str) -> String {
     let new = crate::mir::map_fn_name(k, v, "new");
     let find = crate::mir::map_fn_name(k, v, "find");
@@ -901,18 +901,45 @@ fn map_helpers_asm(k: &str, v: &str) -> String {
     let contains = crate::mir::map_fn_name(k, v, "contains_key");
     let len = crate::mir::map_fn_name(k, v, "len");
     let is_empty = crate::mir::map_fn_name(k, v, "is_empty");
-    format!(
-        r#"
-{new}:
+    let str_keys = k == "str";
+    let find_sec = if str_keys {
+        format!(
+            r#"
+{find}:
     push rbp
     mov rbp, rsp
-    mov QWORD PTR [rdi], 0
-    mov QWORD PTR [rdi + 8], 0
-    mov QWORD PTR [rdi + 16], 0
-    mov QWORD PTR [rdi + 24], 0
-    mov rax, rdi
+    sub rsp, 48
+    mov QWORD PTR [rbp - 8], rdi
+    mov QWORD PTR [rbp - 16], rsi
+    mov QWORD PTR [rbp - 24], 0
+{find}_loop:
+    mov rax, QWORD PTR [rbp - 24]
+    mov rcx, QWORD PTR [rbp - 8]
+    cmp rax, QWORD PTR [rcx + 16]
+    jge {find}_no
+    mov rcx, QWORD PTR [rcx]
+    mov rdi, QWORD PTR [rcx + rax*8]
+    mov rsi, QWORD PTR [rbp - 16]
+    call moira_rt_strcmp
+    test rax, rax
+    jz {find}_yes
+    add QWORD PTR [rbp - 24], 1
+    jmp {find}_loop
+{find}_yes:
+    mov rax, QWORD PTR [rbp - 24]
+    mov rsp, rbp
     pop rbp
     ret
+{find}_no:
+    mov rax, -1
+    mov rsp, rbp
+    pop rbp
+    ret
+"#
+        )
+    } else {
+        format!(
+            r#"
 {find}:
     mov rcx, QWORD PTR [rdi + 16]
     mov r8, QWORD PTR [rdi]
@@ -930,6 +957,37 @@ fn map_helpers_asm(k: &str, v: &str) -> String {
 {find}_no:
     mov rax, -1
     ret
+"#
+        )
+    };
+    // A string-key search calls `strcmp`, which clobbers rdi: the map is reloaded from the frame.
+    let get_ptr_sec = if str_keys {
+        format!(
+            r#"
+{get_ptr}:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 16
+    mov QWORD PTR [rbp - 8], rdi
+    call {find}
+    cmp rax, 0
+    jl {get_ptr}_none
+    mov rdi, QWORD PTR [rbp - 8]
+    mov rdx, QWORD PTR [rdi + 8]
+    lea rax, [rdx + rax*8]
+    mov rsp, rbp
+    pop rbp
+    ret
+{get_ptr}_none:
+    xor eax, eax
+    mov rsp, rbp
+    pop rbp
+    ret
+"#
+        )
+    } else {
+        format!(
+            r#"
 {get_ptr}:
     push rbp
     mov rbp, rsp
@@ -944,6 +1002,25 @@ fn map_helpers_asm(k: &str, v: &str) -> String {
     xor eax, eax
     pop rbp
     ret
+"#
+        )
+    };
+    let rest = format!(
+        r#"
+{new}:
+    push rbp
+    mov rbp, rsp
+    mov QWORD PTR [rdi], 0
+    mov QWORD PTR [rdi + 8], 0
+    mov QWORD PTR [rdi + 16], 0
+    mov QWORD PTR [rdi + 24], 0
+    mov rax, rdi
+    pop rbp
+    ret
+"#
+    );
+    let insert_sec = format!(
+        r#"
 {insert}:
     push rbp
     mov rbp, rsp
@@ -1019,6 +1096,10 @@ fn map_helpers_asm(k: &str, v: &str) -> String {
     mov rsp, rbp
     pop rbp
     ret
+"#
+    );
+    let tail = format!(
+        r#"
 {contains}:
     push rbp
     mov rbp, rsp
@@ -1037,7 +1118,8 @@ fn map_helpers_asm(k: &str, v: &str) -> String {
     sete al
     ret
 "#
-    )
+    );
+    format!("{rest}{find_sec}{get_ptr_sec}{insert_sec}{tail}")
 }
 
 /// A wrapper that calls a C library function `sym` with up to three integer arguments, given in
@@ -1376,11 +1458,6 @@ pub fn emit_asm(prog: &SsaProgram) -> Result<String, String> {
             continue;
         };
         let layout = if base == "Map" {
-            if args.first() == Some(&"str") {
-                return Err(format!(
-                    "the native backend does not support maps with string keys (`{ty}`)"
-                ));
-            }
             vec![
                 "keys".to_string(),
                 "vals".to_string(),
