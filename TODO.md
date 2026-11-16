@@ -87,11 +87,16 @@ Target: compile a strict subset of Rust (no complex trait resolution, no async/a
       slower code, so they are not a fair end-to-end comparison with `rustc -O`.
       **Native backend (`--emit native`) is not usable yet.** Fixed here: the print helper was
       invalid GNU as syntax (`db`), block labels clashed across functions, and `print!` writers
-      were missing. Still broken: `print_i64` is not in the runtime, and each call does
-      `and rsp, -16`, which moves the stack pointer under values pushed earlier in the same
-      expression, so the native executable crashes. The fix is a frame-based call sequence.
-      Next: either fix the native call sequence (then time it end to end), or accept that the
-      C path is gcc-bound and report that trade-off explicitly.
+      were missing. Fixed next (2026-11-17): the call sequence saves rsp, aligns, calls and
+      restores rsp, so pending operands are not disturbed; the print helpers set up their own
+      frames; and on Windows the native backend uses the Windows x64 convention (rcx/rdx,
+      32-byte shadow space), with a `main` wrapper that preserves rsi/rdi. A one-`print` program
+      now prints correctly. **Still broken:** arithmetic (`3 + 4 * 5` prints 1), `%` and `-`
+      chains give wrong values, a `while` loop does not terminate, and string literals pass as
+      null (`println!` prints `(null)`). The native backend is a restricted subset and needs a
+      correctness pass on operators, branches and strings before it can be timed end to end.
+      Next: decide between that correctness pass and keeping the gcc-bound C path, and report
+      the trade-off explicitly.
     - **End-to-end build speed (2026-11-17).** Cause of the 0.42x: every generated C file
       carried the whole runtime, and its non-`static` helpers were compiled at full `gcc -O2`
       even when unused (about 220 ms of the 346 ms on `xlarge`). `mark_runtime_static`

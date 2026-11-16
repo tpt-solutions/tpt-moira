@@ -282,8 +282,13 @@ impl<'a> Emitter<'a> {
                 for i in (0..args.len()).rev() {
                     s.push_str(&format!("    pop {}\n", REGS[i]));
                 }
-                s.push_str("    and rsp, -16\n");
+                // Align the stack for the call without depending on how many values are pending
+                // (the operands of an enclosing expression sit on the stack): save rsp in the
+                // aligned frame, call, then restore rsp exactly. The callee sees rsp = 8 mod 16,
+                // as the ABI requires.
+                s.push_str("    mov rax, rsp\n    and rsp, -16\n    sub rsp, 8\n    push rax\n");
                 s.push_str(&format!("    call {}\n", name));
+                s.push_str("    pop rsp\n");
                 s.push_str("    push rax\n");
                 Ok(s)
             }
@@ -304,7 +309,7 @@ fn emit_function_asm(func: &SsaFunction) -> Result<String, String> {
         slots: &slots,
         label: 0,
     };
-    out.push_str(&format!("\n{}:\n", func.name));
+    out.push_str(&format!("\n{}:\n", fn_label(&func.name)));
     out.push_str("    push rbp\n    mov rbp, rsp\n");
     out.push_str(&format!("    sub rsp, {}\n", slots.total * 8));
 
@@ -384,21 +389,46 @@ pub fn emit_asm(prog: &SsaProgram) -> Result<String, String> {
         out.push_str(&body?);
     }
 
-    // Built-in `print_i32` implemented via libc `printf`, so the native backend
-    // is self-contained when linked with the system C compiler.
-    out.push_str(
-        "\nprint_i32:\n    mov rsi, rdi\n    lea rdi, [rip + .Lfmt]\n    xor eax, eax\n    \
-         call printf\n    ret\n.Lfmt:\n    .asciz \"%lld\\n\"\n",
-    );
-
+    // The runtime helpers are called with the stack aligned as the ABI requires, and each sets up
+    // its own frame so that its `printf` call is aligned too.
+    if cfg!(windows) {
+        // The C runtime calls `main` and expects rsi and rdi preserved (callee-saved on Windows);
+        // the generated code uses them for arguments, so the wrapper saves them around `__moira_main`.
+        out.push_str("\nmain:\n    push rbp\n    mov rbp, rsp\n    push rsi\n    push rdi\n    call __moira_main\n    pop rdi\n    pop rsi\n    pop rbp\n    ret\n");
+    }
+    out.push_str(&print_helper("print_i32", "%lld\\n", ".Lfmt"));
+    out.push_str(&print_helper("print_i64", "%lld\\n", ".Lfmt_i64"));
     // `print!` writers: no newline, so the caller ends the line with its own "\n" piece.
-    out.push_str(
-        "\n__moira_w_i64:\n    mov rsi, rdi\n    lea rdi, [rip + .Lfmt_w_i64]\n    xor eax, eax\n    \
-         call printf\n    ret\n.Lfmt_w_i64:\n    .asciz \"%lld\"\n__moira_w_str:\n    mov rsi, rdi\n    \
-         lea rdi, [rip + .Lfmt_w_str]\n    xor eax, eax\n    call printf\n    ret\n.Lfmt_w_str:\n    \
-         .asciz \"%s\"\n",
-    );
+    out.push_str(&print_helper("__moira_w_i64", "%lld", ".Lfmt_w_i64"));
+    out.push_str(&print_helper("__moira_w_str", "%s", ".Lfmt_w_str"));
     Ok(out)
+}
+
+/// The assembly label of a Moira function. On Windows the program's `main` is reached through a
+/// wrapper (see the runtime), so the function itself gets a distinct label.
+fn fn_label(name: &str) -> String {
+    if cfg!(windows) && name == "main" {
+        "__moira_main".to_string()
+    } else {
+        name.to_string()
+    }
+}
+
+/// A runtime helper that passes its one argument to libc `printf` with format `fmt`.
+fn print_helper(name: &str, fmt: &str, label: &str) -> String {
+    if cfg!(windows) {
+        // Windows x64: printf takes its format in rcx and the value in rdx, and the caller
+        // reserves 32 bytes of shadow space. The frame keeps rsp 16-byte aligned for the call.
+        return format!(
+            "\n{name}:\n    push rbp\n    mov rbp, rsp\n    sub rsp, 32\n    mov rdx, rdi\n    \
+             lea rcx, [rip + {label}]\n    xor eax, eax\n    call printf\n    add rsp, 32\n    \
+             pop rbp\n    ret\n{label}:\n    .asciz \"{fmt}\"\n"
+        );
+    }
+    format!(
+        "\n{name}:\n    push rbp\n    mov rbp, rsp\n    mov rsi, rdi\n    lea rdi, [rip + {label}]\n    \
+         xor eax, eax\n    call printf\n    pop rbp\n    ret\n{label}:\n    .asciz \"{fmt}\"\n"
+    )
 }
 
 /// Locate a C compiler/assembler toolchain.
