@@ -43,11 +43,22 @@ Target: compile a strict subset of Rust (no complex trait resolution, no async/a
     * **full Moira pipeline** (type-check + borrow-check + incremental cache, via
       `moira --emit check`) vs `rustc --emit=metadata` → **~7.36x** geomean.
     * **full Moira pipeline** vs a **complete `rustc` build+link** (new
-      `--rustc-mode full`) → **~17.9x** geomean.
+      `--rustc-mode full`) → **~17.9x** geomean. **Withdrawn (2026-11-17): not a like-for-like
+      comparison.** The Moira side is `moira --emit check` (type and borrow check only, no C, no
+      binary); the `rustc` side builds and links a binary. See the 2026-11-17 measurement below.
     Run `tpt-moira-bench` (default = first row), `tpt-moira-bench --full` (second), and
     `tpt-moira-bench --full --rustc-mode full` (third). The 10x target remains open
     for the canonical front-end+mid-end number; closing it depends on the
     Phase-4 final optimization pass (parallel codegen, arena tuning).
+    - **Measured 2026-11-17, source to binary, release `moira`, median of 15, same five
+      battery programs (`small`..`nested`):** Moira `--emit c` then `gcc -O2` takes about 2.4x as
+      long as `rustc -O` (geomean `rustc -O` / Moira-to-binary = 0.42x). Outputs match. Moira's
+      own emit is about 16 ms of about 390 ms on `xlarge`; the rest is `gcc -O2`, of which about
+      117 ms is fixed process cost (an empty C file). Front end only: `moira --emit check` is about
+      10 ms against `rustc --emit=metadata`, the fair comparison, which gives the ~7x above.
+      Decision pending: the 10x target is **not met** end to end; the open question is whether
+      the headline is front end (about 7x, bounded by process startup) or end to end (needs a
+      faster backend than `gcc -O2` on the emitted C).
     - **Host floor (2026-11-15): 10x is not reachable by wall-clock on this host.**
       Every timed run is a process launch. Measured here: an empty C executable
       7.2 ms, `moira --emit ssa` on an empty file 8.8-9.5 ms, `rustc --emit=metadata`

@@ -231,13 +231,16 @@ impl MoiraMode {
 enum RustcMode {
     Metadata,
     Full,
+    /// A full build with `-O`: the optimised `rustc` baseline Moira's output is compared with.
+    FullOpt,
 }
 
 impl RustcMode {
     fn label(&self) -> &'static str {
         match self {
             RustcMode::Metadata => "rustc --emit=metadata",
-            RustcMode::Full => "rustc (full build + link)",
+            RustcMode::Full => "rustc (full build + link, opt-level 0)",
+            RustcMode::FullOpt => "rustc -O (full build + link)",
         }
     }
 }
@@ -332,6 +335,7 @@ fn main() {
                     match m.as_str() {
                         "metadata" => rustc_mode = RustcMode::Metadata,
                         "full" => rustc_mode = RustcMode::Full,
+                        "full-opt" => rustc_mode = RustcMode::FullOpt,
                         other => {
                             eprintln!(
                                 "error: --rustc-mode expects `metadata` or `full`, found `{other}`"
@@ -342,7 +346,7 @@ fn main() {
                     i += 1;
                 }
                 None => {
-                    eprintln!("error: --rustc-mode requires an argument (`metadata`|`full`)");
+                    eprintln!("error: --rustc-mode requires an argument (`metadata`|`full`|`full-opt`)");
                     std::process::exit(2);
                 }
             },
@@ -915,13 +919,18 @@ fn rustc_args(file: &Path, mode: RustcMode) -> Vec<String> {
                 file.to_string_lossy().into_owned(),
             ]
         }
-        RustcMode::Full => {
+        RustcMode::Full | RustcMode::FullOpt => {
             let dir = temp_path("rustc_full");
-            vec![
+            let mut args: Vec<String> = Vec::new();
+            if mode == RustcMode::FullOpt {
+                args.push("-O".into());
+            }
+            args.extend([
                 "-o".into(),
                 dir.to_string_lossy().into_owned(),
                 file.to_string_lossy().into_owned(),
-            ]
+            ]);
+            args
         }
     }
 }
