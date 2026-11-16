@@ -1485,6 +1485,10 @@ struct Lower {
     /// The captured variables of the closure being lowered. A closure's captures are copies,
     /// so an assignment to one would be lost: it is reported instead.
     capture_names: Vec<String>,
+    /// The captured variables this closure body reaches through its `__ref_<name>` pointer.
+    ref_names: std::collections::HashSet<String>,
+    /// For each lifted closure, the captures it writes: they are passed as pointers.
+    closure_ref_caps: HashMap<String, std::collections::HashSet<String>>,
     /// The C parameter types of each top-level function and impl method, by C name.
     fn_param_tys: HashMap<String, Vec<String>>,
     /// The methods of every `impl` block: `(type, method) -> (C function name, kind)`,
@@ -1592,6 +1596,22 @@ fn func_ptr_c_type(param_count: usize) -> String {
     }
 }
 
+thread_local! {
+    /// The names assigned (`x = ..`, `x op= ..`) by the expressions a [`collect_path_names`] walk
+    /// visits. The walk fills it, and [`assigned_names`] reads it.
+    static ASSIGNED: std::cell::RefCell<std::collections::HashSet<String>> =
+        std::cell::RefCell::new(std::collections::HashSet::new());
+}
+
+/// The names of the variables `body` assigns to, other than those `bound` names.
+fn assigned_names(body: &Expr, bound: &std::collections::HashSet<String>) -> std::collections::HashSet<String> {
+    ASSIGNED.with(|a| a.borrow_mut().clear());
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    collect_path_names(body, bound, &mut out, &mut seen);
+    ASSIGNED.with(|a| std::mem::take(&mut *a.borrow_mut()))
+}
+
 /// Collect every single-segment path name referenced by `e` into `out` (deduped).
 /// Used by [`closure_captures`] to detect captured variables structurally.
 fn collect_path_names(
@@ -1610,7 +1630,14 @@ fn collect_path_names(
             }
         }
         ExprKind::Lit(_) => {}
-        ExprKind::Binary(l, _, r) => {
+        ExprKind::Binary(l, op, r) => {
+            if matches!(op, ABinOp::Assign) || compound_op(*op).is_some() {
+                if let ExprKind::Path(p) = &l.kind {
+                    if p.segments.len() == 1 && !bound.contains(&p.segments[0].node) {
+                        ASSIGNED.with(|a| a.borrow_mut().insert(p.segments[0].node.clone()));
+                    }
+                }
+            }
             collect_path_names(l, bound, out, seen);
             collect_path_names(r, bound, out, seen);
         }
@@ -1823,6 +1850,8 @@ impl Lower {
             expect_ty: None,
             dead_blocks: Vec::new(),
             capture_names: Vec::new(),
+            ref_names: std::collections::HashSet::new(),
+            closure_ref_caps: HashMap::new(),
             closure_rets: HashMap::new(),
             arm_counter: 0,
             var_renames: HashMap::new(),
@@ -2220,6 +2249,18 @@ impl Lower {
     fn lower_closure(&mut self, params: &[ast::Param], body: &Expr) -> Result<mir::Operand> {
         let param_tys_hint: Vec<String> = self.closure_param_hint.take().unwrap_or_default();
         let captures = self.literal_captures(params, body)?;
+        // A capture the body writes is passed by pointer, so the write reaches the caller's
+        // variable. The others are passed by value, as before.
+        let bound_params: std::collections::HashSet<String> = params
+            .iter()
+            .flat_map(|p| closure_param_names(&p.pat).unwrap_or_default())
+            .collect();
+        let assigned = assigned_names(body, &bound_params);
+        let ref_caps: std::collections::HashSet<String> = captures
+            .iter()
+            .filter(|c| assigned.contains(*c))
+            .cloned()
+            .collect();
 
         // Qualified by the enclosing function: each function is lowered with its
         // own counter, so a bare counter would give two closures the same name.
@@ -2232,7 +2273,14 @@ impl Lower {
         // Build the lifted function in its own context, seeded with the enclosing
         // environment so nested closures and async names resolve.
         let mut sub = Lower::new(&self.structs, self.hints.clone());
-        sub.capture_names = captures.clone();
+        sub.capture_names = captures
+            .iter()
+            .filter(|c| !ref_caps.contains(*c))
+            .cloned()
+            .collect();
+        sub.ref_names = ref_caps.clone();
+        sub.closure_captures = self.closure_captures.clone();
+        sub.closure_ref_caps = self.closure_ref_caps.clone();
         sub.lenient_calls = self.lenient_calls;
         sub.async_fns = self.async_fns.clone();
         sub.all_fn_names = self.all_fn_names.clone();
@@ -2278,6 +2326,14 @@ impl Lower {
                     .and_then(|(_, t)| t.clone())
                     .unwrap_or_else(|| "long long".to_string()),
             };
+            if ref_caps.contains(cap) {
+                let pname = format!("__ref_{cap}");
+                let pty = format!("{cap_ty}*");
+                sub.func.params.push(pname.clone());
+                sub.func.locals.push((pname.clone(), Some(pty.clone())));
+                sub.types.insert(pname, pty);
+                continue;
+            }
             sub.func.params.push(cap.clone());
             sub.func.locals.push((cap.clone(), Some(cap_ty.clone())));
             if cap_ty != "long long" {
@@ -2354,6 +2410,7 @@ impl Lower {
         self.spec_done = sub.spec_done.clone();
         // Record the captures so call sites through a bound local can pass them.
         self.closure_captures.insert(name.clone(), captures);
+        self.closure_ref_caps.insert(name.clone(), ref_caps);
         Ok(mir::Operand::Func(name))
     }
 
@@ -2432,6 +2489,11 @@ impl Lower {
             .get(&lifted)
             .cloned()
             .unwrap_or_default();
+        if self.closure_ref_caps.get(&lifted).is_some_and(|r| !r.is_empty()) {
+            return Err(LowerError(format!(
+                "a closure that writes its captured variables cannot be passed to the generic `{fname}` yet"
+            )));
+        }
         let spec_name = format!("{fname}__with_{lifted}");
         if !self.spec_done.contains(&spec_name) {
             self.spec_done.insert(spec_name.clone());
@@ -3417,6 +3479,72 @@ impl Lower {
     /// The lifted function of a closure argument and the captured variables it
     /// takes as leading arguments. A closure literal is lifted here, once, so the
     /// call inside the loop does not repeat the lifting.
+    /// The C type of a captured variable, as the closure's parameter spells it.
+    fn capture_c_type(&self, cap: &str) -> String {
+        if let Some(base) = cap.strip_prefix("__ref_") {
+            let _ = base;
+            return self
+                .func
+                .locals
+                .iter()
+                .find(|(n, _)| n == cap)
+                .and_then(|(_, t)| t.clone())
+                .map(|t| t.trim_end_matches('*').to_string())
+                .unwrap_or_else(|| "long long".to_string());
+        }
+        self.types
+            .get(cap)
+            .cloned()
+            .or_else(|| {
+                self.func
+                    .locals
+                    .iter()
+                    .find(|(n, _)| n == cap)
+                    .and_then(|(_, t)| t.clone())
+            })
+            .unwrap_or_else(|| "long long".to_string())
+    }
+
+    /// The arguments for the captures of the lifted closure `lifted`, in the order of its
+    /// capture parameters. A written capture is passed as the address of the variable (or as
+    /// the pointer this closure already holds for it); the others are passed by value.
+    fn capture_operands(&mut self, lifted: &str) -> Vec<mir::Operand> {
+        let caps = self.closure_captures.get(lifted).cloned().unwrap_or_default();
+        let refs = self.closure_ref_caps.get(lifted).cloned().unwrap_or_default();
+        let mut ops = Vec::new();
+        for c in caps {
+            let held_ptr = self.ref_names.contains(&c);
+            if refs.contains(&c) {
+                if held_ptr {
+                    ops.push(mir::Operand::var(format!("__ref_{c}")));
+                } else {
+                    let ty = self.capture_c_type(&c);
+                    let var = self.var_name(&c);
+                    let p = self.fresh_temp(format!("{ty}*"));
+                    self.emit(
+                        p.clone(),
+                        mir::Rvalue::Ref(mir::Operand::var(var), true),
+                    );
+                    ops.push(mir::Operand::var(p));
+                }
+            } else if held_ptr {
+                let ty = self.capture_c_type(&format!("__ref_{c}"));
+                let v = self.fresh_temp(ty);
+                self.emit(
+                    v.clone(),
+                    mir::Rvalue::Unary(
+                        mir::MirUnOp::Deref,
+                        mir::Operand::var(format!("__ref_{c}")),
+                    ),
+                );
+                ops.push(mir::Operand::var(v));
+            } else {
+                ops.push(mir::Operand::var(self.var_name(&c)));
+            }
+        }
+        ops
+    }
+
     fn closure_callee(&mut self, arg: &Expr) -> Result<(String, Vec<mir::Operand>)> {
         let lifted = match &arg.kind {
             ExprKind::Path(p) if p.segments.len() == 1 => {
@@ -3462,15 +3590,7 @@ impl Lower {
                 }
             },
         };
-        let caps = self
-            .closure_captures
-            .get(&lifted)
-            .cloned()
-            .unwrap_or_default();
-        let mut cap_ops = Vec::new();
-        for c in caps {
-            cap_ops.push(mir::Operand::var(self.var_name(&c)));
-        }
+        let cap_ops = self.capture_operands(&lifted);
         Ok((lifted, cap_ops))
     }
 
@@ -10267,6 +10387,22 @@ impl Lower {
                     .last()
                     .map(|s| s.node.clone())
                     .unwrap_or_default();
+                if p.segments.len() == 1 && self.ref_names.contains(&name) {
+                    let ptr = Expr {
+                        kind: ExprKind::Path(tpt_moira_clotho::ast::Path {
+                            segments: vec![tpt_moira_clotho::ast::Spanned::new(
+                                format!("__ref_{name}"),
+                                e.span,
+                            )],
+                        }),
+                        span: e.span,
+                    };
+                    let read = Expr {
+                        kind: ExprKind::Deref(Box::new(ptr)),
+                        span: e.span,
+                    };
+                    return self.lower_expr(&read);
+                }
                 // A literal top-level constant folds to its value; only fall
                 // back to a variable read when it is not a known const (the
                 // C backend would otherwise see an undeclared identifier).
@@ -10310,9 +10446,32 @@ impl Lower {
                 e.span.start, e.span.end
             ))),
             ExprKind::Binary(l, abop, r) => {
-                // A closure's captured variables are copies: assigning to one would be lost.
                 let is_assign = matches!(abop, ABinOp::Assign)
                     || compound_op(*abop).is_some();
+                // A written capture is reached through its pointer: `x = v` is `*__ref_x = v`.
+                if let (true, ExprKind::Path(p)) = (is_assign, &l.kind) {
+                    if p.segments.len() == 1 && self.ref_names.contains(&p.segments[0].node) {
+                        let ptr = Expr {
+                            kind: ExprKind::Path(tpt_moira_clotho::ast::Path {
+                                segments: vec![tpt_moira_clotho::ast::Spanned::new(
+                                    format!("__ref_{}", p.segments[0].node),
+                                    l.span,
+                                )],
+                            }),
+                            span: l.span,
+                        };
+                        let lhs = Expr {
+                            kind: ExprKind::Deref(Box::new(ptr)),
+                            span: l.span,
+                        };
+                        let rewritten = Expr {
+                            kind: ExprKind::Binary(Box::new(lhs), *abop, r.clone()),
+                            span: e.span,
+                        };
+                        return self.lower_expr(&rewritten);
+                    }
+                }
+                // A captured variable that is not passed by pointer cannot be written.
                 if let (true, ExprKind::Path(p)) = (is_assign, &l.kind) {
                     if p.segments.len() == 1 && self.capture_names.contains(&p.segments[0].node) {
                         return Err(LowerError(format!(
@@ -10861,10 +11020,10 @@ impl Lower {
                 // Capturing closures invoked through a bound local get their
                 // captured variables as leading arguments.
                 if let mir::Operand::Func(fname) = &callee_operand {
-                    if let Some(caps) = self.closure_captures.get(fname).cloned() {
-                        for cap in caps {
-                            operands.push(mir::Operand::Var(self.var_name(&cap)));
-                        }
+                    if self.closure_captures.contains_key(fname) {
+                        let fname = fname.clone();
+                        let cap_ops = self.capture_operands(&fname);
+                        operands.extend(cap_ops);
                     }
                 }
                 let param_tys = match &callee_operand {
