@@ -57,3 +57,28 @@ fn derived_enum_equality_calls_eq_run() {
     };
     assert_eq!(out, "1\n0\n1\n", "derived enum equality should match Rust");
 }
+
+#[test]
+fn vec_contains_of_user_types_calls_eq_run() {
+    let out = match run_c(
+        "vec_contains",
+        "#[derive(Clone, Copy, PartialEq)]
+        enum Kind { A, B }
+        #[derive(Clone, Copy, PartialEq)]
+        struct P { x: i64 }
+        fn main() {
+            let mut ks: Vec<Kind> = Vec::new();
+            ks.push(Kind::B);
+            print_i64(ks.contains(&Kind::B) as i64);
+            print_i64(ks.contains(&Kind::A) as i64);
+            let mut ps: Vec<P> = Vec::new();
+            ps.push(P { x: 3 });
+            print_i64(ps.contains(&P { x: 3 }) as i64);
+            print_i64(ps.contains(&P { x: 4 }) as i64);
+        }",
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "1\n0\n1\n0\n", "contains on user types should use their eq");
+}

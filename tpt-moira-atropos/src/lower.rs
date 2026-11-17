@@ -5983,6 +5983,120 @@ impl Lower {
 
     /// `a == b` for two vectors whose element type has an `eq` method: equal lengths and
     /// pairwise equal elements, compared in a loop. `None` when the element has no `eq`.
+    /// `v.contains(&x)` on a vector of a user type with its own `eq` (a derived `PartialEq`): a loop
+    /// over the elements that calls `eq` on each through a pointer, stopping at the first match.
+    /// `None` for other element types (word elements and strings use the vector helper).
+    fn lower_vec_contains_user(
+        &mut self,
+        recv: &Expr,
+        arg: &Expr,
+    ) -> Result<Option<mir::Operand>> {
+        let Some(hint) = self.hint_of_expr(recv) else {
+            return Ok(None);
+        };
+        let Some(elem) = mir::vec_elem(&hint).map(|e| e.trim_start_matches("struct ").to_string()) else {
+            return Ok(None);
+        };
+        let Some((cname, kind, ret)) = self
+            .methods
+            .get(&(elem.clone(), "eq".to_string()))
+            .cloned()
+        else {
+            return Ok(None);
+        };
+        if kind != 1 || ret == "void" {
+            return Ok(None);
+        }
+        let rv = self.lower_expr(recv)?;
+        let mir::Operand::Var(rn) = rv else {
+            return Err(LowerError("`contains` needs a named vector".into()));
+        };
+        let deref = self.temp_type_of(&rn).ends_with('*');
+        let arg_val = match &arg.kind {
+            ExprKind::Ref(inner, _) => self.lower_expr(inner)?,
+            _ => self.lower_expr(arg)?,
+        };
+        let xn = match arg_val {
+            mir::Operand::Var(n) => n,
+            other => {
+                let t = self.fresh_temp(format!("{elem}"));
+                self.emit(t.clone(), mir::Rvalue::Use(other));
+                t
+            }
+        };
+        let xp = self.fresh_temp(format!("{elem}*"));
+        self.emit(xp.clone(), mir::Rvalue::Ref(mir::Operand::var(xn), true));
+        let len = self.fresh_temp("long long");
+        self.emit(
+            len.clone(),
+            mir::Rvalue::Field(mir::Operand::var(rn.clone()), "len".into(), deref),
+        );
+        let data = self.fresh_temp(format!("{elem}*"));
+        self.emit(
+            data.clone(),
+            mir::Rvalue::Field(mir::Operand::var(rn), "data".into(), deref),
+        );
+        let res = self.fresh_temp("long long");
+        self.emit(res.clone(), mir::Rvalue::Use(mir::Operand::Const(0)));
+        let i = self.fresh_temp("long long");
+        self.emit(i.clone(), mir::Rvalue::Use(mir::Operand::Const(0)));
+
+        let head = self.new_block();
+        let body = self.new_block();
+        let step = self.new_block();
+        let found = self.new_block();
+        let exit = self.new_block();
+        self.set_term(mir::Terminator::Goto(head));
+
+        self.current = head;
+        let more = self.fresh_temp("long long");
+        self.emit(
+            more.clone(),
+            mir::Rvalue::Binary(
+                mir::MirBinOp::Lt,
+                mir::Operand::var(i.clone()),
+                mir::Operand::var(len),
+            ),
+        );
+        self.set_term(mir::Terminator::If(mir::Operand::var(more), body, exit));
+
+        self.current = body;
+        let item = self.fresh_temp(elem.clone());
+        self.emit(
+            item.clone(),
+            mir::Rvalue::Index(mir::Operand::var(data), mir::Operand::var(i.clone())),
+        );
+        let ip = self.fresh_temp(format!("{elem}*"));
+        self.emit(ip.clone(), mir::Rvalue::Ref(mir::Operand::var(item), true));
+        let hit = self.fresh_temp(ret);
+        self.emit(
+            hit.clone(),
+            mir::Rvalue::Call(
+                mir::Operand::Func(cname),
+                vec![mir::Operand::var(ip), mir::Operand::var(xp)],
+            ),
+        );
+        self.set_term(mir::Terminator::If(mir::Operand::var(hit), found, step));
+
+        self.current = found;
+        self.emit(res.clone(), mir::Rvalue::Use(mir::Operand::Const(1)));
+        self.set_term(mir::Terminator::Goto(exit));
+
+        self.current = step;
+        self.emit(
+            i.clone(),
+            mir::Rvalue::Binary(
+                mir::MirBinOp::Add,
+                mir::Operand::var(i),
+                mir::Operand::Const(1),
+            ),
+        );
+        self.set_term(mir::Terminator::Goto(head));
+
+        self.current = exit;
+        Ok(Some(mir::Operand::var(res)))
+    }
+
     fn lower_vec_eq(
         &mut self,
         l: &mir::Operand,
@@ -12590,6 +12704,11 @@ impl Lower {
                 }
                 // A read-only vector method on any receiver (a field, `self.items.len()`): the
                 // receiver's vector value is read and its helper takes a pointer to that value.
+                if method.node == "contains" && args.len() == 1 {
+                    if let Some(v) = self.lower_vec_contains_user(recv, &args[0])? {
+                        return Ok(v);
+                    }
+                }
                 if matches!(method.node.as_str(), "len" | "is_empty" | "contains") {
                     // A vector, or a slice (a `const` array is a slice of its elements). A slice
                     // has its own helpers, and only `contains` goes through them.
