@@ -327,7 +327,7 @@ fn real_main() -> ExitCode {
         "c" => match lower_for_emit(&program, &extern_programs, bundle) {
             Ok(mir) => emit_text(&tpt_moira_atropos::codegen_c::emit_c(&mir), &output),
             Err(e) => {
-                eprintln!("moira: lowering error: {}", e);
+                eprintln!("moira: lowering error: {}", locate_byte_ranges(&e.to_string(), &source_files));
                 return ExitCode::FAILURE;
             }
         },
@@ -381,6 +381,50 @@ fn pipeline() -> PipelineCacheExt {
 
 /// Lower for code generation: the root program alone, or (`--bundle`) the root and
 /// its extern crates as one program, each crate prefixed by its name.
+/// Name the file and line of each `bytes N..M` range in a lowering error, so a message points at
+/// the source (the offsets are into the flattened crate text).
+fn locate_byte_ranges(msg: &str, files: &[tpt_moira_clotho::SourceFile]) -> String {
+    let bytes = msg.as_bytes();
+    let mut out = String::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        // Copy the text up to the next `bytes ` marker, then the number that follows it.
+        if i + 6 <= bytes.len() && &msg[i..i + 6] == "bytes " {
+            out.push_str("bytes ");
+            i += 6;
+            let mut start: usize = 0;
+            let mut digits = 0;
+            while i < bytes.len() && bytes[i] >= 48 && bytes[i] <= 57 {
+                start = start * 10 + (bytes[i] - 48) as usize;
+                digits += 1;
+                i += 1;
+            }
+            if digits == 0 || i + 2 > bytes.len() || &msg[i..i + 2] != ".." {
+                out.push_str(&msg[i - digits..i]);
+                continue;
+            }
+            out.push_str(&msg[i - digits..i]);
+            out.push_str("..");
+            i += 2;
+            let end_start = i;
+            while i < bytes.len() && bytes[i] >= 48 && bytes[i] <= 57 {
+                i += 1;
+            }
+            out.push_str(&msg[end_start..i]);
+            if let Some(loc) = tpt_moira_clotho::locate_span(files, start) {
+                out.push_str(" (at ");
+                out.push_str(&loc);
+                out.push(')');
+            }
+        } else {
+            let ch = &msg[i..i + 1];
+            out.push_str(ch);
+            i += 1;
+        }
+    }
+    out
+}
+
 fn lower_for_emit(
     program: &tpt_moira_clotho::ast::Program,
     externs: &[(String, tpt_moira_clotho::ast::Program)],

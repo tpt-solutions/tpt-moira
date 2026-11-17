@@ -165,6 +165,12 @@ Target: compile a strict subset of Rust (no complex trait resolution, no async/a
       temporaries were `Result<..., long long>` and bare `Result`, which the C backend reads as
       `fmt::Result`. Test: `tpt-moira-lachesis/tests/fs_shim.rs`. `remove_file`, `open` and `create` are
       still not lowered.
+      **Self-host C path, 2026-11-18:** `mem::take` through a `&mut Vec` pointer and `mem::replace` on
+      variables and fields (`tests/mem_swap.rs`); generic associated constructors called inside
+      `vec![..]` now specialise (the monomorphiser matches the owner of a qualified path such as
+      `ast::W::new` inside macro tokens; `tests/vec_owner.rs`). Lowering errors name file and line
+      (the driver maps the flattened byte offsets). Probe: clotho 8 blocked (was 15), driver 20.
+      The `infer.rs` edits that are not mine still cause the three `lachesis` check errors.
       **HashMap (2026-11-17):** `Map<K,V>` for word-sized keys and values (integers, bools,
       pointers): a linear table like the C runtime's, with `new`, `insert` (returns `Option<V>`),
       `get_ptr`, `contains_key`, `len`, `is_empty`, and iteration. String keys are rejected

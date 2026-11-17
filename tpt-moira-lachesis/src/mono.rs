@@ -952,8 +952,37 @@ impl Mono {
             ExprKind::Macro(mc) => {
                 // Macro arguments are tokens the checker parses later. A callee among them
                 // is renamed by its identifier token (a free function), or by the owner
-                // identifier of an associated call (`Pair::new`).
-                for tok in &mut mc.tokens {
+                // identifier of an associated call (`Pair::new`, or `m::Pair::new`: the call is
+                // keyed by the start of its whole path).
+                let toks = &mc.tokens;
+                // For each token, the start of the path it belongs to (for identifiers), and the
+                // name that follows `owner::` (the callee of an associated call written `owner::name`).
+                let mut path_start: Vec<Option<usize>> = vec![None; toks.len()];
+                let mut cur: Option<usize> = None;
+                for (i, tok) in toks.iter().enumerate() {
+                    match &tok.kind {
+                        TokenKind::Ident(_) => {
+                            let after_sep = i >= 1 && matches!(toks[i - 1].kind, TokenKind::ColonColon);
+                            if !after_sep {
+                                cur = Some(tok.span.start);
+                            }
+                            path_start[i] = cur;
+                        }
+                        TokenKind::ColonColon => {}
+                        _ => cur = None,
+                    }
+                }
+                let callee_after: Vec<Option<String>> = (0..toks.len())
+                    .map(|i| match (toks.get(i + 1), toks.get(i + 2)) {
+                        (Some(sep), Some(tpt_moira_clotho::token::Token { kind: TokenKind::Ident(n), .. }))
+                            if matches!(sep.kind, TokenKind::ColonColon) =>
+                        {
+                            Some(n.clone())
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                for (i, tok) in mc.tokens.iter_mut().enumerate() {
                     if let TokenKind::Ident(name) = &mut tok.kind {
                         // A generic struct literal among the arguments (`vec![Spanned { .. }]`)
                         // is renamed to its instance, like the struct literal in the AST.
@@ -995,6 +1024,25 @@ impl Mono {
                         } else if let Some(call) = self.calls_by_start.get(&tok.span.start).cloned()
                         {
                             if call.owner.as_deref() == Some(name.as_str()) {
+                                let params: Vec<Ty> =
+                                    call.params.iter().map(|(_, t)| subst_ty(t, sub)).collect();
+                                if let Some(instance) = self.owner_instance(&call, &params) {
+                                    *name = instance;
+                                }
+                            }
+                        } else if let Some(call) = match path_start.get(i).copied() {
+                            Some(Some(ps)) => self.calls_by_start.get(&ps).cloned(),
+                            _ => None,
+                        } {
+                            // `owner::callee` inside a longer path (`m::Pair::new`): the owner
+                            // identifier is the segment before the callee.
+                            let after: Option<String> = match callee_after.get(i) {
+                                Some(Some(n)) => Some(n.clone()),
+                                _ => None,
+                            };
+                            if call.owner.as_deref() == Some(name.as_str())
+                                && after.as_deref() == Some(call.callee.as_str())
+                            {
                                 let params: Vec<Ty> =
                                     call.params.iter().map(|(_, t)| subst_ty(t, sub)).collect();
                                 if let Some(instance) = self.owner_instance(&call, &params) {
