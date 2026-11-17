@@ -528,6 +528,8 @@ pub fn hint_of_ty(ty: &Ty) -> Option<String> {
             }
             // A reference to an option is a pointer to the option's value.
             Ty::Apply(name, _) if name == "Option" => hint_compound(inner).map(|h| format!("{h}*")),
+            // A reference to a tuple is a pointer to the tuple's value.
+            Ty::Tuple(_) => hint_compound(inner).map(|h| format!("{h}*")),
             _ => None,
         },
         _ => None,

@@ -253,7 +253,8 @@ fn expand_call(e: &mut Expr, helpers: &HashMap<String, Helper>, fresh: &mut usiz
         } else {
             None
         };
-        stmts.push(local_typed(&fresh_name, declared, args[i].clone(), span));
+        // Each binding keeps its argument's span: the checker's types are keyed by span.
+        stmts.push(local_typed(&fresh_name, declared, args[i].clone(), args[i].span));
         renames.insert(name.node.clone(), fresh_name);
     }
     // The helper's own locals (lets and `for` binders) get fresh names too.
@@ -389,7 +390,8 @@ fn replace_closure_calls(root: &mut Expr, call: &ClosureCall<'_>, counter: &mut 
                     TypeKind::Infer => Some(call.param_tys[i].clone()),
                     _ => Some(call.params[i].ty.clone()),
                 };
-                stmts.push(local_typed(&fresh_name, declared, args[i].clone(), span));
+                // Each binding keeps its argument's span: the checker's types are keyed by span.
+                stmts.push(local_typed(&fresh_name, declared, args[i].clone(), args[i].span));
                 renames.insert(name.clone(), fresh_name);
             }
             // The closure body, with its parameters renamed to the bound names.

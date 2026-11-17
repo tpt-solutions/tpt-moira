@@ -2875,6 +2875,8 @@ impl Lower {
                                 || is_scalar_pointer_hint(h)
                                 || self.struct_names.contains(h)
                                 || (h.ends_with('*') && self.struct_names.contains(h.trim_end_matches('*')))
+                                // A reference to a tuple (`let r = &mut t;`) is a pointer to its struct.
+                                || (h.ends_with('*') && h.trim_end_matches('*').starts_with("Tuple<"))
                                 // A call returning a function value (`let f = make();`
                                 // where `make() -> fn(i64) -> i64`) is a function pointer.
                                 || h.starts_with("Fn<")

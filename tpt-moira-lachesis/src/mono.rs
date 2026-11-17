@@ -1483,6 +1483,14 @@ fn mangle(t: &Ty) -> Option<String> {
         }
         Ty::Ref(inner) => format!("ref_{}", mangle(inner)?),
         Ty::RefMut(inner) => format!("refmut_{}", mangle(inner)?),
+        // A tuple is named by its elements (`tup_i64_i64`).
+        Ty::Tuple(elems) if !elems.is_empty() => {
+            let mut parts = vec!["tup".to_string()];
+            for e in elems {
+                parts.push(mangle(e)?);
+            }
+            parts.join("_")
+        }
         Ty::Fn(params, ret) => {
             let mut parts = vec!["fn".to_string()];
             for p in params {
@@ -1613,6 +1621,16 @@ fn ty_to_ast(t: &Ty, span: Span) -> Option<Type> {
             }
             args.push(ty_to_ast(ret, span)?);
             path("fn", args)
+        }
+        Ty::Tuple(elems) => {
+            let mut written = Vec::new();
+            for e in elems {
+                written.push(ty_to_ast(e, span)?);
+            }
+            Type {
+                kind: TypeKind::Tuple(written),
+                span,
+            }
         }
         _ => return None,
     })
