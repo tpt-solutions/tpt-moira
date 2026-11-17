@@ -152,6 +152,13 @@ Target: compile a strict subset of Rust (no complex trait resolution, no async/a
       The fix is to have the lowering record array types (a change that also affects the C backend,
       which currently fails to compile that copy). Also not yet: string `<`/`>`, `split`/`lines`, `replace`, and
       `StoreIndex`/`IndexRef` on bytes.
+      **C path, enum equality (2026-11-17):** `==` on an enum with a derived `PartialEq` emitted C that
+      compares two structs (a C error). The enum's temporaries are typed `struct Kind`; the lowering
+      now strips that prefix before looking up `Kind__eq`. Test: `tpt-moira-lachesis/tests/enum_equality.rs`.
+      Self-host (Stage 1) is measured by the C path (`x.py self-host`); the native backend does not count
+      toward it. Open C-path blockers: `Vec::contains` on struct and enum elements (needs a loop that calls
+      `eq`), method calls on receivers the checker leaves untyped (`get`, `iter`, `contains`), and std
+      surface (`Command`, `env`, `time`, `fs`).
       **HashMap (2026-11-17):** `Map<K,V>` for word-sized keys and values (integers, bools,
       pointers): a linear table like the C runtime's, with `new`, `insert` (returns `Option<V>`),
       `get_ptr`, `contains_key`, `len`, `is_empty`, and iteration. String keys are rejected

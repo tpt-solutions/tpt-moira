@@ -5794,7 +5794,11 @@ impl Lower {
             _ => return Ok(None),
         };
         let lty = self.temp_type_of(&ln);
-        let ty = lty.trim_end_matches('*').to_string();
+        // An enum's temporaries are typed with the C name of the struct (`struct Kind`).
+        let ty = lty
+            .trim_end_matches('*')
+            .trim_start_matches("struct ")
+            .to_string();
         if let Some(elem) = mir::vec_elem(&ty).map(|e| e.to_string()) {
             return self.lower_vec_eq(l, r, &elem, negate);
         }
