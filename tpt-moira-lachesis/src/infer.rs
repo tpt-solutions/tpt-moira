@@ -4997,7 +4997,7 @@ impl TypeChecker {
             ("fs".into(), "read_to_string".into()),
             sig(
                 vec![Ref(Box::new(Str))],
-                Apply("Result".to_string(), vec![Str]),
+                Apply("Result".to_string(), vec![Str, Str]),
             ),
         );
         self.assoc_fns.insert(
@@ -5082,14 +5082,14 @@ impl TypeChecker {
             ("fs".into(), "remove_file".into()),
             sig(
                 vec![Ref(Box::new(std("Path")))],
-                Apply("Result".to_string(), vec![Unit]),
+                Apply("Result".to_string(), vec![Unit, Str]),
             ),
         );
         self.assoc_fns.insert(
             ("fs".into(), "open".into()),
             sig(
                 vec![Ref(Box::new(std("Path")))],
-                Apply("Result".to_string(), vec![std("File")]),
+                Apply("Result".to_string(), vec![std("File"), Str]),
             ),
         );
         self.assoc_fns.insert(
@@ -5098,14 +5098,14 @@ impl TypeChecker {
                 // `P: AsRef<Path>`: a path, a string or a `PathBuf` reference. The data is any
                 // `AsRef<[u8]>`: a string, a byte slice or a vector.
                 vec![Unknown, Unknown],
-                Apply("Result".to_string(), vec![Unit]),
+                Apply("Result".to_string(), vec![I64, Str]),
             ),
         );
         self.assoc_fns.insert(
             ("File".into(), "open".into()),
             sig(
                 vec![Ref(Box::new(std("Path")))],
-                Apply("Result".to_string(), vec![std("File")]),
+                Apply("Result".to_string(), vec![std("File"), Str]),
             ),
         );
         self.assoc_fns.insert(

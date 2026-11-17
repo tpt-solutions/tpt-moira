@@ -159,6 +159,12 @@ Target: compile a strict subset of Rust (no complex trait resolution, no async/a
       toward it. Open C-path blockers: `Vec::contains` on struct and enum elements (needs a loop that calls
       `eq`), method calls on receivers the checker leaves untyped (`get`, `iter`, `contains`), and std
       surface (`Command`, `env`, `time`, `fs`).
+      **std::fs shim, C path (2026-11-18):** `fs::read_to_string` returns `Result<str, str>` (the error is
+      "cannot read file") and `fs::write` returns `Result<i64, str>` (the error is "cannot write file"),
+      built from the runtime's NULL and status results. The checker's signatures match. The lowering
+      temporaries were `Result<..., long long>` and bare `Result`, which the C backend reads as
+      `fmt::Result`. Test: `tpt-moira-lachesis/tests/fs_shim.rs`. `remove_file`, `open` and `create` are
+      still not lowered.
       **HashMap (2026-11-17):** `Map<K,V>` for word-sized keys and values (integers, bools,
       pointers): a linear table like the C runtime's, with `new`, `insert` (returns `Option<V>`),
       `get_ptr`, `contains_key`, `len`, `is_empty`, and iteration. String keys are rejected

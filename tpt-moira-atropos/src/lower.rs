@@ -11343,7 +11343,7 @@ impl Lower {
                                 vec![path, data],
                             ),
                         );
-                        let result = self.fresh_temp("Result<long long,long long>");
+                        let result = self.fresh_temp("Result<i64,str>");
                         let ok_blk = self.new_block();
                         let err_blk = self.new_block();
                         let join = self.new_block();
@@ -11367,7 +11367,7 @@ impl Lower {
                                 "Result".to_string(),
                                 vec![
                                     ("tag".to_string(), mir::Operand::Const(1)),
-                                    (payload_field("Result", 1, 0), mir::Operand::Const(0)),
+                                    (payload_field("Result", 1, 0), mir::Operand::CStr("cannot write file".to_string())),
                                 ],
                             ),
                         );
@@ -11388,7 +11388,7 @@ impl Lower {
                                 vec![path],
                             ),
                         );
-                        let result = self.fresh_temp("Result<str,long long>");
+                        let result = self.fresh_temp("Result<str,str>");
                         let failed = self.fresh_temp("long long");
                         self.emit(
                             failed.clone(),
@@ -11425,7 +11425,7 @@ impl Lower {
                                 "Result".to_string(),
                                 vec![
                                     ("tag".to_string(), mir::Operand::Const(1)),
-                                    (payload_field("Result", 1, 0), mir::Operand::Const(0)),
+                                    (payload_field("Result", 1, 0), mir::Operand::CStr("cannot read file".to_string())),
                                 ],
                             ),
                         );
