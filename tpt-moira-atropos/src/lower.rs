@@ -11793,7 +11793,9 @@ impl Lower {
                                 && !self.func.locals.iter().any(|(l, _)| *l == var)
                             {
                                 return Err(LowerError(format!(
-                                    "call to `{name}`: no function, builtin or local of that name is in the codegen subset (a path call whose type is not known, such as `Vec::new()` in an untyped position)"
+                                    "call to `{name}`: no function, builtin or local of that name is in the codegen subset (a path call whose type is not known, such as `Vec::new()` in an untyped position; bytes {}..{})",
+                                    e.span.start,
+                                    e.span.end
                                 )));
                             }
                             mir::Operand::Var(name)
