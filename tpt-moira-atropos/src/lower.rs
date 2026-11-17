@@ -9596,6 +9596,14 @@ impl Lower {
             if let Some(v) = self.lower_mem_take(&args[0])? {
                 return Ok(Some(v));
             }
+            if let Some(v) = self.lower_mem_take_through_ptr(&args[0])? {
+                return Ok(Some(v));
+            }
+        }
+        if segs[0] == "mem" && segs[1] == "replace" && args.len() == 2 {
+            if let Some(v) = self.lower_mem_replace(&args[0], &args[1])? {
+                return Ok(Some(v));
+            }
         }
         let Some((cname, _kind, ret)) = self
             .methods
@@ -9623,6 +9631,103 @@ impl Lower {
     /// a fresh temporary and the place is left as an empty vector. Only a local or a
     /// field of a vector type is handled; anything else returns `Ok(None)` so the
     /// generic call path applies.
+    /// `mem::take(r)` where `r` is a `&mut Vec<T>` (already a pointer): the vector moves out of
+    /// `*r` and `*r` becomes an empty vector.
+    fn lower_mem_take_through_ptr(&mut self, arg: &Expr) -> Result<Option<mir::Operand>> {
+        let ExprKind::Path(p) = &arg.kind else {
+            return Ok(None);
+        };
+        if p.segments.len() != 1 {
+            return Ok(None);
+        }
+        let name = self.var_name(&p.segments[0].node);
+        let ty = self.temp_type_of(&name);
+        let Some(elem) = mir::vec_ptr_elem(&ty).map(|e| e.to_string()) else {
+            return Ok(None);
+        };
+        let empty = self.fresh_temp(mir::vec_type(&elem));
+        self.emit(
+            empty.clone(),
+            mir::Rvalue::Call(mir::Operand::Func(mir::vec_fn_name(&elem, "new")), vec![]),
+        );
+        let old = self.fresh_temp(mir::vec_type(&elem));
+        self.emit(
+            old.clone(),
+            mir::Rvalue::Unary(mir::MirUnOp::Deref, mir::Operand::var(name.clone())),
+        );
+        for (field, fty) in [
+            ("data", format!("{elem}*")),
+            ("len", "long long".to_string()),
+            ("cap", "long long".to_string()),
+        ] {
+            let v = self.fresh_temp(fty);
+            self.emit(
+                v.clone(),
+                mir::Rvalue::Field(mir::Operand::var(empty.clone()), field.into(), false),
+            );
+            self.emit(
+                "__scratch".to_string(),
+                mir::Rvalue::StoreField(
+                    mir::Operand::var(name.clone()),
+                    field.into(),
+                    mir::Operand::var(v),
+                    true,
+                ),
+            );
+        }
+        Ok(Some(mir::Operand::var(old)))
+    }
+
+    /// `mem::replace(&mut place, value)` for a variable or a field whose type the checker knows:
+    /// the place's old value is returned and the place takes `value`.
+    fn lower_mem_replace(
+        &mut self,
+        place_arg: &Expr,
+        value: &Expr,
+    ) -> Result<Option<mir::Operand>> {
+        let place = match &place_arg.kind {
+            ExprKind::Ref(place, true) => &**place,
+            _ => return Ok(None),
+        };
+        let Some(ty) = self.hint_of_expr(place) else {
+            return Ok(None);
+        };
+        let old_src = self.lower_expr(place)?;
+        let old = self.fresh_temp(ty.clone());
+        self.emit(old.clone(), mir::Rvalue::Use(old_src));
+        self.expect_ty = Some(ty);
+        let new = self.lower_expr(value);
+        self.expect_ty = None;
+        let new = new?;
+        match &place.kind {
+            ExprKind::Path(_) => match self.lower_expr(place)? {
+                mir::Operand::Var(n) => self.emit(n, mir::Rvalue::Use(new)),
+                _ => return Err(LowerError("mem::replace target must be a variable".into())),
+            },
+            ExprKind::Field(base, field) => {
+                let b = self.lower_expr(base)?;
+                let deref = match &b {
+                    mir::Operand::Var(n) => self.temp_type_of(n).ends_with('*'),
+                    _ => false,
+                };
+                let fname = match field.node.parse::<usize>() {
+                    Ok(i) => format!("f{i}"),
+                    Err(_) => field.node.clone(),
+                };
+                self.emit(
+                    "__scratch".to_string(),
+                    mir::Rvalue::StoreField(b, fname, new, deref),
+                );
+            }
+            _ => {
+                return Err(LowerError(
+                    "mem::replace target must be a variable or a field".into(),
+                ))
+            }
+        }
+        Ok(Some(mir::Operand::var(old)))
+    }
+
     fn lower_mem_take(&mut self, arg: &Expr) -> Result<Option<mir::Operand>> {
         let place = match &arg.kind {
             ExprKind::Ref(place, true) => &**place,
