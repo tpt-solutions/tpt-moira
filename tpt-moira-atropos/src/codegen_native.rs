@@ -869,7 +869,7 @@ fn vec_more_helpers_asm(elem: &str) -> String {
 
 /// A failed `panic!`/`unwrap`: exit with status 101, as the C runtime does.
 fn panic_asm() -> String {
-    if cfg!(windows) {
+    if host_is_windows() {
         "
 __moira_panic:
     push rbp
@@ -887,6 +887,18 @@ __moira_panic:
     call exit
 ".to_string()
     }
+}
+
+/// Whether the native backend targets Windows (its calling convention and entry wrapper depend on it).
+#[cfg(windows)]
+fn host_is_windows() -> bool {
+    true
+}
+
+/// Whether the native backend targets Windows (see the other definition).
+#[cfg(not(windows))]
+fn host_is_windows() -> bool {
+    false
 }
 
 /// The assembly of the `Map<k, v>` helpers the MIR calls. A map is a struct of `keys`, `vals`,
@@ -1127,7 +1139,7 @@ fn map_helpers_asm(k: &str, v: &str) -> String {
 /// the caller reserves the shadow space.
 fn libc_wrapper_asm(sym: &str, nargs: usize) -> String {
     let mut s = format!("\nmoira_rt_{sym}:\n    push rbp\n    mov rbp, rsp\n");
-    if cfg!(windows) {
+    if host_is_windows() {
         s.push_str("    sub rsp, 32\n");
         if nargs >= 3 {
             s.push_str("    mov r8, rdx\n");
@@ -1309,7 +1321,7 @@ moira_str_push_str:
 /// The allocation wrapper the vector helpers call: `realloc(rdi, rsi)` with the platform's C
 /// calling convention (Windows x64 passes the arguments in rcx and rdx, with shadow space).
 fn realloc_wrapper_asm() -> String {
-    if cfg!(windows) {
+    if host_is_windows() {
         "\nmoira_rt_realloc:\n    push rbp\n    mov rbp, rsp\n    sub rsp, 32\n    mov rcx, rdi\n    mov rdx, rsi\n    call realloc\n    mov rsp, rbp\n    pop rbp\n    ret\n".to_string()
     } else {
         "\nmoira_rt_realloc:\n    push rbp\n    mov rbp, rsp\n    call realloc\n    pop rbp\n    ret\n".to_string()
@@ -1321,7 +1333,7 @@ fn realloc_wrapper_asm() -> String {
 fn str_label(text: &str) -> String {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for b in text.bytes() {
-        h ^= u64::from(b);
+        h ^= b as u64;
         h = h.wrapping_mul(0x0100_0000_01b3);
     }
     format!(".Lstr{h:016x}")
@@ -1448,8 +1460,8 @@ pub fn emit_asm(prog: &SsaProgram) -> Result<String, String> {
     let mut maps: std::collections::BTreeSet<(String, String)> = std::collections::BTreeSet::new();
     for ty in &instances {
         if let Some(("Map", args)) = crate::mir::split_generic(ty) {
-            if let [k, v] = args[..] {
-                maps.insert((k.to_string(), v.to_string()));
+            if args.len() == 2 {
+                maps.insert((args[0].to_string(), args[1].to_string()));
             }
         }
     }
@@ -1554,7 +1566,7 @@ pub fn emit_asm(prog: &SsaProgram) -> Result<String, String> {
 
     // The runtime helpers are called with the stack aligned as the ABI requires, and each sets up
     // its own frame so that its `printf` call is aligned too.
-    if cfg!(windows) {
+    if host_is_windows() {
         // The C runtime calls `main` and expects rsi and rdi preserved (callee-saved on Windows);
         // the generated code uses them for arguments, so the wrapper saves them around `__moira_main`.
         out.push_str("\nmain:\n    push rbp\n    mov rbp, rsp\n    push rsi\n    push rdi\n    call __moira_main\n    pop rdi\n    pop rsi\n    pop rbp\n    ret\n");
@@ -1570,7 +1582,7 @@ pub fn emit_asm(prog: &SsaProgram) -> Result<String, String> {
 /// The assembly label of a Moira function. On Windows the program's `main` is reached through a
 /// wrapper (see the runtime), so the function itself gets a distinct label.
 fn fn_label(name: &str) -> String {
-    if cfg!(windows) && name == "main" {
+    if host_is_windows() && name == "main" {
         "__moira_main".to_string()
     } else {
         name.to_string()
@@ -1579,7 +1591,7 @@ fn fn_label(name: &str) -> String {
 
 /// A runtime helper that passes its one argument to libc `printf` with format `fmt`.
 fn print_helper(name: &str, fmt: &str, label: &str) -> String {
-    if cfg!(windows) {
+    if host_is_windows() {
         // Windows x64: printf takes its format in rcx and the value in rdx, and the caller
         // reserves 32 bytes of shadow space. The frame keeps rsp 16-byte aligned for the call.
         return format!(
