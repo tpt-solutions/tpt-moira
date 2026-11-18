@@ -4329,3 +4329,39 @@ fn index_of_call_and_method_result_runs() {
     };
     assert_eq!(out, "12");
 }
+
+/// `v.iter_mut().find(|x| ..)` gives `Option<&mut T>`: a write through the found element reaches
+/// the vector, for a vector of integers and for a vector of `(name, value)` tuples matched with
+/// `Some((_, t))`.
+#[test]
+fn iter_mut_find_writes_through_the_found_element() {
+    let out = match run_src(
+        r#"struct S { fields: Vec<(String, i64)> }
+        fn bump(v: &mut Vec<i64>, want: i64) -> bool {
+            match v.iter_mut().find(|x| **x == want) {
+                Some(t) => { *t = *t + 100; true }
+                None => false,
+            }
+        }
+        fn set(s: &mut S, name: &str, v: i64) -> bool {
+            match s.fields.iter_mut().find(|(n, _)| n == name) {
+                Some((_, t)) => { if *t != v { *t = v; } true }
+                None => false,
+            }
+        }
+        fn main() {
+            let mut v = vec![1, 2];
+            let ok = bump(&mut v, 2);
+            print_i64(v[1]);
+            print_i64(if ok { 1 } else { 0 });
+            let mut s = S { fields: vec![(String::from("a"), 1), (String::from("b"), 2)] };
+            let r = set(&mut s, "b", 9);
+            print_i64(s.fields[1].1);
+            print_i64(if r { 1 } else { 0 });
+        }"#,
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "102\n1\n9\n1");
+}

@@ -16617,14 +16617,21 @@ impl Lower {
             // the payload slot, so writes through it reach the enum (`if let V(n) = &mut e`).
             // A tuple payload that is itself a pointer (`Some((_, t))` over `iter_mut().find(..)`):
             // each name binds the address of the tuple's field.
-            if scrut_ptr && self.mut_scrutinee && pty.ends_with('*') {
+            if self.mut_scrutinee && pty.ends_with('*') {
                 if let ast::Pat::Tuple(ps) = sp {
-                    if ps.iter().all(|p| matches!(p, ast::Pat::Ident(_) | ast::Pat::Wild)) {
+                    if ps
+                        .iter()
+                        .all(|p| matches!(p, ast::Pat::Ident(_) | ast::Pat::Wild))
+                    {
                         let base = pty.trim_end_matches('*').to_string();
                         let payload = self.fresh_temp(pty.clone());
                         self.emit(
                             payload.clone(),
-                            mir::Rvalue::Field(scrut.clone(), payload_field(&ename, tag, i), scrut_ptr),
+                            mir::Rvalue::Field(
+                                scrut.clone(),
+                                payload_field(&ename, tag, i),
+                                scrut_ptr,
+                            ),
                         );
                         for (j, p) in ps.iter().enumerate() {
                             let ast::Pat::Ident(n) = p else { continue };
@@ -16641,7 +16648,11 @@ impl Lower {
                             let addr = self.fresh_temp(format!("{ct}*"));
                             self.emit(
                                 addr.clone(),
-                                mir::Rvalue::FieldAddr(mir::Operand::var(payload.clone()), format!("f{j}"), true),
+                                mir::Rvalue::FieldAddr(
+                                    mir::Operand::var(payload.clone()),
+                                    format!("f{j}"),
+                                    true,
+                                ),
                             );
                             binds.push((n.node.clone(), mir::Operand::var(addr)));
                         }
