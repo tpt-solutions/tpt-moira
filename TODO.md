@@ -938,6 +938,56 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
             closures (`__moira_closure_*` arguments), `Option`/`Tuple` shape mismatches in closure
             results, `Param`/`Path` confusion in a pattern binding, `ClosureCall` initialisers, and a
             few `return;`/subscript sites.
+          - Status (2026-11-18, C-error pass 2): named format arguments (`format!("{v}", v = e)`)
+            now bind the placeholder by name; before, `{v}` read the outer `v` and the argument was
+            taken by position. Inline placeholders (`{n}`) are added to the macro arguments as
+            `n = n` (`parse_macro_args`), so inference and closure captures see the variable. This
+            removed the `n`/`k` undeclared errors in the lifted `__inl_*` names and lowers
+            `derive_enum` (it had hit "format of a value of type `Variant`"). Net `build/clotho.c`
+            `gcc -fsyntax-only` count is now 103 (was 95), because the lowered `derive_enum` and
+            its closures add shape errors of the same kinds listed above. Test:
+            `format_named_arguments_bind_by_name_and_inline_captures_in_closures`
+            (`tpt-moira-lachesis/tests/codegen.rs`). Lachesis, clotho and atropos suites pass.
+          - Status (2026-11-19, C-error pass 3, and a silent miscompile fixed): **match guards were
+            parsed and dropped**, so `n if n > 10 => ..` matched every value (`match 5 { n if n > 10
+            => "big", _ => "small" }` printed `big`). A guard is now kept as `Pat::Guard(pat, cond)`
+            (`tpt-moira-clotho/src/ast.rs`), in `match` and in `matches!`. Lowering tests the guard
+            after the arm's names are bound and falls through to the next arm when it is false
+            (`lower_match`); the checker types it as `bool` with those names in scope. The other
+            walkers see guard expressions too (name resolution, rebase, closure captures, mono,
+            macro expansion). Also fixed: a parenthesised pattern `(p)` was a one-element tuple
+            pattern, so `let (A(e) | B(e)) = .. else` left `e` untyped; a closure's lifted function
+            now records its parameter types, so a scalar bound by a pattern passed to a `&i64`
+            parameter of a closure is addressed (`adapt_arg`); and a closure capture named like a
+            parameter of the function it is passed to is passed as `__cap_<name>` in the specialised
+            copy (it was a duplicate C parameter). Net `build/clotho.c` `gcc -fsyntax-only` count:
+            93 (was 103 after pass 2, 95 before), and no lowering error. Tests:
+            `match_guards_gate_the_arm_and_fall_through`,
+            `matches_guard_and_parenthesised_or_pattern_in_let_else`,
+            `closure_capture_used_in_matches_guard_keeps_its_name`,
+            `closure_capture_named_like_callee_parameter_runs`. Workspace: 538 passed, 0 failed.
+            **Resolved (2026-11-19):** a closure taking `&T` for a struct `T`, called from a `for t in
+            ts` loop over a `&Vec<T>`, inlined `t` by value and emitted a `struct Tok` assigned to a
+            `struct Tok *`. A reference-typed `let` now takes the address of a value initialiser
+            (`adapt_arg`). Test: `closure_over_for_loop_of_struct_refs_runs`.
+          - Status (2026-11-19, C-error pass 4): a named format argument (`format!("{bs}", bs =
+            e)`) inside a closure was counted as a capture of `bs`, because the free-variable walk
+            read the name on the left of `=`. Only the value is a use now. Test:
+            `named_format_argument_in_map_closure_is_not_a_capture`. My `add_implicit_format_args`
+            used `Option ==` and a closure-taking `starts_with`, which the subset does not lower;
+            both are plain comparisons now. `build/clotho.c` `gcc -fsyntax-only`: 87 (was 93).
+            Workspace: 540 passed before the last test was added, 0 failed.
+          - Status (2026-11-19, C-error pass 5): a struct pattern's bound field (`Token { kind: tok,
+            .. }`) had a `long long` temporary, so `tok` was untyped; the temporary takes the field's
+            declared type. `Box<S>` values: a `let` of `Box::new(s)` or of a call of a function
+            declared `-> Box<S>` is `S*` (the checker records no hint for either); a field read
+            through `&Box<S>` (`S**`) dereferences once before `->`. Tests:
+            `struct_pattern_field_binding_keeps_the_field_type`,
+            `box_of_struct_locals_fields_and_clone_run`. `build/clotho.c` `gcc -fsyntax-only`: 83.
+            Workspace: 542 passed, 0 failed (before the Box test was added; it passes on its own).
+            **Open, found here, not fixed:** a user function named like a libc symbol (`fn dup`)
+            clashes with MinGW's `dup` in `<io.h>` in the emitted C, because user functions keep
+            their plain names. Renaming the repro function avoided it.
           - Status (2026-11-18, `chain` and field `extend`): `a.iter().chain(b.iter())` over two
             sequences is a source on the C path (a new vector: `a`'s items, then `b`'s; only when
             the receiver is a bare `iter()` on a sequence). `s.field.extend(x.iter().cloned())`
