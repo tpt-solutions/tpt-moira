@@ -6224,6 +6224,12 @@ impl TypeChecker {
                 vec![Unknown],
                 Apply("Iter".into(), vec![Unknown]),
             ),
+            (
+                "Iter",
+                "skip_while",
+                vec![Unknown],
+                Apply("Iter".into(), vec![Unknown]),
+            ),
             ("Iter", "find_map", vec![Unknown], Unknown),
             ("Iter", "by_ref", vec![], Unknown),
         ] {
