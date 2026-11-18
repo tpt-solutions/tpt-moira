@@ -4761,3 +4761,28 @@ fn entry_or_default_extend_appends_items_run() {
     };
     assert_eq!(out, "3\n10");
 }
+
+/// A `&mut` enum reached through a variable (`fn bump(e: &mut E)`): a payload name written through
+/// (`*n = ..`) reaches the enum, in `if let` and `match`. A boxed payload passed as `&mut T` is read
+/// through the box.
+#[test]
+fn writes_through_pattern_names_and_boxed_arguments_run() {
+    let out = match run_src(
+        r#"enum E { Num(i64), Neg(Box<E>) }
+        fn bump(e: &mut E) { if let E::Num(n) = e { *n = *n + 1; } }
+        fn walk(e: &mut E) -> i64 {
+            match e { E::Num(n) => *n, E::Neg(inner) => { bump(inner); walk(inner) } }
+        }
+        fn main() {
+            let mut e = E::Num(4);
+            bump(&mut e);
+            print_i64(match e { E::Num(v) => v, E::Neg(_) => 0 });
+            let mut b = E::Neg(Box::new(E::Num(4)));
+            print_i64(walk(&mut b));
+        }"#,
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "5\n5");
+}

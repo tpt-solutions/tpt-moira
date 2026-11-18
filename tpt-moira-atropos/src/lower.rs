@@ -7282,6 +7282,17 @@ impl Lower {
             mir::Operand::Var(n) => self.temp_type_of(n),
             _ => return v,
         };
+        // A reference to a box (`&mut Box<T>`, a pointer to the box's pointer) passed where
+        // `&mut T` is expected: the box is read through (deref coercion).
+        if pt.ends_with('*')
+            && !pt.ends_with("**")
+            && at.ends_with("**")
+            && at.trim_end_matches('*') == pt.trim_end_matches('*')
+        {
+            let t = self.fresh_temp(pt);
+            self.emit(t.clone(), mir::Rvalue::Unary(mir::MirUnOp::Deref, v));
+            return mir::Operand::var(t);
+        }
         // A vector (or a reference to one) passed where a slice is expected: the slice
         // is the vector's `data` and `len`.
         if let Some(elem) = mir::slice_elem(pt) {
@@ -16138,7 +16149,9 @@ impl Lower {
         };
         // Variant / nullary-variant patterns get a real guard + payload binds.
         if matches!(local.pat, ast::Pat::Variant(..) | ast::Pat::Path(_)) {
-            self.mut_scrutinee = local.init.as_ref().is_some_and(is_mut_scrutinee);
+            self.mut_scrutinee = local.init.as_ref().is_some_and(|init| {
+                arm_binds_by_mut_ref(init, &local.pat, &|n: &str| block_writes_through(then_b, n))
+            });
             let guard = self.pattern_guard(&init_op, &local.pat);
             self.mut_scrutinee = false;
             let (cond, binds) = guard?;
@@ -16259,7 +16272,7 @@ impl Lower {
             let arm_start = self.func.blocks.len();
             let test_blk = next_test;
             self.current = test_blk;
-            self.mut_scrutinee = is_mut_scrutinee(scrutinee);
+            self.mut_scrutinee = arm_binds_by_mut_ref(scrutinee, pat, &|n: &str| writes_through(body, n));
             let guard = self.pattern_guard(&scrut_op, pat);
             self.mut_scrutinee = false;
             let (cond, binds): (Option<mir::Operand>, Vec<(String, mir::Operand)>) = guard?;
@@ -17947,4 +17960,74 @@ fn pure_expr(e: &Expr) -> bool {
         ExprKind::Block(b) => b.stmts.is_empty() && b.tail.as_deref().is_some_and(pure_expr),
         _ => false,
     }
+}
+
+/// Whether `e` writes through `name` (`*name = ..`, `*name += ..`): the names bound by a pattern
+/// that is written through must be the payload's address, not a copy. The walk covers the
+/// statement and control forms such a write sits in; other forms are read as not writing.
+fn writes_through(e: &Expr, name: &str) -> bool {
+    let is_name = |x: &Expr| match &x.kind {
+        ExprKind::Path(p) => p.segments.len() == 1 && p.segments[0].node == name,
+        _ => false,
+    };
+    match &e.kind {
+        ExprKind::Binary(l, op, r) => {
+            let writes = (matches!(op, ABinOp::Assign) || compound_op(*op).is_some())
+                && match &l.kind {
+                    ExprKind::Deref(inner) | ExprKind::Unary(AUnOp::Deref, inner) => is_name(inner),
+                    _ => false,
+                };
+            writes || writes_through(l, name) || writes_through(r, name)
+        }
+        ExprKind::Block(b) | ExprKind::Unsafe(b) | ExprKind::Loop(b) => block_writes_through(b, name),
+        ExprKind::If(c, t, els) => {
+            writes_through(c, name)
+                || block_writes_through(t, name)
+                || els.as_deref().is_some_and(|x| writes_through(x, name))
+        }
+        ExprKind::While(c, b) => writes_through(c, name) || block_writes_through(b, name),
+        ExprKind::For(_, it, b) => writes_through(it, name) || block_writes_through(b, name),
+        ExprKind::Match(s, arms) => {
+            writes_through(s, name) || arms.iter().any(|(_, body)| writes_through(body, name))
+        }
+        ExprKind::Unary(_, x) | ExprKind::Deref(x) | ExprKind::Ref(x, _) => writes_through(x, name),
+        ExprKind::Call(f, args) => writes_through(f, name) || args.iter().any(|a| writes_through(a, name)),
+        ExprKind::MethodCall(r, _, args) => {
+            writes_through(r, name) || args.iter().any(|a| writes_through(a, name))
+        }
+        _ => false,
+    }
+}
+
+fn block_writes_through(b: &ast::Block, name: &str) -> bool {
+    b.stmts.iter().any(|st| match &st.kind {
+        ast::StmtKind::Local(l) => l.init.as_ref().is_some_and(|x| writes_through(x, name)),
+        ast::StmtKind::Expr(x) | ast::StmtKind::Semi(x) => writes_through(x, name),
+        ast::StmtKind::Item(_) => false,
+    }) || b.tail.as_deref().is_some_and(|t| writes_through(t, name))
+}
+
+/// The names a pattern binds (`Some((a, b))` binds `a` and `b`).
+fn pattern_binding_names(p: &ast::Pat, out: &mut Vec<String>) {
+    match p {
+        ast::Pat::Ident(n) => out.push(n.node.clone()),
+        ast::Pat::Variant(_, subs) | ast::Pat::Tuple(subs) => {
+            for sp in subs {
+                pattern_binding_names(sp, out);
+            }
+        }
+        ast::Pat::Ref(inner) | ast::Pat::RefIdent(inner) => pattern_binding_names(inner, out),
+        _ => {}
+    }
+}
+
+/// Whether an arm of a match over `scrutinee` binds by reference: the scrutinee is a `&mut`, or
+/// the arm writes through a name its pattern binds.
+fn arm_binds_by_mut_ref(scrutinee: &Expr, pat: &ast::Pat, body: &dyn Fn(&str) -> bool) -> bool {
+    if is_mut_scrutinee(scrutinee) {
+        return true;
+    }
+    let mut names = Vec::new();
+    pattern_binding_names(pat, &mut names);
+    names.iter().any(|n| body(n))
 }
