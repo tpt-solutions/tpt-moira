@@ -1118,7 +1118,7 @@ impl TypeChecker {
             .variants
             .iter()
             .map(|v| {
-                let tys = v
+                let tys: Vec<Ty> = v
                     .fields
                     .as_ref()
                     .map(|fs| fs.iter().map(|f| cx.type_to_ty(&f.ty)).collect())
