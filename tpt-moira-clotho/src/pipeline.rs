@@ -50,8 +50,8 @@ pub fn compile_at(source: &str, base: usize) -> ParseResult<Program> {
     let expanded = expand_program_concurrent(&with_derives, &table);
     Ok(crate::closure_inline::inline_closure_calls(
         crate::closure_return::inline_returned_closures(
-            crate::let_conditions::desugar_let_conditions(crate::std_imports::resolve_std_paths(
-                expanded,
+            crate::let_conditions::desugar_let_conditions(crate::chain_lets::inline_chain_lets(
+                crate::std_imports::resolve_std_paths(expanded),
             )),
         ),
     ))

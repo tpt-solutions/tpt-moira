@@ -3709,6 +3709,11 @@ impl TypeChecker {
                             self.resolve_pending_vec_value(fexpr, &expected);
                             let at = self.infer_expr(fexpr);
                             self.expect(&at, &expected, fexpr.span);
+                            // A field's declared type decides its literal parts (`Some(1)`, a
+                            // `vec![(s, 1)]`): they take the field's type after the check.
+                            if sub.is_empty() && !has_unknown(&expected) {
+                                self.push_expect(fexpr, &expected);
+                            }
                         }
                         None => self.err(
                             span,

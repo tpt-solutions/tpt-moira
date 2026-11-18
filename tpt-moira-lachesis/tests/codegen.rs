@@ -3934,3 +3934,48 @@ fn collection_push_and_insert_arguments_take_declared_types() {
     };
     assert_eq!(out, "1\n1\n7");
 }
+
+/// `for x in <adapter chain>` over pure closures collects the chain and iterates it; a
+/// `let`-bound chain that the next statement's `for` consumes is fused into that loop.
+#[test]
+fn for_over_pure_adapter_chain_runs() {
+    let out = match run_src(
+        r#"struct F { locals: Vec<(String, Option<i64>)>, values: Vec<i64> }
+        fn total(f: &F) -> i64 {
+            let mut t: i64 = 0;
+            let vals = f.locals.iter().filter_map(|(_, o)| *o);
+            for v in vals {
+                t = t + v;
+            }
+            for v in f.values.iter().map(|v| *v + 100) {
+                t = t + v;
+            }
+            t
+        }
+        fn main() {
+            let f = F { locals: vec![(String::from("a"), Some(1)), (String::from("b"), None)], values: vec![2] };
+            print_i64(total(&f));
+        }"#,
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "103");
+}
+
+/// A struct field's declared type decides the literal parts of its initializer: `Some(1)`
+/// inside a `vec![(s, Some(1))]` field of `Vec<(String, Option<i64>)>` is an `i64` payload.
+#[test]
+fn struct_field_initializer_takes_declared_nested_type() {
+    let out = match run_src(
+        r#"struct F { v: Vec<(String, Option<i64>)> }
+        fn main() {
+            let f = F { v: vec![(String::from("a"), Some(1))] };
+            print_i64(f.v.len() as i64);
+        }"#,
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "1");
+}

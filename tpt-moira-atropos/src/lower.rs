@@ -3977,6 +3977,57 @@ impl Lower {
     /// each item with its position. A paired item is passed to a closure that takes
     /// an `(index, item)` pattern as two arguments. The output of `collect` is a
     /// `Vec` whose element type comes from the checker's hint.
+    /// `for x in <adapter chain> { body }` over a pure chain: the chain is collected first and the
+    /// vector is iterated. Collecting first is the same loop only when no closure has an effect
+    /// (each closure runs once per item either way), so a chain with a closure that is not pure is
+    /// still rejected.
+    fn lower_chain_for_materialized(
+        &mut self,
+        iter: &Expr,
+        pat: &ast::Pat,
+        body: &ast::Block,
+    ) -> Result<mir::Operand> {
+        let unsupported = || {
+            LowerError(format!(
+                "`for` iterator at bytes {}..{} must be a range `a..b`, an array literal `[..]`, or a `let`-bound array",
+                iter.span.start, iter.span.end
+            ))
+        };
+        let Some(chain) = self.iter_chain_of(iter) else {
+            return Err(unsupported());
+        };
+        let pure = chain.stages.iter().all(|(_, arg)| match arg {
+            None => true,
+            Some(a) => match &a.kind {
+                ExprKind::Closure { body, .. } => pure_expr(body),
+                _ => false,
+            },
+        });
+        if !pure {
+            return Err(unsupported());
+        }
+        let op = self.lower_iter_chain(iter, chain, "collect", &[])?;
+        let mir::Operand::Var(vname) = &op else {
+            return Err(unsupported());
+        };
+        let ty = self.temp_type_of(vname);
+        let Some(elem) = mir::vec_elem(&ty).map(|e| e.to_string()) else {
+            return Err(unsupported());
+        };
+        let si = SeqIter {
+            seq: iter,
+            enumerate: false,
+            rev: false,
+            mutable: false,
+            chars: false,
+            drain: false,
+            indices: false,
+            lines: false,
+        };
+        let vname = vname.clone();
+        self.lower_seq_for(&vname, &elem, false, pat, body, &si)
+    }
+
     fn lower_iter_chain(
         &mut self,
         e: &Expr,
@@ -13636,10 +13687,7 @@ impl Lower {
                         self.current = exit;
                         Ok(mir::Operand::Unit)
                     }
-                    _ => Err(LowerError(format!(
-                        "`for` iterator at bytes {}..{} must be a range `a..b`, an array literal `[..]`, or a `let`-bound array",
-                        iter.span.start, iter.span.end
-                    ))),
+                    _ => self.lower_chain_for_materialized(iter, pat, body),
                 }
             }
             ExprKind::Return(opt) => {
@@ -16414,4 +16462,25 @@ fn lookup_field_type(structs: &[mir::MirStructDef], base_ty: &str, field: &str) 
         .find(|s| s.name == base_ty)
         .and_then(|s| s.fields.iter().find(|(f, _)| f == field))
         .map(|(_, t)| t.clone())
+}
+
+/// Whether evaluating `e` has no effect: literals, names, arithmetic and field reads, and the
+/// reads `clone`, `len`, `is_empty` and `as_str`. Calls and assignments are not pure.
+fn pure_expr(e: &Expr) -> bool {
+    match &e.kind {
+        ExprKind::Lit(_) | ExprKind::Path(_) => true,
+        ExprKind::Field(b, _) | ExprKind::Unary(_, b) | ExprKind::Ref(b, _) | ExprKind::Deref(b) => {
+            pure_expr(b)
+        }
+        ExprKind::Cast(b, _) => pure_expr(b),
+        ExprKind::Binary(a, _, b) => pure_expr(a) && pure_expr(b),
+        ExprKind::Tuple(es) | ExprKind::Array(es) => es.iter().all(pure_expr),
+        ExprKind::MethodCall(r, m, args) => {
+            matches!(m.node.as_str(), "clone" | "len" | "is_empty" | "as_str")
+                && args.is_empty()
+                && pure_expr(r)
+        }
+        ExprKind::Block(b) => b.stmts.is_empty() && b.tail.as_deref().is_some_and(pure_expr),
+        _ => false,
+    }
 }
