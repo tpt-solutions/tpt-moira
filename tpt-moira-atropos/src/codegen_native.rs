@@ -1512,19 +1512,19 @@ pub fn emit_asm(prog: &SsaProgram) -> Result<String, String> {
         structs.insert(ty.clone(), layout);
     }
     let structs = &structs;
-    let struct_fns: std::collections::HashSet<String> = prog
+    let mut struct_fns: std::collections::HashSet<String> = prog
         .functions
         .iter()
         .filter(|f| f.ret.as_ref().is_some_and(|r| structs.contains_key(r)))
         .map(|f| f.name.clone())
-        .chain(vec_elems.iter().map(|e| crate::mir::vec_fn_name(e, "new")))
-        .chain(maps.iter().flat_map(|(k, v)| {
-            [
-                crate::mir::map_fn_name(k, v, "new"),
-                crate::mir::map_fn_name(k, v, "insert"),
-            ]
-        }))
         .collect();
+    struct_fns.extend(vec_elems.iter().map(|e| crate::mir::vec_fn_name(e, "new")));
+    struct_fns.extend(maps.iter().flat_map(|(k, v)| {
+        [
+            crate::mir::map_fn_name(k, v, "new"),
+            crate::mir::map_fn_name(k, v, "insert"),
+        ]
+    }));
     let struct_fns = &struct_fns;
     // Each function's assembly is emitted in turn (the same text, in the same order).
     let bodies: Vec<Result<String, String>> = prog

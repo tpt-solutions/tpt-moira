@@ -2512,6 +2512,8 @@ impl Lower {
         }
         // The item types the closure is applied to (set by the iterator chain that uses it).
         let param_tys: Vec<String> = param_tys_hint;
+        // Parameters taken by pointer and read through (`|&n|`): `(name, hidden pointer)`.
+        let mut deref_params: Vec<(String, String)> = Vec::new();
         for (k, p) in params.iter().enumerate() {
             // A parameter names one value, typed by the hint when there is one; a tuple
             // pattern (`|(i, x)|`) binds several untyped names.
@@ -2551,10 +2553,27 @@ impl Lower {
                 },
                 _ => names_of_p.iter().map(|_| "long long".to_string()).collect(),
             };
+            // `|&n|` over a pointer hint: the parameter is the pointer (under a hidden name), and `n`
+            // is its referent, read at the start of the body.
+            let by_ref_pattern = matches!(&p.pat, ast::Pat::Ref(inner) if matches!(&**inner, ast::Pat::Ident(_)));
             let mut j = 0;
             while j < names_of_p.len() {
                 let n = names_of_p[j].clone();
                 let ty = tys[j].clone();
+                if by_ref_pattern && ty.ends_with('*') {
+                    let hidden = format!("__deref_{n}");
+                    let base = c_scalar_name(ty.trim_end_matches('*'));
+                    sub.func.params.push(hidden.clone());
+                    sub.func.locals.push((hidden.clone(), Some(ty.clone())));
+                    sub.func.locals.push((n.clone(), Some(base.clone())));
+                    sub.types.insert(hidden.clone(), ty.clone());
+                    if base != "long long" {
+                        sub.types.insert(n.clone(), base);
+                    }
+                    deref_params.push((n, hidden));
+                    j += 1;
+                    continue;
+                }
                 sub.func.params.push(n.clone());
                 sub.func.locals.push((n.clone(), Some(ty.clone())));
                 if ty != "long long" {
@@ -2564,6 +2583,9 @@ impl Lower {
             }
         }
         sub.new_block();
+        for (n, hidden) in &deref_params {
+            sub.emit(n.clone(), mir::Rvalue::Unary(mir::MirUnOp::Deref, mir::Operand::var(hidden.clone())));
+        }
         // A closure body is an expression; a block-bodied closure (`|x| { .. }`)
         // lowers through `lower_block_value`, while a bare expression (`|x| x + 1`)
         // lowers through `lower_expr`. Both leave the entry block's terminator

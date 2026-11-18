@@ -4717,3 +4717,25 @@ fn flat_map_over_map_entries_with_array_bodies_runs() {
     };
     assert_eq!(out, "2\n2");
 }
+
+/// `opt.map(|&n| ..)` over `Option<&T>` and `iter().map(|&x| ..)`: the `&` pattern binds the value
+/// the reference points to.
+#[test]
+fn reference_pattern_closure_parameters_read_the_referent() {
+    let out = match run_src(
+        r#"use std::collections::HashMap;
+        fn main() {
+            let mut m: HashMap<String, usize> = HashMap::new();
+            m.insert(String::from("a"), 4);
+            let n: Option<i128> = m.get("a").map(|&n| n as i128);
+            let v: Vec<i64> = vec![1, 2];
+            let s: Vec<i64> = v.iter().map(|&x| x * 2).collect();
+            print_i64(n.unwrap_or(0) as i64);
+            print_i64(s[1]);
+        }"#,
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "4\n4");
+}
