@@ -181,6 +181,10 @@ pub fn monomorphize(prog: &Program, externs: &[(&str, &Program)]) -> Program {
             ItemKind::Impl(imp) => {
                 mono.rewrite_impl(imp, &empty);
             }
+            // An alias's type names instances too (`type StructLiteral = (Vec<(Spanned<String>, ..)>, ..)`).
+            ItemKind::TypeAlias(t) => {
+                mono.ty(&mut t.ty, &empty);
+            }
             _ => {}
         }
         mono.out.push(item);
