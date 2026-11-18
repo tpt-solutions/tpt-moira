@@ -4159,3 +4159,27 @@ fn set_extend_from_chain_and_typed_set_iter_run() {
     };
     assert_eq!(out, "2\n7");
 }
+
+/// `Path::file_stem` drops the last extension; a path without a file name has none. `for x in
+/// arr.iter()` over a let-bound array reads the array's items.
+#[test]
+fn file_stem_and_array_iter_run() {
+    let out = match run_src(
+        r#"use std::path::Path;
+        fn stem(p: &str) -> String {
+            let x = Path::new(p);
+            x.file_stem().map(|s| s.to_string()).unwrap_or_default()
+        }
+        fn main() {
+            println!("{} {} [{}]", stem("dir/file.rs"), stem("a.tar.gz"), stem("dir/"));
+            let names = ["a", "bb"];
+            let mut n = 0;
+            for x in names.iter() { n = n + x.len(); }
+            print_i64(n as i64);
+        }"#,
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "file a.tar [dir]\n3");
+}

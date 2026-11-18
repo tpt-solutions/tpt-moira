@@ -10534,6 +10534,7 @@ impl Lower {
             "split_at",
             "exists",
             "is_file",
+            "file_stem",
             "to_string_lossy",
             "parent",
             "split_once",
@@ -10555,6 +10556,32 @@ impl Lower {
             return Ok(Some(self.lower_expr(recv)?));
         }
         // `p.exists()` / `p.is_file()`: the file system's answer for the path.
+        // `p.file_stem()`: `Option<&str>`; the runtime answers NULL when there is no file name.
+        if method == "file_stem" && args.is_empty() {
+            let s = self.lower_expr(recv)?;
+            let p = self.fresh_temp("char*");
+            self.emit(
+                p.clone(),
+                mir::Rvalue::Call(mir::Operand::Func("moira_path_file_stem".into()), vec![s]),
+            );
+            let absent = self.fresh_temp("long long");
+            self.emit(
+                absent.clone(),
+                mir::Rvalue::Binary(mir::MirBinOp::Eq, mir::Operand::var(p.clone()), mir::Operand::Const(0)),
+            );
+            let t = self.fresh_temp("Option<str>");
+            self.emit(
+                t.clone(),
+                mir::Rvalue::StructLit(
+                    "Option".to_string(),
+                    vec![
+                        ("tag".to_string(), mir::Operand::var(absent)),
+                        ("f0".to_string(), mir::Operand::var(p)),
+                    ],
+                ),
+            );
+            return Ok(Some(mir::Operand::var(t)));
+        }
         if matches!(method, "exists" | "is_file") && args.is_empty() {
             let s = self.lower_expr(recv)?;
             let t = self.fresh_temp("long long");
@@ -13966,6 +13993,17 @@ impl Lower {
                 // `for x in &arr` iterates the same array as `for x in arr`.
                 let arr_expr: &Expr = match &iter.kind {
                     ExprKind::Ref(i, _) => i,
+                    // `for x in arr.iter()` over an array iterates the array (the items are
+                    // read the same way).
+                    ExprKind::MethodCall(r, m, a)
+                        if m.node == "iter"
+                            && a.is_empty()
+                            && (matches!(r.kind, ExprKind::Array(_))
+                                || matches!(&r.kind, ExprKind::Path(p) if p.segments.len() == 1
+                                    && self.array_lens.contains_key(&p.segments[0].node))) =>
+                    {
+                        r
+                    }
                     _ => iter,
                 };
                 let array_len: Option<i128> = match &arr_expr.kind {

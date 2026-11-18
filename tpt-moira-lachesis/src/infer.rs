@@ -6019,6 +6019,12 @@ impl TypeChecker {
                 vec![Unknown],
                 Apply("Option".into(), vec![Ref(Box::new(Str))]),
             ),
+            (
+                "str",
+                "file_stem",
+                vec![],
+                Apply("Option".into(), vec![Ref(Box::new(Str))]),
+            ),
             // `lines()` yields the string's lines as string slices.
             ("str", "lines", vec![], Apply("Iter".into(), vec![Str])),
             // `str` methods of the C string runtime (`moira_str_*`).

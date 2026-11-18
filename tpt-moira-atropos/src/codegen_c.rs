@@ -163,6 +163,8 @@ double moira_parse_f(char* s, double d, int has_default) { char* e; errno = 0; i
 #include <dirent.h>
 long long moira_path_exists(char* s) { FILE* f = fopen(s, "r"); if (f) fclose(f); DIR* d = opendir(s); if (d) closedir(d); return f != NULL || d != NULL; }
 long long moira_path_is_file(char* s) { FILE* f = fopen(s, "r"); if (!f) return 0; fclose(f); DIR* d = opendir(s); if (d) { closedir(d); return 0; } return 1; }
+/* `Path::file_stem`: the file name without its last extension, in a new string; NULL when the path has no file name. */
+char* moira_path_file_stem(char* s) { size_t n = strlen(s); while (n > 0 && (s[n-1] == '/' || s[n-1] == '\\')) n--; size_t st = n; while (st > 0 && s[st-1] != '/' && s[st-1] != '\\') st--; size_t len = n - st; if (len == 0) return NULL; size_t dot = len; for (size_t k = len - 1; k > 0; k--) { if (st + k < n && s[st + k] == '.') { dot = k; break; } } char* r = (char*)malloc(dot + 1); memcpy(r, s + st, dot); r[dot] = 0; return r; }
 long long moira_path_parent_index(char* s) { long long n = (long long)strlen(s); if (n == 1 && (s[0] == '/' || s[0] == '\\')) return -1; for (long long i = n - 1; i >= 0; i--) if (s[i] == '/' || s[i] == '\\') return i; return 0; }
 long long moira_split_find(char* s, long long from, char* pat) { long long n = (long long)strlen(s), m = (long long)strlen(pat); for (long long i = from; i + m <= n; i++) if (memcmp(s + i, pat, (size_t)m) == 0) return i; return -1; }
 long long moira_split_end(char* s, long long from, char* pat) { long long i = moira_split_find(s, from, pat); return i < 0 ? (long long)strlen(s) : i; }
