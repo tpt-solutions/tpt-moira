@@ -2606,7 +2606,22 @@ impl Lower {
         // Structural capture analysis: a single-segment path name that is neither a
         // closure parameter nor a function is a captured variable. Variant constructors
         // (`Some`, `None`) are not captured variables either.
-        let mut not_captured: std::collections::HashSet<String> = (*self.all_fn_names).clone();
+        // A function's name is not a capture, unless the enclosing function has a local of that
+        // name (`fn f(names: &Set)` next to a `fn names(..)`): the local is what the body names.
+        let scope_names: std::collections::HashSet<String> = self
+            .func
+            .params
+            .iter()
+            .cloned()
+            .chain(self.func.locals.iter().map(|(n, _)| n.clone()))
+            .chain(self.types.keys().cloned())
+            .collect();
+        let mut not_captured: std::collections::HashSet<String> = self
+            .all_fn_names
+            .iter()
+            .filter(|n| !scope_names.contains(*n))
+            .cloned()
+            .collect();
         not_captured.extend(self.variants.keys().cloned());
         Ok(closure_captures(body, &param_names, &not_captured))
     }
@@ -13715,7 +13730,38 @@ impl Lower {
                                     );
                                     mir::Operand::var(d)
                                 }
-                                None => self.lower_expr(base)?,
+                                None => {
+                                    // A vector value (`grid[i][j] = x`: the row `grid[i]`) stores
+                                    // through its data pointer; anything else is the pointer itself.
+                                    let bv = self.lower_expr(base)?;
+                                    let vec_part = match &bv {
+                                        mir::Operand::Var(n) => {
+                                            let t = self.temp_type_of(n);
+                                            mir::vec_elem(&t)
+                                                .map(|e| (e.to_string(), false))
+                                                .or_else(|| {
+                                                    mir::vec_ptr_elem(&t).map(|e| (e.to_string(), true))
+                                                })
+                                                .map(|(e, p)| (n.clone(), e, p))
+                                        }
+                                        _ => None,
+                                    };
+                                    match vec_part {
+                                        Some((vname, elem, is_ptr)) => {
+                                            let d = self.fresh_temp(format!("{elem}*"));
+                                            self.emit(
+                                                d.clone(),
+                                                mir::Rvalue::Field(
+                                                    mir::Operand::var(vname),
+                                                    "data".into(),
+                                                    is_ptr,
+                                                ),
+                                            );
+                                            mir::Operand::var(d)
+                                        }
+                                        None => bv,
+                                    }
+                                }
                             };
                             let i = self.lower_expr(idx)?;
                             let rhs = self.lower_expr(r)?;
@@ -15466,7 +15512,7 @@ impl Lower {
             // value is bound to a name first, so its data and length can be read from it.
             ExprKind::Index(base, idx)
                 if range_bounds(idx).is_none()
-                    && matches!(base.kind, ExprKind::Call(..) | ExprKind::MethodCall(..))
+                    && matches!(base.kind, ExprKind::Call(..) | ExprKind::MethodCall(..) | ExprKind::Index(..))
                     && self.hint_of_expr(base).is_some_and(|h| {
                         mir::vec_elem(&h).is_some() || mir::vec_ptr_elem(&h).is_some()
                     }) =>

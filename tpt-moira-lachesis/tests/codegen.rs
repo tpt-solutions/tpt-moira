@@ -4665,3 +4665,32 @@ fn closure_captures_shadowing_reference_to_map_runs() {
     };
     assert_eq!(out, "1");
 }
+
+/// A parameter named like a top-level function (`names`) is the parameter inside a closure; a
+/// nested vector is indexed and stored through its rows (`grid[i][j] = x`, `live[sb][0]`).
+#[test]
+fn parameter_shadowing_a_function_name_and_nested_vector_stores_run() {
+    let out = match run_src(
+        r#"use std::collections::HashSet;
+        fn names(n: &i64) -> Vec<String> { vec![format!("v{}", n)] }
+        fn scan(names: &HashSet<String>, live: &Vec<Vec<bool>>, succs: &Vec<usize>) -> bool {
+            let after = succs.iter().any(|&sb| live[sb][0]);
+            let used = vec![1i64].iter().any(|x| names.contains(&format!("v{}", x)));
+            after || used
+        }
+        fn main() {
+            let mut grid: Vec<Vec<i64>> = vec![vec![0, 0], vec![0, 0]];
+            grid[1][0] = 7;
+            print_i64(grid[1][0]);
+            let mut s: HashSet<String> = HashSet::new();
+            s.insert(String::from("v1"));
+            let live: Vec<Vec<bool>> = vec![vec![true]];
+            print_i64(if scan(&s, &live, &vec![0]) { 1 } else { 0 });
+            print_i64(names(&5)[0].len() as i64);
+        }"#,
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "7\n1\n2");
+}
