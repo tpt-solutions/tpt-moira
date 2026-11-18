@@ -3607,7 +3607,15 @@ impl Lower {
                         }
                         _ => return None,
                     };
-                    if !self.is_sequence(src) || !self.is_sequence(other) {
+                    if !self.is_sequence(src) {
+                        return None;
+                    }
+                    // The other side is a sequence, or a pure adapter chain (collected first).
+                    let other_ok = self.is_sequence(other)
+                        || self
+                            .iter_chain_of(other)
+                            .is_some_and(|c| chain_stages_pure(&c));
+                    if !other_ok {
                         return None;
                     }
                     stages.reverse();
@@ -4026,14 +4034,7 @@ impl Lower {
         let Some(chain) = self.iter_chain_of(iter) else {
             return Err(unsupported());
         };
-        let pure = chain.stages.iter().all(|(_, arg)| match arg {
-            None => true,
-            Some(a) => match &a.kind {
-                ExprKind::Closure { body, .. } => pure_expr(body),
-                _ => false,
-            },
-        });
-        if !pure {
+        if !chain_stages_pure(&chain) {
             return Err(unsupported());
         }
         let op = self.lower_iter_chain(iter, chain, "collect", &[])?;
@@ -4168,7 +4169,19 @@ impl Lower {
             (Some(seq), _) if chain.concat.is_some() => {
                 let other = chain.concat.expect("checked above");
                 let (an, aelem, aptr) = self.chain_sequence(seq)?;
-                let (bn, _, bptr) = self.chain_sequence(other)?;
+                let (bn, bptr) = if self.is_sequence(other) {
+                    let (n, _, p) = self.chain_sequence(other)?;
+                    (n, p)
+                } else {
+                    let inner = self
+                        .iter_chain_of(other)
+                        .ok_or_else(|| LowerError("`chain` of an unsupported iterator".into()))?;
+                    let op = self.lower_iter_chain(other, inner, "collect", &[])?;
+                    let mir::Operand::Var(vn) = op else {
+                        return Err(LowerError("`chain` of an unsupported iterator".into()));
+                    };
+                    (vn, false)
+                };
                 let out = self.fresh_temp(mir::vec_type(&aelem));
                 self.emit(
                     out.clone(),
@@ -7490,11 +7503,12 @@ impl Lower {
             "i8" => ("int8_t", ParseTarget::Signed(8)),
             "i16" => ("int16_t", ParseTarget::Signed(16)),
             "i32" => ("int32_t", ParseTarget::Signed(32)),
-            "i64" | "isize" => ("long long", ParseTarget::Signed(64)),
+            // `i128` / `u128` are 64-bit in this backend (see `type_to_c`), so they parse as such.
+            "i64" | "isize" | "i128" => ("long long", ParseTarget::Signed(64)),
             "u8" => ("uint8_t", ParseTarget::Unsigned(8)),
             "u16" => ("uint16_t", ParseTarget::Unsigned(16)),
             "u32" => ("uint32_t", ParseTarget::Unsigned(32)),
-            "u64" | "usize" => ("unsigned long long", ParseTarget::Unsigned(64)),
+            "u64" | "usize" | "u128" => ("unsigned long long", ParseTarget::Unsigned(64)),
             "f64" | "f32" => ("double", ParseTarget::Float),
             other => {
                 return Err(LowerError(format!(
@@ -17046,6 +17060,17 @@ fn lookup_field_type(structs: &[mir::MirStructDef], base_ty: &str, field: &str) 
         .find(|s| s.name == base_ty)
         .and_then(|s| s.fields.iter().find(|(f, _)| f == field))
         .map(|(_, t)| t.clone())
+}
+
+/// Whether every closure of an adapter chain's stages is pure (see `pure_expr`).
+fn chain_stages_pure(chain: &IterChain<'_>) -> bool {
+    chain.stages.iter().all(|(_, arg)| match arg {
+        None => true,
+        Some(a) => match &a.kind {
+            ExprKind::Closure { body, .. } => pure_expr(body),
+            _ => false,
+        },
+    })
 }
 
 /// Whether evaluating `e` has no effect: literals, names, arithmetic and field reads, and the

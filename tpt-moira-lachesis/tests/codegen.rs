@@ -4202,3 +4202,26 @@ fn let_destructures_a_tuple_reference_run() {
     };
     assert_eq!(out, "18");
 }
+
+/// `chain` takes an adapter chain as its other side (collected first when its closures are pure),
+/// and `parse::<i128>` / `parse::<u128>` parse as the backend's 64-bit integers.
+#[test]
+fn chain_with_adapter_other_side_and_wide_parse_run() {
+    let out = match run_src(
+        r#"fn main() {
+            let a: Vec<i64> = vec![1, 2];
+            let b: Vec<Vec<i64>> = vec![vec![10], vec![20, 30]];
+            let s: i64 = a.iter().chain(b.iter().flat_map(|r| r.iter())).sum();
+            let t: Vec<i64> = a.iter().chain(a.iter().map(|x| *x * 10)).cloned().collect();
+            print_i64(s);
+            print_i64(t.len() as i64);
+            let n: i128 = "42".parse::<i128>().unwrap();
+            let m = "7".parse::<u128>().unwrap_or(0);
+            print_i64(n as i64 + m as i64);
+        }"#,
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "63\n4\n49");
+}
