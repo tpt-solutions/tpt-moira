@@ -4104,3 +4104,25 @@ fn qualified_std_constructor_paths_run() {
     };
     assert_eq!(out, "0 0");
 }
+
+/// `extend(x.clone())` takes the items of a vector field read through a reference.
+#[test]
+fn extend_with_cloned_vector_field_runs() {
+    let out = match run_src(
+        "#[derive(Clone)]
+        struct P { n: i64 }
+        struct G { params: Vec<P> }
+        fn merged(g: &mut G, extra: &G) { g.params.extend(extra.params.clone()); }
+        fn main() {
+            let mut g = G { params: vec![P { n: 1 }] };
+            let e = G { params: vec![P { n: 2 }] };
+            merged(&mut g, &e);
+            print_i64(g.params.len() as i64);
+            print_i64(g.params[1].n);
+        }",
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "2\n2");
+}

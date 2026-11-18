@@ -8700,7 +8700,8 @@ impl Lower {
         let mut src_expr: &Expr = drain_inner;
         let mut stripped = false;
         while let ExprKind::MethodCall(r, m, a) = &src_expr.kind {
-            if a.is_empty() && matches!(m.node.as_str(), "iter" | "cloned" | "copied" | "into_iter")
+            // `clone()` of a sequence copies its items, as `cloned()` of its iterator does.
+            if a.is_empty() && matches!(m.node.as_str(), "iter" | "cloned" | "copied" | "into_iter" | "clone")
             {
                 src_expr = r;
                 stripped = true;
@@ -12180,7 +12181,7 @@ impl Lower {
                     if a.is_empty()
                         && matches!(
                             m.node.as_str(),
-                            "iter" | "cloned" | "copied" | "into_iter"
+                            "iter" | "cloned" | "copied" | "into_iter" | "clone"
                         ) =>
                 {
                     src = &**r;
