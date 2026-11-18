@@ -5582,6 +5582,70 @@ impl Lower {
         Ok(Some((p, k, v, true)))
     }
 
+    /// `set.extend(chain)`: the chain's items are collected into a vector, and each is inserted.
+    fn lower_set_extend_chain(
+        &mut self,
+        mname: &str,
+        k: &str,
+        is_ptr: bool,
+        arg: &Expr,
+        chain: IterChain<'_>,
+    ) -> Result<mir::Operand> {
+        let op = self.lower_iter_chain(arg, chain, "collect", &[])?;
+        let mir::Operand::Var(items) = &op else {
+            return Err(LowerError("`extend` of an unsupported iterator".into()));
+        };
+        let ity = self.temp_type_of(items);
+        let Some(elem) = mir::vec_elem(&ity).map(|e| e.to_string()) else {
+            return Err(LowerError("`extend` of an unsupported iterator".into()));
+        };
+        let map_ptr = if is_ptr {
+            mir::Operand::var(mname)
+        } else {
+            let p = self.fresh_temp(format!("Map<{k},bool>*"));
+            self.emit(p.clone(), mir::Rvalue::Ref(mir::Operand::var(mname), true));
+            mir::Operand::var(p)
+        };
+        let len = self.fresh_temp("long long");
+        self.emit(len.clone(), mir::Rvalue::Field(op.clone(), "len".into(), false));
+        let data = self.fresh_temp(format!("{elem}*"));
+        self.emit(data.clone(), mir::Rvalue::Field(op.clone(), "data".into(), false));
+        let idx = self.fresh_temp("long long");
+        self.emit(idx.clone(), mir::Rvalue::Use(mir::Operand::Const(0)));
+        let head = self.new_block();
+        let body = self.new_block();
+        let exit = self.new_block();
+        self.set_term(mir::Terminator::Goto(head));
+        self.current = head;
+        let more = self.fresh_temp("long long");
+        self.emit(
+            more.clone(),
+            mir::Rvalue::Binary(mir::MirBinOp::Lt, mir::Operand::var(idx.clone()), mir::Operand::var(len)),
+        );
+        self.set_term(mir::Terminator::If(mir::Operand::var(more), body, exit));
+        self.current = body;
+        let item = self.fresh_temp(elem.clone());
+        self.emit(
+            item.clone(),
+            mir::Rvalue::Index(mir::Operand::var(data), mir::Operand::var(idx.clone())),
+        );
+        let inserted = self.fresh_temp("Option<bool>");
+        self.emit(
+            inserted,
+            mir::Rvalue::Call(
+                mir::Operand::Func(mir::map_fn_name(k, "bool", "insert")),
+                vec![map_ptr, mir::Operand::var(item), mir::Operand::Const(1)],
+            ),
+        );
+        self.emit(
+            idx.clone(),
+            mir::Rvalue::Binary(mir::MirBinOp::Add, mir::Operand::var(idx.clone()), mir::Operand::Const(1)),
+        );
+        self.set_term(mir::Terminator::Goto(head));
+        self.current = exit;
+        Ok(mir::Operand::Unit)
+    }
+
     /// `m.retain(|k, v| keep)`: the entries whose closure answers `false` are removed. The
     /// closure takes pointers to the entry's key and value (`&K`, `&mut V`). A removal moves the
     /// last entry into the freed slot, so the same index is tested again. Only a closure
@@ -5722,6 +5786,13 @@ impl Lower {
         };
         if method == "retain" && args.len() == 1 {
             return self.lower_map_retain(&mname, &k, &v, is_ptr, &args[0]).map(Some);
+        }
+        // `set.extend(<adapter chain>)`: `extend` drains the whole chain before it returns, so
+        // the chain is collected first and each item inserted (a set maps its items to `bool`).
+        if method == "extend" && args.len() == 1 && v == "bool" {
+            if let Some(chain) = self.iter_chain_of(&args[0]) {
+                return self.lower_set_extend_chain(&mname, &k, is_ptr, &args[0], chain).map(Some);
+            }
         }
         let (helper, ret_ty) = match (method, args.len()) {
             // A set's `insert(x)` and `contains(&x)` are the map's with the value `true`.

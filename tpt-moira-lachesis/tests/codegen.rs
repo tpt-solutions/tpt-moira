@@ -4126,3 +4126,36 @@ fn extend_with_cloned_vector_field_runs() {
     };
     assert_eq!(out, "2\n2");
 }
+
+/// `set.extend(<adapter chain>)` inserts the chain's items; a set's `iter()` items are typed, so a
+/// `filter_map` over them can call a string method on each.
+#[test]
+fn set_extend_from_chain_and_typed_set_iter_run() {
+    let out = match run_src(
+        r#"use std::collections::BTreeSet;
+        use std::collections::HashSet;
+        struct F { params: Vec<String>, locals: Vec<(String, i64)> }
+        fn names(func: &F) -> usize {
+            let mut bound: BTreeSet<String> = func.params.iter().cloned().collect();
+            bound.extend(func.locals.iter().map(|(n, _)| n.clone()));
+            bound.len()
+        }
+        fn fill(seen: &mut HashSet<String>, n: i64) { seen.insert(format!("x{}", n)); }
+        fn prefixed(n: i64) -> Vec<String> {
+            let mut seen = std::collections::HashSet::new();
+            fill(&mut seen, n);
+            let out: Vec<String> = seen.iter().filter_map(|s| s.strip_prefix("x").map(|x| x.to_string())).collect();
+            out
+        }
+        fn main() {
+            let f = F { params: vec![String::from("a")], locals: vec![(String::from("b"), 1), (String::from("a"), 2)] };
+            print_i64(names(&f) as i64);
+            let r = prefixed(7);
+            println!("{}", r[0]);
+        }"#,
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "2\n7");
+}

@@ -5014,6 +5014,18 @@ impl TypeChecker {
             }
             return None;
         }
+        // `s.iter()` on a set yields `&K` items; `into_iter()` yields `K`.
+        if let Ty::Apply(name, ka) = &recv {
+            if (name == "HashSet" || name == "BTreeSet")
+                && ka.len() == 1
+                && matches!(method, "iter" | "into_iter")
+                && args.is_empty()
+            {
+                let k = ka[0].clone();
+                let item = if method == "into_iter" { deref_item(k) } else { ref_item(k) };
+                return Some(Ty::Apply("Iter".to_string(), vec![item]));
+            }
+        }
         // `m.iter()` on a map yields `(&K, &V)` pairs; `into_iter()` yields `(K, V)`.
         if let Ty::Apply(name, kv) = &recv {
             if name == "HashMap"
