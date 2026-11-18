@@ -4428,3 +4428,36 @@ fn zip_with_cloned_sequence_after_map_collects_into_map() {
     };
     assert_eq!(out, "9");
 }
+
+/// `max_by_key` / `min_by_key` return the item whose key is largest / smallest (the first of equal
+/// keys), or `None` for an empty chain. A `&vec![..]` argument takes the parameter's element type.
+#[test]
+fn by_key_terminals_and_argument_element_types_run() {
+    let out = match run_src(
+        r#"#[derive(Clone, Copy)]
+        enum Cat { Low, High }
+        impl Cat { fn conf(&self) -> i64 { match self { Cat::Low => 1, Cat::High => 5 } } }
+        fn classify(n: &i64) -> Cat { if *n > 3 { Cat::High } else { Cat::Low } }
+        fn best(v: &Vec<i64>) -> i64 {
+            let c = v.iter().map(|m| classify(m)).max_by_key(|c| c.conf()).unwrap_or(Cat::Low);
+            match c { Cat::High => 1, Cat::Low => 0 }
+        }
+        fn total(v: &Vec<i64>) -> i64 { let mut t: i64 = 0; for x in v.iter() { t = t + *x; } t }
+        fn main() {
+            let v: Vec<i64> = vec![4, -2, 9, 9, 1];
+            let hi = v.iter().max_by_key(|x| **x).unwrap_or(0);
+            let lo = v.iter().min_by_key(|x| **x - 3).unwrap_or(0);
+            let e: Vec<i64> = Vec::new();
+            let none = e.iter().max_by_key(|x| **x).unwrap_or(-1);
+            print_i64(hi);
+            print_i64(lo);
+            print_i64(none);
+            print_i64(best(&vec![1, 7, 2]));
+            print_i64(total(&vec![1, 2]));
+        }"#,
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "9\n-2\n-1\n1\n3");
+}

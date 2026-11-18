@@ -763,6 +763,8 @@ fn is_iter_terminal(name: &str) -> bool {
             | "next"
             | "nth"
             | "fold"
+            | "max_by_key"
+            | "min_by_key"
     )
 }
 
@@ -4637,6 +4639,8 @@ impl Lower {
             });
         let mut out: Option<String> = None;
         let mut res: Option<String> = None;
+        // `max_by_key` / `min_by_key`: the best key so far (a temporary of the key's type).
+        let mut key_slot: Option<(String, mir::Operand)> = None;
         // `position`: the number of items that reached the terminal before the hit.
         let mut position_count: Option<String> = None;
         // `nth(i)`: the index, lowered before the loop.
@@ -4694,6 +4698,31 @@ impl Lower {
             "count" | "sum" => {
                 let r = self.fresh_temp("long long");
                 self.emit(r.clone(), mir::Rvalue::Use(mir::Operand::Const(0)));
+                res = Some(r);
+            }
+            "max_by_key" | "min_by_key" => {
+                let Some((f, _)) = term_callee.clone() else {
+                    return Err(LowerError(format!("`{terminal}` needs a closure")));
+                };
+                let key_ty = self
+                    .closure_rets
+                    .get(&f)
+                    .cloned()
+                    .unwrap_or_else(|| "long long".to_string());
+                let r = self.fresh_temp(format!("Option<{cur}>"));
+                self.emit(
+                    r.clone(),
+                    mir::Rvalue::StructLit(
+                        "Option".to_string(),
+                        vec![
+                            ("tag".to_string(), mir::Operand::Const(1)),
+                            ("f0".to_string(), mir::Operand::Const(0)),
+                        ],
+                    ),
+                );
+                let best = self.fresh_temp(key_ty.clone());
+                self.emit(best.clone(), mir::Rvalue::Use(mir::Operand::Const(0)));
+                key_slot = Some((best, mir::Operand::Const(0)));
                 res = Some(r);
             }
             "fold" => {
@@ -5306,6 +5335,50 @@ impl Lower {
                         mir::MirBinOp::Add,
                         mir::Operand::var(r),
                         mir::Operand::Const(1),
+                    ),
+                );
+                self.set_term(mir::Terminator::Goto(step));
+            }
+            // `max_by_key(f)` / `min_by_key(f)`: the first item, then each item whose key beats the
+            // best key so far (strictly, so the first of equal keys is kept).
+            "max_by_key" | "min_by_key" => {
+                let r = res.clone().expect("by_key has a result");
+                let (best, _) = key_slot.clone().expect("by_key has a key slot");
+                let Some((f, caps)) = term_callee.clone() else {
+                    return Err(LowerError(format!("`{terminal}` needs a closure")));
+                };
+                let mut args = caps;
+                args.push(mir::Operand::var(item.clone()));
+                let key = self.fresh_temp(self.temp_type_of(&best));
+                self.emit(key.clone(), mir::Rvalue::Call(mir::Operand::Func(f), args));
+                let tag = self.fresh_temp("long long");
+                self.emit(tag.clone(), mir::Rvalue::Field(mir::Operand::var(r.clone()), "tag".into(), false));
+                let none = self.fresh_temp("long long");
+                self.emit(
+                    none.clone(),
+                    mir::Rvalue::Binary(mir::MirBinOp::Eq, mir::Operand::var(tag), mir::Operand::Const(1)),
+                );
+                let check = self.new_block();
+                let take = self.new_block();
+                self.set_term(mir::Terminator::If(mir::Operand::var(none), take, check));
+                self.current = check;
+                let better = self.fresh_temp("long long");
+                let cmp = if terminal == "max_by_key" { mir::MirBinOp::Gt } else { mir::MirBinOp::Lt };
+                self.emit(
+                    better.clone(),
+                    mir::Rvalue::Binary(cmp, mir::Operand::var(key.clone()), mir::Operand::var(best.clone())),
+                );
+                self.set_term(mir::Terminator::If(mir::Operand::var(better), take, step));
+                self.current = take;
+                self.emit(best, mir::Rvalue::Use(mir::Operand::var(key)));
+                self.emit(
+                    r,
+                    mir::Rvalue::StructLit(
+                        "Option".to_string(),
+                        vec![
+                            ("tag".to_string(), mir::Operand::Const(0)),
+                            ("f0".to_string(), mir::Operand::var(item.clone())),
+                        ],
                     ),
                 );
                 self.set_term(mir::Terminator::Goto(step));

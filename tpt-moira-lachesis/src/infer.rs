@@ -2102,6 +2102,10 @@ impl TypeChecker {
                     self.push_expect(el, t);
                 }
             }
+            // `&e` expected as `&T`: `e` takes `T`.
+            (ExprKind::Ref(inner, _), Ty::Ref(t) | Ty::RefMut(t)) => {
+                self.push_expect(inner, t);
+            }
             // `vec![a, b]` expected as `Vec<T>`: each element takes `T`. The elements are
             // parsed from the macro's tokens with their own spans, which is where the lowering
             // reads their types.
@@ -3414,6 +3418,11 @@ impl TypeChecker {
                 self.resolve_pending_coll_arg(a, pt);
                 let at = self.infer_expr(a);
                 let at = Self::coerce_box_ref(pt, &at).unwrap_or(at);
+                // A parameter's declared type decides the literal parts of its argument
+                // (`f(&vec![1, 2])` for a `&Vec<i64>` parameter builds `i64` elements).
+                if sub.is_empty() && !has_unknown(pt) && !has_generic(pt) {
+                    self.push_expect(a, pt);
+                }
                 self.expected_call_ty = None;
                 self.closure_expected = None;
                 if !self.unify_ty(pt, &at, &mut sub) {
@@ -3596,6 +3605,10 @@ impl TypeChecker {
                 self.closure_expected = None;
                 self.closure_expected_ret = None;
                 self.expect(&at, pt, a.span);
+                // The parameter's declared type decides the literal parts of its argument.
+                if !has_unknown(pt) && !has_generic(pt) {
+                    self.push_expect(a, pt);
+                }
             }
             sig.ret.clone()
         };
@@ -5116,8 +5129,10 @@ impl TypeChecker {
                 Some(iter_of(item))
             }
             ("max_by_key" | "min_by_key", 1) => {
-                self.closure_result(&args[0], &item);
-                Some(Ty::Apply("Option".to_string(), vec![item]))
+                // The key closure takes a reference to the item (`&Self::Item`).
+                self.closure_result(&args[0], &Ty::Ref(Box::new(item.clone())));
+                // The chain yields values (as `max` does), so the result is the item's value.
+                Some(Ty::Apply("Option".to_string(), vec![deref_item(item)]))
             }
             ("position", 1) => {
                 self.closure_result(&args[0], &item);
