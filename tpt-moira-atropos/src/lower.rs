@@ -15717,7 +15717,10 @@ impl Lower {
             // value is bound to a name first, so its data and length can be read from it.
             ExprKind::Index(base, idx)
                 if range_bounds(idx).is_none()
-                    && matches!(base.kind, ExprKind::Call(..) | ExprKind::MethodCall(..) | ExprKind::Index(..))
+                    && matches!(
+                        base.kind,
+                        ExprKind::Call(..) | ExprKind::MethodCall(..) | ExprKind::Index(..) | ExprKind::Field(..)
+                    )
                     && self.hint_of_expr(base).is_some_and(|h| {
                         mir::vec_elem(&h).is_some() || mir::vec_ptr_elem(&h).is_some()
                     }) =>
