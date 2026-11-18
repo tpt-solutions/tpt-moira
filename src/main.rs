@@ -539,7 +539,7 @@ fn run_diff(
     parity_flag: bool,
     propose_flag: bool,
 ) -> ExitCode {
-    let moira_errors = match tpt_moira_lachesis::check(program) {
+    let moira_errors: Vec<String> = match tpt_moira_lachesis::check(program) {
         Ok(()) => Vec::new(),
         Err(diags) => diags.iter().map(|d| d.to_string()).collect(),
     };
