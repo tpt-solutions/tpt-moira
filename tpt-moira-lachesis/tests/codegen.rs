@@ -4877,3 +4877,24 @@ fn let_array_of_non_literal_strings_runs() {
     };
     assert_eq!(out, "1");
 }
+
+/// A `bool` local passed as `&mut bool` (a C `int*`): the local is declared as the same type, so
+/// the callee's write reaches it.
+#[test]
+fn bool_local_passed_by_mutable_reference_runs() {
+    let out = match run_src(
+        r#"fn set(flag: &mut bool, n: i64) { if n > 2 { *flag = true; } }
+        fn main() {
+            let mut found = false;
+            set(&mut found, 5);
+            let mut g = false;
+            set(&mut g, 1);
+            print_i64(if found { 1 } else { 0 });
+            print_i64(if g { 1 } else { 0 });
+        }"#,
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "1\n0");
+}

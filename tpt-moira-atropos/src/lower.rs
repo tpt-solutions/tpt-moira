@@ -3091,6 +3091,12 @@ impl Lower {
                         _ if self.hint_of_expr(init).as_deref() == Some("f64") => {
                             Some("double".to_string())
                         }
+                        // A `bool` local is a C `int`, as a `bool` parameter is (`&mut bool` is `int*`).
+                        _ if matches!(init.kind, ExprKind::Lit(ast::Lit::Bool(_)))
+                            || self.hint_of_expr(init).as_deref() == Some("bool") =>
+                        {
+                            Some("int".to_string())
+                        }
                         _ => self.hint_of_expr(init).filter(|h| {
                             h == "str"
                                 || is_scalar_pointer_hint(h)
