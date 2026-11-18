@@ -4525,3 +4525,22 @@ fn chain_with_adapter_left_side_runs() {
     };
     assert_eq!(out, "103\n2");
 }
+
+/// `v.iter_mut().for_each(f)` calls `f` with each element's address, for a function and for a
+/// closure.
+#[test]
+fn iter_mut_for_each_writes_each_element() {
+    let out = match run_src(
+        r#"fn dbl(x: &mut i64) { *x = *x * 2; }
+        fn main() {
+            let mut v: Vec<i64> = vec![1, 2, 3];
+            v.iter_mut().for_each(dbl);
+            v.iter_mut().for_each(|x| *x = *x + 1);
+            print_i64(v[0] + v[1] + v[2]);
+        }"#,
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "15");
+}

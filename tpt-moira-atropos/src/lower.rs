@@ -3953,6 +3953,65 @@ impl Lower {
         Ok((n, elem, is_ptr))
     }
 
+    /// `v.iter_mut().for_each(f)` over a vector, with `f` a function or a closure taking each
+    /// element's address. `None` for other receivers.
+    fn lower_iter_mut_for_each(&mut self, recv: &Expr, f: &Expr) -> Result<Option<mir::Operand>> {
+        let ExprKind::MethodCall(src, m, margs) = &recv.kind else {
+            return Ok(None);
+        };
+        if m.node != "iter_mut" || !margs.is_empty() || !self.is_sequence(src) {
+            return Ok(None);
+        }
+        if !matches!(f.kind, ExprKind::Closure { .. } | ExprKind::Path(_)) {
+            return Ok(None);
+        }
+        let (vname, elem, is_ptr) = self.chain_sequence(src)?;
+        let data = self.fresh_temp(format!("{elem}*"));
+        self.emit(
+            data.clone(),
+            mir::Rvalue::Field(mir::Operand::var(vname.clone()), "data".into(), is_ptr),
+        );
+        let len = self.fresh_temp("long long");
+        self.emit(
+            len.clone(),
+            mir::Rvalue::Field(mir::Operand::var(vname), "len".into(), is_ptr),
+        );
+        self.closure_param_hint = Some(vec![format!("{elem}*")]);
+        let callee = self.closure_callee(f);
+        self.closure_param_hint = None;
+        let (func, caps) = callee?;
+        let idx = self.fresh_temp("long long");
+        self.emit(idx.clone(), mir::Rvalue::Use(mir::Operand::Const(0)));
+        let head = self.new_block();
+        let body = self.new_block();
+        let exit = self.new_block();
+        self.set_term(mir::Terminator::Goto(head));
+        self.current = head;
+        let more = self.fresh_temp("long long");
+        self.emit(
+            more.clone(),
+            mir::Rvalue::Binary(mir::MirBinOp::Lt, mir::Operand::var(idx.clone()), mir::Operand::var(len)),
+        );
+        self.set_term(mir::Terminator::If(mir::Operand::var(more), body, exit));
+        self.current = body;
+        let ptr = self.fresh_temp(format!("{elem}*"));
+        self.emit(
+            ptr.clone(),
+            mir::Rvalue::IndexRef(mir::Operand::var(data), mir::Operand::var(idx.clone())),
+        );
+        let mut args = caps;
+        args.push(mir::Operand::var(ptr));
+        let sink = self.fresh_temp("long long");
+        self.emit(sink, mir::Rvalue::Call(mir::Operand::Func(func), args));
+        self.emit(
+            idx.clone(),
+            mir::Rvalue::Binary(mir::MirBinOp::Add, mir::Operand::var(idx.clone()), mir::Operand::Const(1)),
+        );
+        self.set_term(mir::Terminator::Goto(head));
+        self.current = exit;
+        Ok(Some(mir::Operand::Unit))
+    }
+
     /// `v.iter_mut().find(|x| p)` over a vector: the first element whose address the predicate
     /// accepts, as `Option<&mut T>` (a pointer payload, NULL-tagged `None`). `None` for other
     /// receivers.
@@ -14846,6 +14905,11 @@ impl Lower {
             ExprKind::MethodCall(recv, method, args) => {
                 if method.node == "find" && args.len() == 1 {
                     if let Some(v) = self.lower_iter_mut_find(recv, &args[0])? {
+                        return Ok(v);
+                    }
+                }
+                if method.node == "for_each" && args.len() == 1 {
+                    if let Some(v) = self.lower_iter_mut_for_each(recv, &args[0])? {
                         return Ok(v);
                     }
                 }
