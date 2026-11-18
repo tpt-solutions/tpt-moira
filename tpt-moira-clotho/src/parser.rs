@@ -2939,11 +2939,20 @@ impl Parser {
             TokenKind::Ident(name) if name == "dyn" => {
                 self.bump();
                 let path = self.parse_path(true)?;
+                // `dyn Fn(A, B) -> R` keeps its signature as the generic arguments `A, B, R`
+                // (the checker reads a `Fn` path with arguments as a function type).
+                let mut fn_args: Vec<Type> = Vec::new();
+                let mut is_sugar = false;
                 if self.eat(&TokenKind::LParen) {
-                    self.parse_delimited(TokenKind::RParen, |s| s.parse_type())?;
-                    if self.eat(&TokenKind::Arrow) {
-                        self.parse_type()?;
-                    }
+                    is_sugar = true;
+                    fn_args = self.parse_delimited(TokenKind::RParen, |s| s.parse_type())?;
+                    let span = self.tokens.get(self.pos).map(|t| t.span).unwrap_or_default();
+                    let ret = if self.eat(&TokenKind::Arrow) {
+                        self.parse_type()?
+                    } else {
+                        Type { kind: TypeKind::Tuple(Vec::new()), span }
+                    };
+                    fn_args.push(ret);
                 }
                 while self.eat(&TokenKind::Plus) {
                     if self.at_bound_list_end() {
@@ -2951,7 +2960,7 @@ impl Parser {
                     }
                     self.parse_bound()?;
                 }
-                TypeKind::Path(path, Vec::new())
+                TypeKind::Path(path, if is_sugar { fn_args } else { Vec::new() })
             }
             _ if self.is_primitive_type() || matches!(self.peek_kind(), TokenKind::Ident(_)) => {
                 let path = self.parse_path(false)?;

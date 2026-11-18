@@ -3338,7 +3338,8 @@ impl TypeChecker {
                         for a in args {
                             self.infer_expr(a);
                         }
-                        return match local {
+                        // A function value behind a reference (`f: &dyn Fn(..)`) is called alike.
+                        return match self.strip_refs(&local) {
                             Ty::Fn(_, ret) => *ret,
                             _ => Ty::Unknown,
                         };

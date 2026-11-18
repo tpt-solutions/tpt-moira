@@ -4461,3 +4461,23 @@ fn by_key_terminals_and_argument_element_types_run() {
     };
     assert_eq!(out, "9\n-2\n-1\n1\n3");
 }
+
+/// A `&dyn Fn(&str) -> String` parameter keeps its signature: calling it gives a `String` whose
+/// methods (`trim`) resolve, and the value is passed through the function pointer.
+#[test]
+fn dyn_fn_parameter_keeps_its_signature_and_runs() {
+    let out = match run_src(
+        r#"fn run(backend: &dyn Fn(&str) -> String, p: &str) -> String {
+            let reply = backend(p);
+            if !reply.trim().is_empty() { reply.trim().to_string() } else { String::new() }
+        }
+        fn main() {
+            let f = |s: &str| format!("  {} ", s);
+            println!("[{}]", run(&f, "q"));
+        }"#,
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "[q]");
+}

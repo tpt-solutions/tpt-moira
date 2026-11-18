@@ -1451,6 +1451,12 @@ fn type_to_c_expanded(ty: &ast::Type) -> String {
                 // then the result, and every one is a `long long` (see `func_ptr_c_type`).
                 // A function type keeps its signature: `Fn<params..,result>`, which the C
                 // backend writes as a function pointer.
+                // `dyn Fn(A) -> R` / `FnMut` / `FnOnce` (the parser keeps the signature): the same
+                // function type as `fn(A) -> R`.
+                (Some("Fn" | "FnMut" | "FnOnce"), n) if n >= 1 => {
+                    let parts: Vec<String> = (0..n).map(arg).collect();
+                    format!("Fn<{}>", parts.join(","))
+                }
                 (Some("fn"), n) if n >= 1 => {
                     let parts: Vec<String> = (0..n).map(arg).collect();
                     format!("Fn<{}>", parts.join(","))
