@@ -4544,3 +4544,26 @@ fn iter_mut_for_each_writes_each_element() {
     };
     assert_eq!(out, "15");
 }
+
+/// `clone()` of a set parameter is a set of the same type: inserts into the copy are typed.
+#[test]
+fn clone_of_set_reference_keeps_its_type() {
+    let out = match run_src(
+        r#"use std::collections::HashSet;
+        fn grow(bound: &HashSet<String>, names: &Vec<String>) -> usize {
+            let mut bound_set = bound.clone();
+            for n in names.iter() { bound_set.insert(n.clone()); }
+            bound_set.len()
+        }
+        fn main() {
+            let mut s: HashSet<String> = HashSet::new();
+            s.insert(String::from("x"));
+            let v = vec![String::from("a")];
+            print_i64(grow(&s, &v) as i64);
+        }"#,
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "2");
+}

@@ -4547,7 +4547,16 @@ impl TypeChecker {
             && method.node == "clone"
             && matches!(
                 recv_name.as_deref(),
-                Some("Vec" | "String" | "PathBuf" | "Cow")
+                Some(
+                    "Vec"
+                        | "String"
+                        | "PathBuf"
+                        | "Cow"
+                        | "HashSet"
+                        | "BTreeSet"
+                        | "HashMap"
+                        | "BTreeMap"
+                )
             )
         {
             return self.strip_refs(&recv_ty);
