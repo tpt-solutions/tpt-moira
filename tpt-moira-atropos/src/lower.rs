@@ -11929,6 +11929,38 @@ impl Lower {
             (mir::Operand::var(v), elem.to_string())
         };
         let mut scope: Option<PatternScope> = None;
+        // `for (k, v) in xs.iter_mut()`: each name binds the address of its field, so writes
+        // through it reach the element (the item itself is a pointer to the tuple).
+        let mut field_addrs = false;
+        if si.mutable && !si.enumerate {
+            if let ast::Pat::Tuple(ps) = pat {
+                if ps.iter().all(|p| matches!(p, ast::Pat::Ident(_) | ast::Pat::Wild)) {
+                    field_addrs = true;
+                    for (i, sp) in ps.iter().enumerate() {
+                        let ast::Pat::Ident(n) = sp else { continue };
+                        let ct = self
+                            .tuple_structs
+                            .get(elem)
+                            .and_then(|st| st.fields.get(i))
+                            .map(|(_, t)| t.clone())
+                            .or_else(|| match mir::split_generic(&elem) {
+                                Some(("Tuple", args)) => args.get(i).map(|s| s.to_string()),
+                                _ => None,
+                            })
+                            .unwrap_or_else(|| "long long".to_string());
+                        let addr_ty = format!("{ct}*");
+                        if !self.func.locals.iter().any(|(l, _)| l == &n.node) {
+                            self.func.locals.push((n.node.clone(), Some(addr_ty.clone())));
+                        }
+                        self.types.insert(n.node.clone(), addr_ty.clone());
+                        self.emit(
+                            n.node.clone(),
+                            mir::Rvalue::FieldAddr(item.clone(), format!("f{i}"), true),
+                        );
+                    }
+                }
+            }
+        }
         if si.enumerate {
             let (index_pat, item_pat) = match pat {
                 ast::Pat::Tuple(ps) if ps.len() == 2 => (&ps[0], &ps[1]),
@@ -11950,7 +11982,7 @@ impl Lower {
                 self.emit(index_name, mir::Rvalue::Use(mir::Operand::var(pos.clone())));
             }
             self.lower_bind_pattern(item_pat, item, &item_ty)?;
-        } else {
+        } else if !field_addrs {
             scope = Some(self.open_pattern_scope(pat, item, &item_ty)?);
         }
         self.lower_block_value(body)?;

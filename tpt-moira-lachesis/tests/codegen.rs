@@ -3888,3 +3888,26 @@ fn to_string_of_integer_reference_runs() {
     };
     assert_eq!(out, "42");
 }
+
+/// `for (name, n) in xs.iter_mut()` over tuples: `n` is the address of the tuple's second
+/// field, so writes through it change the vector's elements.
+#[test]
+fn iter_mut_tuple_pattern_binds_field_addresses() {
+    let out = match run_src(
+        r#"fn bump(xs: &mut Vec<(String, i64)>) {
+            for (_, n) in xs.iter_mut() {
+                *n = *n + 1;
+            }
+        }
+        fn main() {
+            let mut v: Vec<(String, i64)> = vec![(String::from("a"), 1), (String::from("b"), 5)];
+            bump(&mut v);
+            print_i64(v[0].1);
+            print_i64(v[1].1);
+        }"#,
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "2\n6");
+}
