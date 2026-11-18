@@ -789,7 +789,7 @@ impl TypeChecker {
         let mut hints: HashMap<(usize, usize), String> = cx
             .expr_types
             .iter()
-            .filter_map(|(span, ty)| hint_of_ty(&ty).map(|h| (span.clone(), h)))
+            .filter_map(|(span, ty)| hint_of_ty(ty).map(|h| (*span, h)))
             .collect();
         // A hint that names a generic struct bare (its type arguments were not solved)
         // would name a C type that is never instantiated: drop it, so the backend uses
@@ -2093,9 +2093,7 @@ impl TypeChecker {
                     | Ty::U128
                     | Ty::Usize
             );
-        if int_literal {
-            self.expr_types.insert(key, expected.clone());
-        } else if open && !has_unknown(expected) && !matches!(e.kind, ExprKind::Path(_)) {
+        if int_literal || (open && !has_unknown(expected) && !matches!(e.kind, ExprKind::Path(_))) {
             self.expr_types.insert(key, expected.clone());
         }
         match (&e.kind, expected) {
@@ -4607,7 +4605,7 @@ impl TypeChecker {
         //    solver: the receiver may be a generic parameter bounded
         //    by a user trait (`T: Show`) or a concrete type an `impl`
         //    covers (`impl Show for i32`).
-        if let Some(ty) = self.resolve_trait_method(span, &recv_ty, &method.node.clone(), args) {
+        if let Some(ty) = self.resolve_trait_method(span, recv_ty, &method.node.clone(), args) {
             return ty;
         }
         // Every value has `clone` and `to_string` (Clone, Display), even when the
@@ -4616,23 +4614,23 @@ impl TypeChecker {
             return Ty::Str;
         }
         if args.is_empty() && method.node == "clone" {
-            return self.strip_refs(&recv_ty);
+            return self.strip_refs(recv_ty);
         }
         // `as_ref` / `borrow` / `deref` view the value through a reference (a box's
         // contents, a shared pointer's value); `as_mut` through a mutable one.
         if args.is_empty() && matches!(method.node.as_str(), "as_ref" | "borrow" | "deref") {
-            return Ty::Ref(Box::new(self.strip_refs(&recv_ty)));
+            return Ty::Ref(Box::new(self.strip_refs(recv_ty)));
         }
         if args.is_empty() && method.node == "as_mut" {
-            return Ty::RefMut(Box::new(self.strip_refs(&recv_ty)));
+            return Ty::RefMut(Box::new(self.strip_refs(recv_ty)));
         }
         // A method on an unknown receiver is unknown too (the absorbing type).
-        if matches!(self.strip_refs(&recv_ty), Ty::Unknown) {
+        if matches!(self.strip_refs(recv_ty), Ty::Unknown) {
             return Ty::Unknown;
         }
         // A receiver with no name to report (a generic bound by a std trait such as
         // `Read`) is not checked here: its methods are unknown.
-        let Some(type_name) = self.type_name(&recv_ty) else {
+        let Some(type_name) = self.type_name(recv_ty) else {
             return Ty::Unknown;
         };
         self.err(
