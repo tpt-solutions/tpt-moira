@@ -3984,15 +3984,13 @@ impl Lower {
         let mut args = caps;
         if closure_takes_pair(pred) {
             // A tuple pattern `|(a, b)|` takes the components of the element.
-            let fields: Vec<String> = self
-                .tuple_structs
-                .get(&elem)
-                .map(|d| d.fields.iter().map(|(_, t)| t.clone()).collect())
-                .or_else(|| match mir::split_generic(&elem) {
-                    Some(("Tuple", a)) => Some(a.iter().map(|x| x.to_string()).collect()),
-                    _ => None,
-                })
-                .ok_or_else(|| LowerError("`iter_mut().find` on an unsupported tuple".into()))?;
+            let fields: Vec<String> = match self.tuple_structs.get(&elem) {
+                Some(d) => d.fields.iter().map(|(_, t)| t.clone()).collect(),
+                None => match mir::split_generic(&elem) {
+                    Some(("Tuple", a)) => a.iter().map(|x| x.to_string()).collect(),
+                    _ => return Err(LowerError("`iter_mut().find` on an unsupported tuple".into())),
+                },
+            };
             for (i, ft) in fields.iter().enumerate() {
                 let c = self.fresh_temp(ft.clone());
                 self.emit(
