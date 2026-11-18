@@ -4859,3 +4859,21 @@ fn wildcard_closure_parameters_and_destructured_lookup_run() {
     };
     assert_eq!(out, "4\n7");
 }
+
+/// A `let` array of strings built from non-literal expressions (`let names = [s.to_string()];`) is
+/// an array of strings, passed as a slice.
+#[test]
+fn let_array_of_non_literal_strings_runs() {
+    let out = match run_src(
+        r#"fn has(names: &[String], s: &str) -> bool { names.iter().any(|n| n == s) }
+        fn main() {
+            let name = String::from("ab");
+            let names = [name.to_string()];
+            print_i64(if has(&names, "ab") { 1 } else { 0 });
+        }"#,
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "1");
+}

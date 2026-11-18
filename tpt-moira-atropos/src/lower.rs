@@ -2995,7 +2995,11 @@ impl Lower {
                     for e in elems {
                         operands.push(self.lower_expr(e)?);
                     }
-                    let elem_ct = self.array_elem_ct(elems);
+                    let elem_ct = local
+                        .init
+                        .as_ref()
+                        .and_then(|i| self.hint_array_elem_ct(i))
+                        .unwrap_or_else(|| self.array_elem_ct(elems));
                     self.array_lens.insert(name.clone(), elems.len());
                     self.array_elems.insert(name.clone(), elem_ct.clone());
                     self.emit(name.clone(), mir::Rvalue::Array(elem_ct, operands));
