@@ -2555,7 +2555,8 @@ impl Lower {
             };
             // `|&n|` over a pointer hint: the parameter is the pointer (under a hidden name), and `n`
             // is its referent, read at the start of the body.
-            let by_ref_pattern = matches!(&p.pat, ast::Pat::Ref(inner) if matches!(&**inner, ast::Pat::Ident(_)));
+            let by_ref_pattern =
+                matches!(&p.pat, ast::Pat::Ref(inner) if matches!(&**inner, ast::Pat::Ident(_)));
             let mut j = 0;
             while j < names_of_p.len() {
                 let n = names_of_p[j].clone();
@@ -2584,7 +2585,10 @@ impl Lower {
         }
         sub.new_block();
         for (n, hidden) in &deref_params {
-            sub.emit(n.clone(), mir::Rvalue::Unary(mir::MirUnOp::Deref, mir::Operand::var(hidden.clone())));
+            sub.emit(
+                n.clone(),
+                mir::Rvalue::Unary(mir::MirUnOp::Deref, mir::Operand::var(hidden.clone())),
+            );
         }
         // A closure body is an expression; a block-bodied closure (`|x| { .. }`)
         // lowers through `lower_block_value`, while a bare expression (`|x| x + 1`)
@@ -2999,6 +3003,19 @@ impl Lower {
                 // A partly written annotation (`let v: Vec<_> = ..`) is typed as if it were absent.
                 let ty = match (local.ty.as_ref().filter(|t| !type_has_infer(t)), &local.init) {
                     (Some(t), _) => Some(type_to_c(t, &self.aliases)),
+                    // `let x = &value;` of a user type: the local is a pointer to the value, even
+                    // where the hint names the value (a `let`-else scrutinee `&first.kind`).
+                    (None, Some(init))
+                        if matches!(init.kind, ExprKind::Ref(..))
+                            && self.hint_of_expr(init).is_some_and(|h| {
+                                let base = h.trim_end_matches('*');
+                                self.struct_names.contains(base) || self.variants.values().any(|(e, _, _)| e == base)
+                            }) =>
+                    {
+                        self.hint_of_expr(init).map(|h| {
+                            if h.ends_with('*') { h } else { format!("{h}*") }
+                        })
+                    }
                     (None, Some(init)) => match &init.kind {
                         ExprKind::Struct(path, _, _) => {
                             // A struct-like variant is typed by its enum.
@@ -3737,15 +3754,14 @@ impl Lower {
                     // chain collected first.
                     let src: &'a Expr = match &unparen(r).kind {
                         ExprKind::MethodCall(s, m, a)
-                            if matches!(m.node.as_str(), "iter" | "into_iter") && a.is_empty()
+                            if matches!(m.node.as_str(), "iter" | "into_iter")
+                                && a.is_empty()
                                 && self.is_sequence(s) =>
                         {
                             s
                         }
                         _ => {
-                            let pure = self
-                                .iter_chain_of(r)
-                                .is_some_and(|c| chain_stages_pure(&c));
+                            let pure = self.iter_chain_of(r).is_some_and(|c| chain_stages_pure(&c));
                             if !pure {
                                 return None;
                             }
@@ -4449,8 +4465,14 @@ impl Lower {
                 // The body is an iterator chain, or a value that is a sequence (`|x| f(x)` for a
                 // function returning a vector), whose items are the body's.
                 let body_chain = self.iter_chain_of(body);
-                let body_array = match self.hint_of_expr(body).as_deref().and_then(|h| mir::split_generic(h)) {
-                    Some(("Array", a)) if a.len() == 2 => a[1].parse::<i128>().ok().map(|n| (a[0].to_string(), n)),
+                let body_array = match self
+                    .hint_of_expr(body)
+                    .as_deref()
+                    .and_then(|h| mir::split_generic(h))
+                {
+                    Some(("Array", a)) if a.len() == 2 => {
+                        a[1].parse::<i128>().ok().map(|n| (a[0].to_string(), n))
+                    }
                     _ => None,
                 };
                 if body_chain.is_none() && body_array.is_none() && !self.is_sequence(body) {
@@ -6636,9 +6658,15 @@ impl Lower {
         let ptr = self.lower_expr(slot)?;
         let (src, _, sptr) = self.chain_sequence(arg)?;
         let len = self.fresh_temp("long long");
-        self.emit(len.clone(), mir::Rvalue::Field(mir::Operand::var(src.clone()), "len".into(), sptr));
+        self.emit(
+            len.clone(),
+            mir::Rvalue::Field(mir::Operand::var(src.clone()), "len".into(), sptr),
+        );
         let data = self.fresh_temp(format!("{elem}*"));
-        self.emit(data.clone(), mir::Rvalue::Field(mir::Operand::var(src), "data".into(), sptr));
+        self.emit(
+            data.clone(),
+            mir::Rvalue::Field(mir::Operand::var(src), "data".into(), sptr),
+        );
         let idx = self.fresh_temp("long long");
         self.emit(idx.clone(), mir::Rvalue::Use(mir::Operand::Const(0)));
         let head = self.new_block();
@@ -6649,7 +6677,11 @@ impl Lower {
         let more = self.fresh_temp("long long");
         self.emit(
             more.clone(),
-            mir::Rvalue::Binary(mir::MirBinOp::Lt, mir::Operand::var(idx.clone()), mir::Operand::var(len)),
+            mir::Rvalue::Binary(
+                mir::MirBinOp::Lt,
+                mir::Operand::var(idx.clone()),
+                mir::Operand::var(len),
+            ),
         );
         self.set_term(mir::Terminator::If(mir::Operand::var(more), body, exit));
         self.current = body;
@@ -6668,7 +6700,11 @@ impl Lower {
         );
         self.emit(
             idx.clone(),
-            mir::Rvalue::Binary(mir::MirBinOp::Add, mir::Operand::var(idx.clone()), mir::Operand::Const(1)),
+            mir::Rvalue::Binary(
+                mir::MirBinOp::Add,
+                mir::Operand::var(idx.clone()),
+                mir::Operand::Const(1),
+            ),
         );
         self.set_term(mir::Terminator::Goto(head));
         self.current = exit;
@@ -16275,7 +16311,8 @@ impl Lower {
             let arm_start = self.func.blocks.len();
             let test_blk = next_test;
             self.current = test_blk;
-            self.mut_scrutinee = arm_binds_by_mut_ref(scrutinee, pat, &|n: &str| writes_through(body, n));
+            self.mut_scrutinee =
+                arm_binds_by_mut_ref(scrutinee, pat, &|n: &str| writes_through(body, n));
             let guard = self.pattern_guard(&scrut_op, pat);
             self.mut_scrutinee = false;
             let (cond, binds): (Option<mir::Operand>, Vec<(String, mir::Operand)>) = guard?;
@@ -16368,8 +16405,8 @@ impl Lower {
         }
         match a[0] {
             "str" => Some("char*".to_string()),
-            "i8" | "i16" | "i32" | "i64" | "isize" | "u8" | "u16" | "u32" | "u64" | "usize" | "bool"
-            | "char" => Some(c_scalar_name(a[0])),
+            "i8" | "i16" | "i32" | "i64" | "isize" | "u8" | "u16" | "u32" | "u64" | "usize"
+            | "bool" | "char" => Some(c_scalar_name(a[0])),
             _ => None,
         }
     }
@@ -17982,7 +18019,9 @@ fn writes_through(e: &Expr, name: &str) -> bool {
                 };
             writes || writes_through(l, name) || writes_through(r, name)
         }
-        ExprKind::Block(b) | ExprKind::Unsafe(b) | ExprKind::Loop(b) => block_writes_through(b, name),
+        ExprKind::Block(b) | ExprKind::Unsafe(b) | ExprKind::Loop(b) => {
+            block_writes_through(b, name)
+        }
         ExprKind::If(c, t, els) => {
             writes_through(c, name)
                 || block_writes_through(t, name)
@@ -17994,7 +18033,9 @@ fn writes_through(e: &Expr, name: &str) -> bool {
             writes_through(s, name) || arms.iter().any(|(_, body)| writes_through(body, name))
         }
         ExprKind::Unary(_, x) | ExprKind::Deref(x) | ExprKind::Ref(x, _) => writes_through(x, name),
-        ExprKind::Call(f, args) => writes_through(f, name) || args.iter().any(|a| writes_through(a, name)),
+        ExprKind::Call(f, args) => {
+            writes_through(f, name) || args.iter().any(|a| writes_through(a, name))
+        }
         ExprKind::MethodCall(r, _, args) => {
             writes_through(r, name) || args.iter().any(|a| writes_through(a, name))
         }

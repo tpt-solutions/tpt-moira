@@ -4810,3 +4810,27 @@ fn specialised_call_reads_boxed_argument_through_the_box() {
     };
     assert_eq!(out, "20");
 }
+
+/// A `let ... else` over a reference to a field (`let K::Local(v) = &first.kind else ..`): the
+/// scrutinee is a pointer to the enum, and the binding reads the payload through it.
+#[test]
+fn let_else_over_reference_to_field_runs() {
+    let out = match run_src(
+        r#"enum K { Local(i64), Other }
+        struct St { kind: K }
+        fn take(first: &St) -> i64 {
+            let K::Local(v) = &first.kind else { return -1; };
+            *v
+        }
+        fn main() {
+            let s = St { kind: K::Local(7) };
+            let o = St { kind: K::Other };
+            print_i64(take(&s));
+            print_i64(take(&o));
+        }"#,
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "7\n-1");
+}
