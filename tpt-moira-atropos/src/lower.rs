@@ -3563,7 +3563,7 @@ impl Lower {
                             rev: false,
                             stages,
                         })
-                    } else if name == "iter"
+                    } else if (name == "iter" || name == "into_iter")
                         && self
                             .hint_of_expr(seq)
                             .is_some_and(|h| h.starts_with("Map<") || h.starts_with("Sorted<"))
@@ -14103,7 +14103,9 @@ impl Lower {
                 // A map: `for (k, v) in &m`, `m.iter()`, `m.keys()`, `m.values()`.
                 let (map_inner, which): (&Expr, MapIter) = match &iter.kind {
                     ExprKind::Ref(i, _) => (&**i, MapIter::Pairs),
-                    ExprKind::MethodCall(r, m, a) if m.node == "iter" && a.is_empty() => {
+                    ExprKind::MethodCall(r, m, a)
+                        if (m.node == "iter" || m.node == "into_iter") && a.is_empty() =>
+                    {
                         (&**r, MapIter::Pairs)
                     }
                     ExprKind::MethodCall(r, m, a) if m.node == "keys" && a.is_empty() => {

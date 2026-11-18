@@ -4248,3 +4248,26 @@ fn split_inclusive_newline_loop_keeps_newlines() {
     };
     assert_eq!(out, "9\n4");
 }
+
+/// `m.into_iter()` over a map reads its `(key, value)` pairs, in a `for` loop and in a chain.
+#[test]
+fn map_into_iter_runs_in_loop_and_chain() {
+    let out = match run_src(
+        r#"use std::collections::HashMap;
+        fn main() {
+            let mut m: HashMap<String, i64> = HashMap::new();
+            m.insert(String::from("ab"), 5);
+            let mut n: i64 = 0;
+            for (k, v) in m.into_iter() { n = n + k.len() as i64 + v; }
+            print_i64(n);
+            let mut m2: HashMap<String, i64> = HashMap::new();
+            m2.insert(String::from("ab"), 5);
+            let total: i64 = m2.into_iter().map(|(k, v)| k.len() as i64 + v).sum();
+            print_i64(total);
+        }"#,
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "7\n7");
+}
