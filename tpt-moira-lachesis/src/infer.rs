@@ -562,7 +562,11 @@ pub fn hint_of_ty(ty: &Ty) -> Option<String> {
             Ty::Array(elem, 0) => hint_elem_name(elem).map(|e| format!("Slice<{e}>")),
             // A reference to a map or set is named as the map or set itself: the lowering reads
             // whether it is a pointer from the value's C type.
-            Ty::Apply(name, _) if name == "HashMap" || name == "HashSet" => hint_elem_name(inner),
+            Ty::Apply(name, _)
+                if matches!(name.as_str(), "HashMap" | "HashSet" | "BTreeMap" | "BTreeSet") =>
+            {
+                hint_elem_name(inner)
+            }
             Ty::Apply(name, args) if name == "Vec" && args.len() == 1 => {
                 hint_elem_name(&args[0]).map(|e| format!("Vec<{e}>*"))
             }
@@ -2071,6 +2075,21 @@ impl TypeChecker {
             (ExprKind::Tuple(elems), Ty::Tuple(tys)) if elems.len() == tys.len() => {
                 for (el, t) in elems.iter().zip(tys.iter()) {
                     self.push_expect(el, t);
+                }
+            }
+            // `vec![a, b]` expected as `Vec<T>`: each element takes `T`. The elements are
+            // parsed from the macro's tokens with their own spans, which is where the lowering
+            // reads their types.
+            (ExprKind::Macro(m), Ty::Apply(n, a))
+                if n == "Vec"
+                    && a.len() == 1
+                    && !has_unknown(&a[0])
+                    && matches!(m.path.segments.last(), Some(seg) if seg.node == "vec")
+                    && split_repeat(&m.tokens).is_none() =>
+            {
+                let elems = tpt_moira_clotho::parser::Parser::parse_macro_args(m.tokens.clone());
+                for el in &elems {
+                    self.push_expect(el, &a[0]);
                 }
             }
             // Each branch of an `if` / `match` yields the expected type.

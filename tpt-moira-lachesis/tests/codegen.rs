@@ -3811,3 +3811,43 @@ fn option_is_some_and_binds_payload_type() {
     };
     assert_eq!(out, "1");
 }
+
+/// A `Vec<(T, U)>` annotation types the elements of `vec![(a, 1)]`: the literal takes `i64`,
+/// not the default `i32`, so the element matches the vector's C type.
+#[test]
+fn vec_macro_elements_take_the_annotated_tuple_type() {
+    let out = match run_src(
+        r#"fn main() {
+            let v: Vec<(String, i64)> = vec![(String::from("b"), 1)];
+            let w: Vec<i64> = vec![2, 3];
+            print_i64(v[0].1 + w[1]);
+        }"#,
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "4");
+}
+
+/// `first(&BTreeSet<T>)`: a reference to a sorted set keeps its hint, so `iter().next()` works.
+#[test]
+fn reference_to_btree_set_iterates_through_its_hint() {
+    let out = match run_src(
+        "use std::collections::BTreeSet;
+        fn first(owners: &BTreeSet<usize>) -> usize {
+            match owners.iter().next() {
+                Some(&o) => o,
+                None => 0,
+            }
+        }
+        fn main() {
+            let mut s: BTreeSet<usize> = BTreeSet::new();
+            s.insert(4);
+            print_i64(first(&s) as i64);
+        }",
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "4");
+}
