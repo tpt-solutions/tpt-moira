@@ -3851,3 +3851,40 @@ fn reference_to_btree_set_iterates_through_its_hint() {
     };
     assert_eq!(out, "4");
 }
+
+/// `take(n)` and `skip(n)` in iterator chains over a vector and over `chars()`: the count is
+/// read once, and the items are the first `n` (or those after the first `n`).
+#[test]
+fn iterator_take_and_skip_stages_run() {
+    let out = match run_src(
+        r#"fn main() {
+            let v: Vec<i64> = vec![1, 2, 3, 4, 5];
+            let a: Vec<i64> = v.iter().take(2).cloned().collect();
+            let b: Vec<i64> = v.iter().skip(3).cloned().collect();
+            let c: i64 = v.iter().skip(1).take(2).sum();
+            let s = String::from("abc");
+            let t: String = s.chars().take(2).collect();
+            print_i64(a.len() as i64);
+            print_i64(b.len() as i64);
+            print_i64(c);
+            println!("{}", t);
+        }"#,
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "2\n2\n5\nab");
+}
+
+/// `to_string` on a reference to an integer reads the number through the pointer.
+#[test]
+fn to_string_of_integer_reference_runs() {
+    let out = match run_src(
+        "fn show(c: &i128) -> String { c.to_string() }
+        fn main() { let n: i128 = 42; println!(\"{}\", show(&n)); }",
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "42");
+}

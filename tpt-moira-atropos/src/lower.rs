@@ -3637,6 +3637,11 @@ impl Lower {
                 "map" | "filter" | "filter_map" if args.len() == 1 => {
                     stages.push((name.to_string(), Some(&args[0])));
                 }
+                // `take(n)` / `skip(n)`: the first `n` items reaching the stage pass (or are
+                // dropped). The count is an expression evaluated once, before the loop.
+                "take" | "skip" if args.len() == 1 => {
+                    stages.push((name.to_string(), Some(&args[0])));
+                }
                 "cloned" | "copied" | "enumerate" if args.is_empty() => {
                     stages.push((name.to_string(), None))
                 }
@@ -4184,6 +4189,12 @@ impl Lower {
                 continue;
             }
             zips.push(None);
+            // `take(n)` / `skip(n)` take a count (see `limits`), not a closure; the items keep
+            // their type.
+            if name == "take" || name == "skip" {
+                stage_callees.push(None);
+                continue;
+            }
             let callee = match arg {
                 Some(a) => {
                     self.closure_param_hint = Some(vec![cur.clone()]);
@@ -4424,6 +4435,19 @@ impl Lower {
         // `enumerate` counts the items that reach it.
         let counter = self.fresh_temp("long long");
         self.emit(counter.clone(), mir::Rvalue::Use(mir::Operand::Const(0)));
+        // Each `take` / `skip` stage: its own counter (starting at 0) and its count.
+        let mut limits: Vec<Option<(String, mir::Operand)>> = Vec::new();
+        for (sname, sarg) in &chain.stages {
+            match (sname.as_str(), sarg) {
+                ("take" | "skip", Some(n)) => {
+                    let lim = self.lower_expr(n)?;
+                    let c = self.fresh_temp("long long");
+                    self.emit(c.clone(), mir::Rvalue::Use(mir::Operand::Const(0)));
+                    limits.push(Some((c, lim)));
+                }
+                _ => limits.push(None),
+            }
+        }
 
         let head = self.new_block();
         let body_blk = self.new_block();
@@ -4614,6 +4638,55 @@ impl Lower {
                         ),
                     );
                     pos = Some(p);
+                }
+                "take" => {
+                    let (c, lim) = limits[si].clone().expect("take has a count");
+                    let more = self.fresh_temp("long long");
+                    self.emit(
+                        more.clone(),
+                        mir::Rvalue::Binary(
+                            mir::MirBinOp::Lt,
+                            mir::Operand::var(c.clone()),
+                            lim,
+                        ),
+                    );
+                    let pass = self.new_block();
+                    self.set_term(mir::Terminator::If(mir::Operand::var(more), pass, step));
+                    self.current = pass;
+                    self.emit(
+                        c.clone(),
+                        mir::Rvalue::Binary(
+                            mir::MirBinOp::Add,
+                            mir::Operand::var(c),
+                            mir::Operand::Const(1),
+                        ),
+                    );
+                }
+                "skip" => {
+                    let (c, lim) = limits[si].clone().expect("skip has a count");
+                    let done = self.fresh_temp("long long");
+                    self.emit(
+                        done.clone(),
+                        mir::Rvalue::Binary(
+                            mir::MirBinOp::Ge,
+                            mir::Operand::var(c.clone()),
+                            lim,
+                        ),
+                    );
+                    let pass = self.new_block();
+                    let count = self.new_block();
+                    self.set_term(mir::Terminator::If(mir::Operand::var(done), pass, count));
+                    self.current = count;
+                    self.emit(
+                        c.clone(),
+                        mir::Rvalue::Binary(
+                            mir::MirBinOp::Add,
+                            mir::Operand::var(c),
+                            mir::Operand::Const(1),
+                        ),
+                    );
+                    self.set_term(mir::Terminator::Goto(step));
+                    self.current = pass;
                 }
                 // `cloned` / `copied` are the identity on the scalar items modelled here.
                 _ => {}
@@ -9813,6 +9886,9 @@ impl Lower {
                 );
                 return Ok(Some(mir::Operand::var(t)));
             }
+            // A reference to a number (`&i128`) is a pointer: the number is read through it.
+            let ref_scalar = recv_ty.as_deref().is_some_and(|h| h.ends_with('*'));
+            let recv_ty = recv_ty.map(|h| h.trim_end_matches('*').to_string());
             let is_f64 = matches!(recv_ty.as_deref(), Some("double" | "f64"));
             let is_int = recv_ty.is_some_and(|h| {
                 matches!(
@@ -9840,7 +9916,13 @@ impl Lower {
                 } else {
                     "moira_f64_to_string"
                 };
-                let v = self.lower_expr(recv)?;
+                let mut v = self.lower_expr(recv)?;
+                if ref_scalar {
+                    let base = if is_int { "long long" } else { "double" };
+                    let d = self.fresh_temp(base);
+                    self.emit(d.clone(), mir::Rvalue::Unary(mir::MirUnOp::Deref, v));
+                    v = mir::Operand::var(d);
+                }
                 let t = self.fresh_temp("char*");
                 self.emit(
                     t.clone(),
