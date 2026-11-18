@@ -4898,3 +4898,30 @@ fn bool_local_passed_by_mutable_reference_runs() {
     };
     assert_eq!(out, "1\n0");
 }
+
+/// Tuple patterns with refutable elements (`(Some(x), Some(y))`) test each element and bind its
+/// names, in `match` and `if let`; a reference component (`(&opt, last)`) is read through.
+#[test]
+fn refutable_tuple_pattern_elements_test_and_bind_runs() {
+    let out = match run_src(
+        r#"struct Tree { alias: Option<String>, prefix: Vec<String> }
+        fn f(a: Option<i64>, b: Option<i64>) -> i64 {
+            match (a, b) { (Some(x), Some(y)) => x + y, _ => 0 }
+        }
+        fn names(t: &Tree) -> usize {
+            let mut n = 0;
+            if let (Some(alias), Some(last)) = (&t.alias, t.prefix.last()) { n = alias.len() + last.len(); }
+            n
+        }
+        fn main() {
+            print_i64(f(Some(2), Some(3)));
+            print_i64(f(Some(2), None));
+            let t = Tree { alias: Some(String::from("ab")), prefix: vec![String::from("xyz")] };
+            print_i64(names(&t) as i64);
+        }"#,
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "5\n0\n5");
+}

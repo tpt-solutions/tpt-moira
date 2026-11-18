@@ -15813,11 +15813,26 @@ impl Lower {
                     .and_then(|t| mir::split_generic(t))
                     .filter(|(b, a)| *b == "Tuple" && a.len() == elems.len())
                     .map(|(_, a)| a.iter().map(|t| t.to_string()).collect());
+                // The checker's tuple hint names each component's value; a component that is a
+                // reference to that value (`(&opt, y)`) is read through its pointer.
+                let hint_components: Option<Vec<String>> = self
+                    .hint_of_expr(e)
+                    .and_then(|h| mir::split_generic(&h).map(|(b, a)| (b.to_string(), a.iter().map(|x| x.to_string()).collect::<Vec<_>>())))
+                    .filter(|(b, a)| b == "Tuple" && a.len() == elems.len())
+                    .map(|(_, a)| a);
                 for (i, e) in elems.iter().enumerate() {
                     self.expect_ty = component_tys.as_ref().map(|a| a[i].clone());
                     let lowered = self.lower_expr(e);
                     self.expect_ty = None;
-                    let o = lowered?;
+                    let mut o = lowered?;
+                    if let (mir::Operand::Var(n), Some(hc)) = (&o, &hint_components) {
+                        let t = self.temp_type_of(n);
+                        if t.ends_with('*') && t.trim_end_matches('*') == hc[i] {
+                            let d = self.fresh_temp(hc[i].clone());
+                            self.emit(d.clone(), mir::Rvalue::Unary(mir::MirUnOp::Deref, o.clone()));
+                            o = mir::Operand::var(d);
+                        }
+                    }
                     let ct = match &o {
                         mir::Operand::Var(n) => self.temp_type_of(n),
                         _ => "long long".to_string(),
@@ -16214,7 +16229,7 @@ impl Lower {
             None => mir::Operand::Unit,
         };
         // Variant / nullary-variant patterns get a real guard + payload binds.
-        if matches!(local.pat, ast::Pat::Variant(..) | ast::Pat::Path(_)) {
+        if matches!(local.pat, ast::Pat::Variant(..) | ast::Pat::Path(_) | ast::Pat::Tuple(_)) {
             self.mut_scrutinee = local.init.as_ref().is_some_and(|init| {
                 arm_binds_by_mut_ref(init, &local.pat, &|n: &str| block_writes_through(then_b, n))
             });
@@ -17459,7 +17474,31 @@ impl Lower {
                     _ => String::new(),
                 };
                 let scrut_tuple = scrut_tuple.trim_end_matches('*').to_string();
+                // Refutable elements (`Some(x)`, a literal) are tested with the pattern guard of their
+                // component; the tuple's test is the conjunction of those.
+                let mut cond: Option<mir::Operand> = None;
                 for (i, e) in elems.iter().enumerate() {
+                    if !matches!(e, ast::Pat::Ident(_) | ast::Pat::Wild) {
+                        let elem_ty = self
+                            .tuple_structs
+                            .get(&scrut_tuple)
+                            .and_then(|st| st.fields.get(i))
+                            .map(|(_, t)| t.clone())
+                            .or_else(|| match mir::split_generic(&scrut_tuple) {
+                                Some(("Tuple", args)) => args.get(i).map(|t| t.to_string()),
+                                _ => None,
+                            })
+                            .unwrap_or_else(|| "long long".to_string());
+                        let t = self.fresh_temp(elem_ty);
+                        self.emit(
+                            t.clone(),
+                            mir::Rvalue::Field(scrut.clone(), format!("f{i}"), scrut_ptr),
+                        );
+                        let (c, mut b) = self.pattern_guard(&mir::Operand::var(t), e)?;
+                        cond = self.and_guards(cond, c);
+                        binds.append(&mut b);
+                        continue;
+                    }
                     if let ast::Pat::Ident(n) = e {
                         let elem_ty = self
                             .tuple_structs
@@ -17481,7 +17520,7 @@ impl Lower {
                         binds.push((n.node.clone(), mir::Operand::var(t)));
                     }
                 }
-                Ok((None, binds))
+                Ok((cond, binds))
             }
             ast::Pat::Variant(path, subpats) => self.variant_guard(scrut, path, subpats),
             ast::Pat::Path(path) => {
