@@ -3710,3 +3710,57 @@ fn contains_on_const_and_local_slices() {
         "contains on a const slice of integers or strings, and on a local slice"
     );
 }
+
+/// `if let V(n) = &mut e` binds `n` to the payload's address: writes through it reach `e`.
+#[test]
+fn mut_ref_enum_payload_binding_writes_through() {
+    let out = match run_src(
+        "enum Kind { Inline(i64), Other }
+        struct M { kind: Kind }
+        fn bump(m: &mut M) {
+            if let Kind::Inline(n) = &mut m.kind {
+                *n = *n + 10;
+            }
+        }
+        fn main() {
+            let mut m = M { kind: Kind::Inline(1) };
+            bump(&mut m);
+            if let Kind::Inline(n) = m.kind {
+                print_i64(n);
+            }
+        }",
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "11");
+}
+
+/// `std::mem::take` through a `&mut` payload binding empties the enum's own vector.
+#[test]
+fn mem_take_through_mut_enum_payload_binding_runs() {
+    let out = match run_src(
+        "enum Kind { Inline(Vec<i64>), Other }
+        struct M { kind: Kind }
+        fn take_it(m: &mut M) -> Vec<i64> {
+            let mut out: Vec<i64> = Vec::new();
+            if let Kind::Inline(sub) = &mut m.kind {
+                let taken = std::mem::take(sub);
+                out = taken;
+            }
+            out
+        }
+        fn main() {
+            let mut m = M { kind: Kind::Inline(vec![1, 2, 3]) };
+            let v = take_it(&mut m);
+            print_i64(v.len() as i64);
+            if let Kind::Inline(rest) = &m.kind {
+                print_i64(rest.len() as i64);
+            }
+        }",
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "3\n0");
+}

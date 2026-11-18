@@ -1511,6 +1511,9 @@ struct Lower {
     /// Lowering for the borrow checker (see `lower_program_for_borrow_check`): an unknown callee
     /// is emitted as before instead of being an error.
     lenient_calls: bool,
+    /// The scrutinee being matched is a `&mut` expression: a plain name in a variant payload
+    /// binds the payload's address (see `variant_guard`).
+    mut_scrutinee: bool,
     /// Errors of statements that were skipped (lowering continues with the next statement, so a
     /// function reports every construct the codegen subset does not support). Reported when the
     /// function is done.
@@ -1920,6 +1923,7 @@ impl Lower {
             loops: Vec::new(),
             array_lens: HashMap::new(),
             lenient_calls: false,
+            mut_scrutinee: false,
             deferred: Vec::new(),
             array_elems: HashMap::new(),
             const_values: std::sync::Arc::new(HashMap::new()),
@@ -14581,7 +14585,10 @@ impl Lower {
         };
         // Variant / nullary-variant patterns get a real guard + payload binds.
         if matches!(local.pat, ast::Pat::Variant(..) | ast::Pat::Path(_)) {
-            let (cond, binds) = self.pattern_guard(&init_op, &local.pat)?;
+            self.mut_scrutinee = matches!(local.init.as_ref().map(|e| &e.kind), Some(ExprKind::Ref(_, true)));
+            let guard = self.pattern_guard(&init_op, &local.pat);
+            self.mut_scrutinee = false;
+            let (cond, binds) = guard?;
             let cond = cond.unwrap_or(mir::Operand::Const(1));
             let result = self.fresh_temp("long long");
             let then_blk = self.new_block();
@@ -14699,8 +14706,10 @@ impl Lower {
             let arm_start = self.func.blocks.len();
             let test_blk = next_test;
             self.current = test_blk;
-            let (cond, binds): (Option<mir::Operand>, Vec<(String, mir::Operand)>) =
-                self.pattern_guard(&scrut_op, pat)?;
+            self.mut_scrutinee = matches!(scrutinee.kind, ExprKind::Ref(_, true));
+            let guard = self.pattern_guard(&scrut_op, pat);
+            self.mut_scrutinee = false;
+            let (cond, binds): (Option<mir::Operand>, Vec<(String, mir::Operand)>) = guard?;
             match cond {
                 Some(c) => {
                     let body_blk = self.new_block();
@@ -15537,6 +15546,19 @@ impl Lower {
         let mut binds = Vec::new();
         for (i, sp) in subpats.iter().enumerate() {
             let pty = self.payload_ty_of(scrut, &ename, tag, i);
+            // Match ergonomics through a pointer scrutinee: a plain name binds the address of
+            // the payload slot, so writes through it reach the enum (`if let V(n) = &mut e`).
+            if scrut_ptr && self.mut_scrutinee {
+                if let ast::Pat::Ident(n) = sp {
+                    let addr = self.fresh_temp(format!("{pty}*"));
+                    self.emit(
+                        addr.clone(),
+                        mir::Rvalue::FieldAddr(scrut.clone(), payload_field(&ename, tag, i), true),
+                    );
+                    binds.push((n.node.clone(), mir::Operand::var(addr)));
+                    continue;
+                }
+            }
             let field_t = self.fresh_temp(pty);
             self.emit(
                 field_t.clone(),

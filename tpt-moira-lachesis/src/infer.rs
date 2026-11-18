@@ -3174,6 +3174,11 @@ impl TypeChecker {
             if let ExprKind::Ref(place, true) = &args[0].kind {
                 return self.infer_expr(place);
             }
+            // `mem::take(r)` where `r` is already a `&mut T` (a pattern binding, a parameter):
+            // the value taken is the referent's type.
+            if let Ty::RefMut(inner) = self.infer_expr(&args[0]) {
+                return *inner;
+            }
         }
         // `HashMap::new()` (and the other collection constructors) take the collection the
         // context expects: the constructor's own type does not name its key and value types.
