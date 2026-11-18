@@ -854,6 +854,24 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
             a vector, `keys`/`contains`/`retain` on tuple-valued maps, `unwrap_or_default` on
             payload-less `Option` hints, trait-extension methods (`PipelineCacheExt`), `format!` of
             an enum, and `for` over `split_inclusive`/`lines`/`by_ref` chains.
+          - Status (2026-11-18, blocker pass 2): probe blockers 53 -> 33 (clotho 2, atropos 11,
+            lachesis 11, driver 9). Each fix has a test in `tests/codegen.rs`. Fixed: `join` through
+            a pointer to a vector; `let` expectations reach `collect()` inside `unwrap_or_default`
+            and `map`; `entry(..).or_default().insert(..)`; sorted maps and call-result maps through
+            the receiver branch; `take_while`/`skip_while`; `HashMap::retain`; `std::collections::`
+            paths in expressions and macros; `extend(x.clone())`; set `extend` from a chain and typed
+            set `iter()`; `Path::file_stem`; `for` over `arr.iter()`; `let &(a, b) = r`;
+            `parse::<i128>`; `chain` with an adapter other side; array chain sources; `max`/`min`
+            after `map`; `split_inclusive('
+')` loops; map `into_iter`. Still `1/5`.
+            Open (33 probe sites): `compute_live`/`operands_of`/`parity`/`merge_struct_fields`
+            (`iter_mut().find` returns a pointer into a vector, not a value); `unwrap_or_default`
+            on an un-annotated payload; `format!` of an enum (`Ty`); `trim`/`by_ref` on closure
+            results and char iterators held in locals; `flat_map` with a function path; `first` on
+            an enum method; `as_str`/`push` with no hint; `iter_mut().for_each(fn)`; and the driver's
+            cross-crate `PipelineCacheExt` methods (only enums are passed to other units' lowering,
+            so a method of another crate's struct is not visible to the root unit). Also open:
+            indexing a call result (`f(x)[0]`) gives a C error.
           - Status (2026-11-18, `chain` and field `extend`): `a.iter().chain(b.iter())` over two
             sequences is a source on the C path (a new vector: `a`'s items, then `b`'s; only when
             the receiver is a bare `iter()` on a sequence). `s.field.extend(x.iter().cloned())`
