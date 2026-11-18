@@ -4631,3 +4631,37 @@ fn flat_map_with_sequence_valued_body_runs() {
     };
     assert_eq!(out, "4\n102");
 }
+
+/// A closure captures a reference that shadows a map (`let structs = &structs;`): the capture
+/// takes the reference, so the filter's `contains_key` reads the shared map.
+#[test]
+fn closure_captures_shadowing_reference_to_map_runs() {
+    let out = match run_src(
+        r#"use std::collections::HashMap;
+        struct Func { name: String, ret: Option<String> }
+        struct Prog { functions: Vec<Func> }
+        fn emit(prog: &Prog) -> usize {
+            let mut structs: HashMap<String, i64> = HashMap::new();
+            structs.insert(String::from("Pt"), 1);
+            let structs = &structs;
+            let struct_fns: std::collections::HashSet<String> = prog
+                .functions
+                .iter()
+                .filter(|f| f.ret.as_ref().is_some_and(|r| structs.contains_key(r)))
+                .map(|f| f.name.clone())
+                .collect();
+            struct_fns.len()
+        }
+        fn main() {
+            let p = Prog { functions: vec![
+                Func { name: String::from("a"), ret: Some(String::from("Pt")) },
+                Func { name: String::from("b"), ret: None },
+            ] };
+            print_i64(emit(&p) as i64);
+        }"#,
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "1");
+}

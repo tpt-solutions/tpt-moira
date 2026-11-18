@@ -2485,13 +2485,14 @@ impl Lower {
         // Captured variables become leading `long long` parameters.
         for cap in &captures {
             // A capture has the type of the variable it captures.
-            let cap_ty = match self.types.get(cap).cloned() {
+            let cap_name = self.var_name(cap);
+            let cap_ty = match self.types.get(&cap_name).cloned() {
                 Some(t) => t,
                 None => self
                     .func
                     .locals
                     .iter()
-                    .find(|(n, _)| n == cap)
+                    .find(|(n, _)| *n == cap_name)
                     .and_then(|(_, t)| t.clone())
                     .unwrap_or_else(|| "long long".to_string()),
             };
@@ -2773,13 +2774,14 @@ impl Lower {
         }
         let mut leading = Vec::new();
         for cap in caps {
-            let cap_ty = match self.types.get(cap).cloned() {
+            let cap_name = self.var_name(cap);
+            let cap_ty = match self.types.get(&cap_name).cloned() {
                 Some(t) => t,
                 None => self
                     .func
                     .locals
                     .iter()
-                    .find(|(n, _)| n == cap)
+                    .find(|(n, _)| *n == cap_name)
                     .and_then(|(_, t)| t.clone())
                     .unwrap_or_else(|| "long long".to_string()),
             };
@@ -4213,14 +4215,17 @@ impl Lower {
                 .map(|t| t.trim_end_matches('*').to_string())
                 .unwrap_or_else(|| "long long".to_string());
         }
+        // The capture names the variable as the closure's source spells it; in scope it may be a
+        // renamed binding (a shadowing `let x = &x;`), whose type is the one that counts.
+        let name = self.var_name(cap);
         self.types
-            .get(cap)
+            .get(&name)
             .cloned()
             .or_else(|| {
                 self.func
                     .locals
                     .iter()
-                    .find(|(n, _)| n == cap)
+                    .find(|(n, _)| *n == name)
                     .and_then(|(_, t)| t.clone())
             })
             .unwrap_or_else(|| "long long".to_string())
