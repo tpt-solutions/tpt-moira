@@ -59,7 +59,8 @@ impl Drop for PhaseTimer {
 }
 
 fn real_main() -> ExitCode {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let all_args: Vec<String> = std::env::args().collect();
+    let args: Vec<String> = all_args[1..].to_vec();
 
     // Subcommand scheme:
     //   --emit <mode>  selects output (ast|mir|ssa|c|asm|native|check)
@@ -84,22 +85,28 @@ fn real_main() -> ExitCode {
     // `--bundle`: with `--emit c`, lower the root and its extern crates as one program.
     let mut bundle = false;
     let mut positional: Vec<String> = Vec::new();
-    let mut iter = args.iter();
-    while let Some(a) = iter.next() {
+    // The arguments are read by position; the flags that take a value consume the next one.
+    let mut pos: usize = 0;
+    while pos < args.len() {
+        let a = &args[pos];
+        pos += 1;
         match a.as_str() {
             "--emit" => {
-                if let Some(mode) = iter.next() {
+                if let Some(mode) = args.get(pos) {
+                    pos += 1;
                     emit = mode.clone();
                 }
             }
             "-o" => {
-                if let Some(path) = iter.next() {
+                if let Some(path) = args.get(pos) {
+                    pos += 1;
                     output = Some(path.clone());
                 }
             }
             "--check" => check = true,
             "--extern" => {
-                if let Some(spec) = iter.next() {
+                if let Some(spec) = args.get(pos) {
+                    pos += 1;
                     // `name=path` — the name may itself carry a hyphen that
                     // Cargo normalizes to underscore; keep it verbatim.
                     externs.push(spec.to_string());
@@ -110,7 +117,8 @@ fn real_main() -> ExitCode {
             "--parity" => parity_flag = true,
             "--propose" => propose_flag = true,
             "--allowlist" => {
-                if let Some(path) = iter.next() {
+                if let Some(path) = args.get(pos) {
+                    pos += 1;
                     allowlist_path = Some(path.clone());
                 }
             }
@@ -480,7 +488,7 @@ fn lower_and_ssa(
 fn ssa_text(source: &str, program: &tpt_moira_clotho::ast::Program) -> Result<String, String> {
     let s = pipeline().text(source, "ssa", || {
         lower_and_ssa(program)
-            .map(|ssa| ssa.to_string())
+            .map(|ssa| format!("{}", ssa))
             .unwrap_or_default()
     });
     Ok(s)

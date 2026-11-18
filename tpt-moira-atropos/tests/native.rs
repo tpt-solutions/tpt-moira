@@ -19,11 +19,15 @@ fn build_and_run(name: &str, src: &str) -> Option<String> {
     }
     let prog = tpt_moira_clotho::parse_source(src).expect("program should parse");
     let mir = tpt_moira_atropos::lower_program(&prog).expect("program should lower");
-    let ssa = tpt_moira_atropos::ssa::SsaProgram::from_mir(&mir).expect("program should convert to SSA");
+    let ssa =
+        tpt_moira_atropos::ssa::SsaProgram::from_mir(&mir).expect("program should convert to SSA");
     let exe: PathBuf = std::env::temp_dir().join(format!("moira_native_{name}.exe"));
     tpt_moira_atropos::codegen_native::compile_to_native(&ssa, &exe).expect("native build");
     let out = Command::new(&exe).output().expect("run native program");
-    assert!(out.status.success(), "native program {name} exited with failure");
+    assert!(
+        out.status.success(),
+        "native program {name} exited with failure"
+    );
     Some(String::from_utf8_lossy(&out.stdout).replace("\r\n", "\n"))
 }
 
@@ -50,9 +54,11 @@ fn native_arithmetic_branches_loops_and_strings_run() {
         Some(o) => o,
         None => return,
     };
-    assert_eq!(out, "23\n3\n3\n4\n42\n45\ndone 45\n", "native output should match Rust");
+    assert_eq!(
+        out, "23\n3\n3\n4\n42\n45\ndone 45\n",
+        "native output should match Rust"
+    );
 }
-
 
 #[test]
 fn native_if_then_block_out_of_layout_order_runs() {
@@ -74,5 +80,8 @@ fn native_if_then_block_out_of_layout_order_runs() {
         Some(o) => o,
         None => return,
     };
-    assert_eq!(out, "650005\n1999993500006\n", "the then block must run when the condition holds");
+    assert_eq!(
+        out, "650005\n1999993500006\n",
+        "the then block must run when the condition holds"
+    );
 }

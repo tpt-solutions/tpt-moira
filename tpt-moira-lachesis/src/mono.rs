@@ -841,7 +841,7 @@ impl Mono {
                     .unwrap_or_default();
                 if p.segments.len() == 1 && args.is_empty() {
                     if let Some(concrete) = sub.get(&last) {
-                        if let Some(written) = ty_to_ast(&concrete, t.span) {
+                        if let Some(written) = ty_to_ast(concrete, t.span) {
                             *t = written;
                             return;
                         }

@@ -1345,7 +1345,10 @@ fn left_associative_operators_group_left_run() {
             return;
         }
     };
-    assert_eq!(out, "3\n1\n14", "subtraction and division should group to the left");
+    assert_eq!(
+        out, "3\n1\n14",
+        "subtraction and division should group to the left"
+    );
 }
 
 /// An untyped `Vec::new()` that only receives unsuffixed literals takes Rust's default `i32`.

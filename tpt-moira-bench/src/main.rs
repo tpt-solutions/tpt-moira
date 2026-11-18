@@ -533,7 +533,7 @@ fn run_benchmark(
         // For the C-compiler baseline we need Moira to emit C first.
         let (c_src_file, cc_args) = cc
             .as_ref()
-            .map(|bin| cc_pipeline(bin, &file))
+            .map(|_| cc_pipeline(&file))
             .unwrap_or((PathBuf::new(), Vec::new()));
 
         let moira_ms = if moira_mode == MoiraMode::E2e {
@@ -997,7 +997,7 @@ fn rustc_args(file: &Path, mode: RustcMode) -> Vec<String> {
 /// emission is *not* timed — the returned `cc_args` are what we measure, so the
 /// comparison is "Moira front-end+mid-end" vs. "external C compiler codegen".
 /// Returns `(c_source_path, cc_invocation_args)`.
-fn cc_pipeline(cc_binary: &Path, rust_file: &Path) -> (PathBuf, Vec<String>) {
+fn cc_pipeline(rust_file: &Path) -> (PathBuf, Vec<String>) {
     let c_src = temp_path("c");
     let emit = vec![
         "--emit".to_string(),

@@ -76,7 +76,7 @@ impl AllowKey {
         let (prefix, rest) = s.split_once(':')?;
         match prefix {
             "path" => Some(AllowKey::Path(rest.to_string())),
-            "hash" => rest.parse::<u64>().ok().map(AllowKey::Hash),
+            "hash" => rest.parse::<u64>().ok().map(|v| AllowKey::Hash(v)),
             _ => None,
         }
     }

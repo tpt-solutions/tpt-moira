@@ -283,13 +283,13 @@ impl TriageQueue {
     pub fn open(path: &Path) -> std::io::Result<TriageQueue> {
         let mut records = Vec::new();
         if path.exists() {
-            let file = std::fs::File::open(path)?;
-            for line in std::io::BufReader::new(file).lines() {
-                let line = line?;
+            // The whole file is read at once (the same lines as a buffered reader yields).
+            let text = std::fs::read_to_string(path)?;
+            for line in text.lines() {
                 if line.trim().is_empty() {
                     continue;
                 }
-                if let Some(r) = triage_record_from_json(&line) {
+                if let Some(r) = triage_record_from_json(line) {
                     records.push(r);
                 }
             }

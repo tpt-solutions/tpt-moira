@@ -1512,14 +1512,12 @@ pub fn emit_asm(prog: &SsaProgram) -> Result<String, String> {
         }))
         .collect();
     let struct_fns = &struct_fns;
-    let bodies: Vec<Result<String, String>> = std::thread::scope(|s| {
-        let handles: Vec<_> = prog
-            .functions
-            .iter()
-            .map(|f| s.spawn(move || emit_function_asm(f, structs, struct_fns)))
-            .collect();
-        handles.into_iter().map(|h| h.join().unwrap()).collect()
-    });
+    // Each function's assembly is emitted in turn (the same text, in the same order).
+    let bodies: Vec<Result<String, String>> = prog
+        .functions
+        .iter()
+        .map(|f| emit_function_asm(f, structs, struct_fns))
+        .collect();
 
     let mut out = String::new();
     out.push_str(
