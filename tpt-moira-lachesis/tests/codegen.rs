@@ -4567,3 +4567,31 @@ fn clone_of_set_reference_keeps_its_type() {
     };
     assert_eq!(out, "2");
 }
+
+/// A range bound that is a method call (`0..=blk.stmts.len()`) is typed, so its receiver's type
+/// is known to the lowering; the labelled loop over `enumerate` breaks out of both loops.
+#[test]
+fn range_bound_method_call_is_typed_and_labelled_break_runs() {
+    let out = match run_src(
+        r#"struct Blk { stmts: Vec<i64> }
+        struct Fun { blocks: Vec<Blk> }
+        fn count(f: &Fun) -> i64 {
+            let mut n: i64 = 0;
+            'outer: for (bi, blk) in f.blocks.iter().enumerate() {
+                for si in 0..=blk.stmts.len() {
+                    if si == 1 { n = n + bi as i64 + 10; break 'outer; }
+                    n = n + 1;
+                }
+            }
+            n
+        }
+        fn main() {
+            let f = Fun { blocks: vec![Blk { stmts: vec![1, 2] }] };
+            print_i64(count(&f));
+        }"#,
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "11");
+}

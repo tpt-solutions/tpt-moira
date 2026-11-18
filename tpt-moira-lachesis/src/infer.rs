@@ -2341,7 +2341,16 @@ impl TypeChecker {
         let span = e.span;
         let ty = match &e.kind {
             ExprKind::Lit(l) => lit_ty(l),
-            ExprKind::Range(..) => Ty::Range,
+            // The bounds are typed (their own expressions, e.g. `0..=v.len()`), the range is a range.
+            ExprKind::Range(a, b, _) => {
+                if let Some(a) = a {
+                    self.infer_expr(a);
+                }
+                if let Some(b) = b {
+                    self.infer_expr(b);
+                }
+                Ty::Range
+            }
             ExprKind::Path(p) => {
                 let name = p
                     .segments
