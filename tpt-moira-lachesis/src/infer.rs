@@ -3927,6 +3927,49 @@ impl TypeChecker {
         method: &tpt_moira_clotho::ast::Spanned<String>,
         args: &[Expr],
     ) -> Ty {
+        let ty = self.check_method_inner(span, recv, method, args);
+        self.expect_collection_args(recv, method, args);
+        ty
+    }
+
+    /// `v.push(x)` / `m.insert(k, v)` / `s.insert(k)` on a collection of known element types:
+    /// each argument takes the declared type, so a tuple or a literal builds that type. Runs
+    /// after the call is checked, so the arguments are not inferred again afterwards.
+    fn expect_collection_args(
+        &mut self,
+        recv: &Expr,
+        method: &tpt_moira_clotho::ast::Spanned<String>,
+        args: &[Expr],
+    ) {
+        let Some(recv_ty) = self.expr_types.get(&(recv.span.start, recv.span.end)).cloned() else {
+            return;
+        };
+        let base = self.strip_refs(&recv_ty);
+        let expects: Vec<Ty> = match (&base, method.node.as_str(), args.len()) {
+            (Ty::Apply(v, a), "push", 1) if v == "Vec" && a.len() == 1 => vec![a[0].clone()],
+            (Ty::Apply(m, a), "insert", 2) if (m == "HashMap" || m == "BTreeMap") && a.len() == 2 => {
+                a.clone()
+            }
+            (Ty::Apply(s, a), "insert", 1) if (s == "HashSet" || s == "BTreeSet") && a.len() == 1 => {
+                a.clone()
+            }
+            _ => Vec::new(),
+        };
+        if expects.is_empty() || expects.iter().any(has_unknown) {
+            return;
+        }
+        for (a, t) in args.iter().zip(expects.iter()) {
+            self.push_expect(a, t);
+        }
+    }
+
+    fn check_method_inner(
+        &mut self,
+        span: Span,
+        recv: &Expr,
+        method: &tpt_moira_clotho::ast::Spanned<String>,
+        args: &[Expr],
+    ) -> Ty {
         // `v.append(&mut w)` on an open `v = Vec::new()`: `w`'s element type is `v`'s.
         if method.node == "append" && args.len() == 1 {
             let at = self.infer_expr(&args[0]);

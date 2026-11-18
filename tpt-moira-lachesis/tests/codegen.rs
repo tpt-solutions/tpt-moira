@@ -3911,3 +3911,26 @@ fn iter_mut_tuple_pattern_binds_field_addresses() {
     };
     assert_eq!(out, "2\n6");
 }
+
+/// `push` and `insert` arguments take the collection's declared element types: a tuple
+/// literal pushed into a `Vec<(String, i64)>` or inserted into a `HashMap<String, (i64, usize)>`
+/// builds the declared C type.
+#[test]
+fn collection_push_and_insert_arguments_take_declared_types() {
+    let out = match run_src(
+        r#"use std::collections::HashMap;
+        fn main() {
+            let mut v: Vec<(String, i64)> = Vec::new();
+            v.push((String::from("a"), 1));
+            let mut m: HashMap<String, (i64, usize)> = HashMap::new();
+            m.insert(String::from("k"), (7, 2));
+            print_i64(v[0].1);
+            print_i64(m.len() as i64);
+            print_i64(m.get("k").unwrap().0);
+        }"#,
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "1\n1\n7");
+}
