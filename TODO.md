@@ -842,6 +842,18 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
             remaining two are `fetch_add` on the derive span counter (`derive.rs`: a global atomic,
             kept because a per-call counter would collide when bundled crates share hints) and
             `extend` on `entry(..).or_default()` (`macrorules.rs`). Still `1/5`.
+          - Status (2026-11-18, blocker pass): probe blockers 59 -> 53 (clotho 2, atropos 25,
+            lachesis 17, driver 9). Fixed: `&mut` payload and tuple `iter_mut` bindings alias
+            their element (FieldAddr); `&BTreeSet`/`&BTreeMap` keep their hint; `vec!` and
+            struct-field initializers take the declared element types (also `push`/`insert`
+            arguments, which are checked after the call); `take(n)`/`skip(n)` chain stages; `for`
+            over a pure adapter chain collects it first; a `let` chain fused into the `for` after it
+            (`clotho/src/chain_lets.rs`); `to_string` through `&i128`. Several of these were silent
+            or C-level miscompiles found while probing (string literal patterns compared pointers).
+            Still `1/5`. Open: `entry(..).or_default()` (map-entry API), `join` through a pointer to
+            a vector, `keys`/`contains`/`retain` on tuple-valued maps, `unwrap_or_default` on
+            payload-less `Option` hints, trait-extension methods (`PipelineCacheExt`), `format!` of
+            an enum, and `for` over `split_inclusive`/`lines`/`by_ref` chains.
           - Status (2026-11-18, `chain` and field `extend`): `a.iter().chain(b.iter())` over two
             sequences is a source on the C path (a new vector: `a`'s items, then `b`'s; only when
             the receiver is a bare `iter()` on a sequence). `s.field.extend(x.iter().cloned())`
