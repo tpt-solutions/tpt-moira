@@ -4019,3 +4019,26 @@ fn join_through_vector_reference_runs() {
     };
     assert_eq!(out, "a, b");
 }
+
+/// `m.entry(k).or_default().insert(x)` on a map of sets, and `len()` of a set read back through
+/// `get(..).unwrap()`.
+#[test]
+fn entry_or_default_set_insert_and_sorted_len_run() {
+    let out = match run_src(
+        r#"use std::collections::HashMap;
+        use std::collections::BTreeSet;
+        fn main() {
+            let mut defined_by: HashMap<String, BTreeSet<usize>> = HashMap::new();
+            let names = vec![String::from("x"), String::from("x"), String::from("y")];
+            for idx in 0..3 {
+                defined_by.entry(names[idx].clone()).or_default().insert(idx % 2);
+            }
+            print_i64(defined_by.len() as i64);
+            print_i64(defined_by.get("x").unwrap().len() as i64);
+        }"#,
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "2\n2");
+}

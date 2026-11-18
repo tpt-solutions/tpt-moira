@@ -5468,7 +5468,12 @@ impl Lower {
             None => match self.map_local(recv) {
                 Some(m) => m,
                 // A map that an expression yields (`m.entry(k).or_default()`): a pointer to it.
-                None if matches!(recv.kind, ExprKind::MethodCall(..)) && self.map_value_hint(recv).is_some() => {
+                // (A sorted map's iteration order is its own: only its order-free methods here.)
+                None if matches!(recv.kind, ExprKind::MethodCall(..))
+                    && self.map_value_hint(recv).is_some()
+                    && (!self.hint_of_expr(recv).is_some_and(|h| h.trim_end_matches('*').starts_with("Sorted<"))
+                        || matches!(method, "len" | "is_empty" | "insert" | "contains" | "contains_key")) =>
+                {
                     let (k, v) = self.map_value_hint(recv).expect("checked above");
                     let value = self.lower_expr(recv)?;
                     let mir::Operand::Var(n) = value else {
@@ -5581,6 +5586,12 @@ impl Lower {
         if let Some(("Set", a)) = mir::split_generic(&h) {
             if a.len() == 1 {
                 return Some((a[0].to_string(), "bool".to_string()));
+            }
+        }
+        // A sorted map (`BTreeMap`) or set (`BTreeSet`, to `bool`) has the same helpers.
+        if let Some(("Sorted", a)) = mir::split_generic(&h) {
+            if a.len() == 2 {
+                return Some((a[0].to_string(), a[1].to_string()));
             }
         }
         if !h.starts_with("Map<") {
@@ -5740,6 +5751,33 @@ impl Lower {
             ),
         );
         Ok(mir::Operand::var(slot))
+    }
+
+    /// `m.entry(k).or_default().insert(x)` (or `or_insert(set).insert(x)`) on a set-valued map: the
+    /// slot is a pointer to the set (a map to `bool`), and the insert helper takes it directly.
+    /// `None` for other shapes.
+    fn lower_entry_set_insert(&mut self, slot: &Expr, arg: &Expr) -> Result<Option<mir::Operand>> {
+        let Some(hint) = self.hint_of_expr(slot) else {
+            return Ok(None);
+        };
+        let set_hint = hint.trim_end_matches('*').to_string();
+        let (k, v) = match mir::split_generic(&set_hint) {
+            Some(("Map", a)) | Some(("Sorted", a)) if a.len() == 2 && a[1] == "bool" => {
+                (a[0].to_string(), a[1].to_string())
+            }
+            _ => return Ok(None),
+        };
+        let ptr = self.lower_expr(slot)?;
+        let key = self.lower_key_arg(arg, &k)?;
+        let pushed = self.fresh_temp("long long");
+        self.emit(
+            pushed.clone(),
+            mir::Rvalue::Call(
+                mir::Operand::Func(mir::map_fn_name(&k, &v, "insert")),
+                vec![ptr, key, mir::Operand::Const(1)],
+            ),
+        );
+        Ok(Some(mir::Operand::Unit))
     }
 
     /// `m.entry(k).or_insert(v)` and `m.entry(k).or_default()` on a named map: a pointer to
@@ -13882,6 +13920,15 @@ impl Lower {
                     self.set_term(mir::Terminator::Goto(join));
                     self.current = join;
                     return Ok(mir::Operand::var(r));
+                }
+                if method.node == "insert" && args.len() == 1 {
+                    if let ExprKind::MethodCall(_, slot_method, _) = &recv.kind {
+                        if matches!(slot_method.node.as_str(), "or_insert" | "or_default" | "or_insert_with") {
+                            if let Some(v) = self.lower_entry_set_insert(recv, &args[0])? {
+                                return Ok(v);
+                            }
+                        }
+                    }
                 }
                 if method.node == "push" && args.len() == 1 {
                     if let ExprKind::MethodCall(_, slot_method, _) = &recv.kind {
