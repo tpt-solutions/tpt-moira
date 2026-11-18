@@ -4481,3 +4481,26 @@ fn dyn_fn_parameter_keeps_its_signature_and_runs() {
     };
     assert_eq!(out, "[q]");
 }
+
+/// `.collect::<Vec<_>>()` takes its element type from the chain; a `vec!` literal passed as
+/// `&v` to a slice parameter takes the slice's element type; `to_string` of a copied item works.
+#[test]
+fn turbofish_collect_and_slice_argument_inference_run() {
+    let out = match run_src(
+        r#"fn show(args: &[i64]) -> String {
+            args.iter().map(|a| a.to_string()).collect::<Vec<_>>().join(", ")
+        }
+        fn total(v: &[i64]) -> i64 { let mut t: i64 = 0; for x in v.iter() { t = t + *x; } t }
+        fn main() {
+            let v = vec![1, 2];
+            let s = String::from("abc");
+            let t = s.chars().collect::<String>();
+            println!("{} {}", show(&v), t);
+            print_i64(total(&v));
+        }"#,
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "1, 2 abc\n3");
+}

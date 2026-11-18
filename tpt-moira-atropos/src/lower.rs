@@ -1375,6 +1375,23 @@ fn instance_arg_names(args: &[ast::Type]) -> String {
         .join("_")
 }
 
+/// Whether a written type contains `_` anywhere (a type the reader must infer).
+fn type_has_infer(t: &ast::Type) -> bool {
+    match &t.kind {
+        ast::TypeKind::Infer => true,
+        // The parser reads `_` as a path named `_` (the checker's placeholder).
+        ast::TypeKind::Path(p, args) => {
+            p.segments.last().is_some_and(|s| s.node == "_") || args.iter().any(type_has_infer)
+        }
+        ast::TypeKind::Ref(i) | ast::TypeKind::RefMut(i) | ast::TypeKind::Slice(i) => {
+            type_has_infer(i)
+        }
+        ast::TypeKind::Array(i, _) => type_has_infer(i),
+        ast::TypeKind::Tuple(ts) => ts.iter().any(type_has_infer),
+        _ => false,
+    }
+}
+
 /// Whether a match or `if let` scrutinee gives references that write through: a `&mut` place, or
 /// `v.iter_mut().find(..)`, whose result is `Option<&mut T>`.
 fn is_mut_scrutinee(e: &Expr) -> bool {
@@ -2815,7 +2832,7 @@ impl Lower {
     fn lower_rebinding_let(&mut self, plain: &str, local: &ast::Local) -> Result<()> {
         let init = local.init.as_ref().expect("checked by the caller");
         let v = self.lower_expr(init)?;
-        let ty = match &local.ty {
+        let ty = match local.ty.as_ref().filter(|t| !type_has_infer(t)) {
             Some(t) => type_to_c(t, &self.aliases),
             None => {
                 let actual = match &v {
@@ -2937,7 +2954,8 @@ impl Lower {
                 // otherwise fall back to a struct-literal RHS so `let p = Point{..}`
                 // is typed `struct Point` (otherwise it defaults to `long long`
                 // and the struct assignment/field access fails to compile).
-                let ty = match (&local.ty, &local.init) {
+                // A partly written annotation (`let v: Vec<_> = ..`) is typed as if it were absent.
+                let ty = match (local.ty.as_ref().filter(|t| !type_has_infer(t)), &local.init) {
                     (Some(t), _) => Some(type_to_c(t, &self.aliases)),
                     (None, Some(init)) => match &init.kind {
                         ExprKind::Struct(path, _, _) => {
@@ -3078,6 +3096,7 @@ impl Lower {
                         let slice_pt = local
                             .ty
                             .as_ref()
+                            .filter(|t| !type_has_infer(t))
                             .map(|t| {
                                 type_to_c(t, &self.aliases)
                                     .trim_end_matches('*')
@@ -10882,7 +10901,13 @@ impl Lower {
                     "moira_f64_to_string"
                 };
                 let mut v = self.lower_expr(recv)?;
-                if ref_scalar {
+                // Only a value that really is a pointer is read through (a closure parameter the
+                // checker types as a reference is a copied value in the chain).
+                let is_pointer = match &v {
+                    mir::Operand::Var(n) => self.temp_type_of(n).ends_with('*'),
+                    _ => false,
+                };
+                if ref_scalar && is_pointer {
                     let base = if is_int { "long long" } else { "double" };
                     let d = self.fresh_temp(base);
                     self.emit(d.clone(), mir::Rvalue::Unary(mir::MirUnOp::Deref, v));

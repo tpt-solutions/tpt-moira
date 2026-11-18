@@ -3138,10 +3138,13 @@ impl TypeChecker {
             Ty::Ref(t) | Ty::RefMut(t) => &**t,
             other => other,
         };
-        let Ty::Apply(v, targs) = inner_param else {
-            return;
+        // A `Vec<T>` or a slice `[T]` parameter (a slice is `Array(T, 0)`) names the element type.
+        let targs: Vec<Ty> = match inner_param {
+            Ty::Apply(v, t) if v == "Vec" => t.clone(),
+            Ty::Array(e, 0) => vec![(**e).clone()],
+            _ => return,
         };
-        if v != "Vec" || targs.len() != 1 || has_unknown(&targs[0]) || has_generic(&targs[0]) {
+        if targs.len() != 1 || has_unknown(&targs[0]) || has_generic(&targs[0]) {
             return;
         }
         let Some(init_span) = self.pending_vec.get(&name).copied() else {
@@ -3601,6 +3604,7 @@ impl TypeChecker {
                         self.closure_expected_ret = Some(*r);
                     }
                 }
+                self.resolve_pending_vec_arg(a, pt);
                 let at = self.infer_expr(a);
                 self.expected_call_ty = None;
                 self.closure_expected = None;

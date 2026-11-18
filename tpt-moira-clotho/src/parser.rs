@@ -2314,19 +2314,29 @@ impl Parser {
                         // Rust code parse. The one exception is `parse::<T>()`: its
                         // target type decides the result, so the method name carries it
                         // as `parse::<T>`.
+                        // `.collect::<T>()` keeps `T` as the type of the result: the call becomes
+                        // `{ let tmp: T = recv.collect(); tmp }`, so the annotation chooses the
+                        // collection the same way a `let` does.
+                        let mut collect_ty: Option<Type> = None;
                         if self.eat(&TokenKind::ColonColon) && self.eat_lt() {
-                            let targs = self.parse_generic_args()?;
+                            let mut targs = self.parse_generic_args()?;
                             if method.node == "parse" && targs.len() == 1 {
                                 method.node = format!("parse::<{}>", targs[0].node_name());
+                            } else if method.node == "collect" && targs.len() == 1 {
+                                collect_ty = targs.pop();
                             }
                         }
                         if self.eat(&TokenKind::LParen) {
                             let args =
                                 self.parse_delimited(TokenKind::RParen, |s| s.parse_expr())?;
                             let end = self.peek().span.start;
-                            expr = Expr {
+                            let call = Expr {
                                 kind: ExprKind::MethodCall(Box::new(expr), method, args),
                                 span: Span::new(start, end),
+                            };
+                            expr = match collect_ty {
+                                Some(ty) => collect_into(call, ty, start, end),
+                                None => call,
                             };
                         } else {
                             let end = self.peek().span.start;
@@ -3220,4 +3230,36 @@ fn primitive_name(k: &TokenKind) -> String {
         _ => "",
     }
     .to_string()
+}
+
+/// `recv.collect::<T>()` as `{ let tmp: T = recv.collect(); tmp }` (see the call site): the
+/// `let` annotation names the collection, and the block's value is the collected value.
+fn collect_into(call: Expr, ty: Type, start: usize, end: usize) -> Expr {
+    let span = Span::new(start, end);
+    let name = format!("__collect_{start}");
+    let ident = Spanned {
+        node: name.clone(),
+        span,
+    };
+    let local = Stmt {
+        kind: StmtKind::Local(Local {
+            pat: Pat::Ident(ident.clone()),
+            ty: Some(ty),
+            init: Some(call),
+            mutable: false,
+        }),
+    };
+    let tail = Expr {
+        kind: ExprKind::Path(Path {
+            segments: vec![ident],
+        }),
+        span,
+    };
+    Expr {
+        kind: ExprKind::Block(Block {
+            stmts: vec![local],
+            tail: Some(Box::new(tail)),
+        }),
+        span,
+    }
 }
