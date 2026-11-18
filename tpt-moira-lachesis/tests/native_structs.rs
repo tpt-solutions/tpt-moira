@@ -136,7 +136,10 @@ fn native_vector_methods_and_option_run() {
         Some(o) => o,
         None => return,
     };
-    assert_eq!(out, "5\n1\n3\n7\n6\n9\n5\n-1\n1\n4\n", "vector methods and Option should match Rust");
+    assert_eq!(
+        out, "5\n1\n3\n7\n6\n9\n5\n-1\n1\n4\n",
+        "vector methods and Option should match Rust"
+    );
 }
 
 #[test]
@@ -167,7 +170,10 @@ fn native_hashmap_insert_get_contains_iterate_run() {
         Some(o) => o,
         None => return,
     };
-    assert_eq!(out, "40\n9\n-1\n5\n1\n0\n25996\n", "the map should behave as in Rust");
+    assert_eq!(
+        out, "40\n9\n-1\n5\n1\n0\n25996\n",
+        "the map should behave as in Rust"
+    );
 }
 
 #[test]
@@ -219,7 +225,10 @@ fn native_string_conversions_search_trim_and_chars_run() {
         Some(o) => o,
         None => return,
     };
-    assert_eq!(out, "2\n7-8\n1\n1\n[pad]\n", "string conversions should match Rust");
+    assert_eq!(
+        out, "2\n7-8\n1\n1\n[pad]\n",
+        "string conversions should match Rust"
+    );
 }
 
 #[test]

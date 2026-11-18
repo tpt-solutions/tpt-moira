@@ -34,7 +34,6 @@ version = "0.1.0"
 name = "tpt-moira-lachesis"
 version = "0.1.0"
 dependencies = [
- "tpt-moira-alloc",
  "tpt-moira-atropos",
  "tpt-moira-clotho",
 ]

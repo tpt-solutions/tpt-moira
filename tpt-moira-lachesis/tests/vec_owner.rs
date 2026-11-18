@@ -62,7 +62,11 @@ fn generic_constructor_inside_vec_macro() {
         Some(o) => o,
         None => return,
     };
-    assert_eq!(out, "x 3
+    assert_eq!(
+        out,
+        "x 3
 5 3
-", "a generic constructor inside vec! should be specialised");
+",
+        "a generic constructor inside vec! should be specialised"
+    );
 }

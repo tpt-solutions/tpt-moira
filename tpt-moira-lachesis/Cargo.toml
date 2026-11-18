@@ -14,4 +14,3 @@ categories = ["compilers", "development-tools"]
 [dependencies]
 tpt-moira-clotho = { path = "../tpt-moira-clotho" }
 tpt-moira-atropos = { path = "../tpt-moira-atropos" }
-tpt-moira-alloc = { path = "../tpt-moira-alloc" }

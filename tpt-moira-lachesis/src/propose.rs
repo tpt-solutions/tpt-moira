@@ -11,7 +11,6 @@
 //! records each divergence with a category *label* and the proposed fix, which
 //! is the "triage queue + labels" follow-up.
 
-use std::io::BufRead;
 use std::path::Path;
 
 use crate::diff::{classify, Divergence};
