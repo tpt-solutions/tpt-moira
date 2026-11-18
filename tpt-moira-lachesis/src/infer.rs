@@ -4033,6 +4033,10 @@ impl TypeChecker {
         let base = self.strip_refs(&recv_ty);
         let expects: Vec<Ty> = match (&base, method.node.as_str(), args.len()) {
             (Ty::Apply(v, a), "push", 1) if v == "Vec" && a.len() == 1 => vec![a[0].clone()],
+            // `v.extend(w)`: `w` is a vector of the same element type.
+            (Ty::Apply(v, a), "extend", 1) if v == "Vec" && a.len() == 1 => {
+                vec![Ty::Apply("Vec".to_string(), vec![a[0].clone()])]
+            }
             (Ty::Apply(m, a), "insert", 2)
                 if (m == "HashMap" || m == "BTreeMap") && a.len() == 2 =>
             {

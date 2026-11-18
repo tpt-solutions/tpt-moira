@@ -4739,3 +4739,25 @@ fn reference_pattern_closure_parameters_read_the_referent() {
     };
     assert_eq!(out, "4\n4");
 }
+
+/// `m.entry(k).or_default().extend(v)` appends each item of `v` to the entry's vector; a `vec!`
+/// argument takes the vector's element type.
+#[test]
+fn entry_or_default_extend_appends_items_run() {
+    let out = match run_src(
+        r#"use std::collections::HashMap;
+        fn main() {
+            let mut m: HashMap<String, Vec<i64>> = HashMap::new();
+            let a: Vec<i64> = vec![1, 2];
+            m.entry(String::from("k")).or_default().extend(a.clone());
+            m.entry(String::from("k")).or_default().extend(vec![10]);
+            let v = m.get("k").unwrap();
+            print_i64(v.len() as i64);
+            print_i64(v[2]);
+        }"#,
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "3\n10");
+}

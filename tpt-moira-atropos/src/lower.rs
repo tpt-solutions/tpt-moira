@@ -6621,6 +6621,57 @@ impl Lower {
         Ok(())
     }
 
+    /// `m.entry(k).or_default().extend(v)` for a vector `v` (or any sequence): each item of `v` is
+    /// pushed onto the slot's vector. `None` for other shapes.
+    fn lower_entry_vec_extend(&mut self, slot: &Expr, arg: &Expr) -> Result<Option<mir::Operand>> {
+        let Some(hint) = self.hint_of_expr(slot) else {
+            return Ok(None);
+        };
+        let Some(elem) = mir::vec_elem(hint.trim_end_matches('*')).map(|e| e.to_string()) else {
+            return Ok(None);
+        };
+        let ptr = self.lower_expr(slot)?;
+        let (src, _, sptr) = self.chain_sequence(arg)?;
+        let len = self.fresh_temp("long long");
+        self.emit(len.clone(), mir::Rvalue::Field(mir::Operand::var(src.clone()), "len".into(), sptr));
+        let data = self.fresh_temp(format!("{elem}*"));
+        self.emit(data.clone(), mir::Rvalue::Field(mir::Operand::var(src), "data".into(), sptr));
+        let idx = self.fresh_temp("long long");
+        self.emit(idx.clone(), mir::Rvalue::Use(mir::Operand::Const(0)));
+        let head = self.new_block();
+        let body = self.new_block();
+        let exit = self.new_block();
+        self.set_term(mir::Terminator::Goto(head));
+        self.current = head;
+        let more = self.fresh_temp("long long");
+        self.emit(
+            more.clone(),
+            mir::Rvalue::Binary(mir::MirBinOp::Lt, mir::Operand::var(idx.clone()), mir::Operand::var(len)),
+        );
+        self.set_term(mir::Terminator::If(mir::Operand::var(more), body, exit));
+        self.current = body;
+        let item = self.fresh_temp(elem.clone());
+        self.emit(
+            item.clone(),
+            mir::Rvalue::Index(mir::Operand::var(data), mir::Operand::var(idx.clone())),
+        );
+        let pushed = self.fresh_temp("long long");
+        self.emit(
+            pushed,
+            mir::Rvalue::Call(
+                mir::Operand::Func(mir::vec_fn_name(&elem, "push")),
+                vec![ptr.clone(), mir::Operand::var(item)],
+            ),
+        );
+        self.emit(
+            idx.clone(),
+            mir::Rvalue::Binary(mir::MirBinOp::Add, mir::Operand::var(idx.clone()), mir::Operand::Const(1)),
+        );
+        self.set_term(mir::Terminator::Goto(head));
+        self.current = exit;
+        Ok(Some(mir::Operand::Unit))
+    }
+
     /// `m.entry(k).or_default().push(x)` (or `or_insert(v).push(x)`): the slot of the entry is
     /// a pointer to a vector, which the push helper takes directly. `None` for other shapes.
     fn lower_entry_vec_push(&mut self, slot: &Expr, arg: &Expr) -> Result<Option<mir::Operand>> {
@@ -15173,6 +15224,17 @@ impl Lower {
                     if let ExprKind::MethodCall(_, slot_method, _) = &recv.kind {
                         if matches!(slot_method.node.as_str(), "or_insert" | "or_default" | "or_insert_with") {
                             if let Some(v) = self.lower_entry_set_insert(recv, &args[0])? {
+                                return Ok(v);
+                            }
+                        }
+                    }
+                }
+                if method.node == "extend" && args.len() == 1 {
+                    if let ExprKind::MethodCall(_, slot_method, _) = &recv.kind {
+                        if matches!(slot_method.node.as_str(), "or_insert" | "or_default" | "or_insert_with")
+                            && self.is_sequence(&args[0])
+                        {
+                            if let Some(v) = self.lower_entry_vec_extend(recv, &args[0])? {
                                 return Ok(v);
                             }
                         }
