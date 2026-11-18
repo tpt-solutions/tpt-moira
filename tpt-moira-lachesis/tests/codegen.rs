@@ -4308,3 +4308,24 @@ fn max_after_map_compares_mapped_items() {
     };
     assert_eq!(out, "9\n4");
 }
+
+/// Indexing a vector-valued call (`mk()[1]`) and a method result that returns a reference to a
+/// vector (`s.get()[0]`).
+#[test]
+fn index_of_call_and_method_result_runs() {
+    let out = match run_src(
+        "fn mk() -> Vec<i64> { vec![4, 5] }
+        struct S { v: Vec<i64> }
+        impl S { fn get(&self) -> &Vec<i64> { &self.v } }
+        fn main() {
+            let a = mk()[1];
+            let s = S { v: vec![7, 8] };
+            let b = s.get()[0];
+            print_i64(a + b);
+        }",
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "12");
+}

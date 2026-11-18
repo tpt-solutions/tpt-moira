@@ -6929,7 +6929,7 @@ impl Lower {
         let xn = match arg_val {
             mir::Operand::Var(n) => n,
             other => {
-                let t = self.fresh_temp(format!("{elem}"));
+                let t = self.fresh_temp(elem.to_string());
                 self.emit(t.clone(), mir::Rvalue::Use(other));
                 t
             }
@@ -12619,7 +12619,7 @@ impl Lower {
                             .get(elem)
                             .and_then(|st| st.fields.get(i))
                             .map(|(_, t)| t.clone())
-                            .or_else(|| match mir::split_generic(&elem) {
+                            .or_else(|| match mir::split_generic(elem) {
                                 Some(("Tuple", args)) => args.get(i).map(|s| s.to_string()),
                                 _ => None,
                             })
@@ -13506,12 +13506,8 @@ impl Lower {
                             }
                             // `usize::from(b)` / `i128::from(n)`: an integer conversion, which the C
                             // value already is (a bool is 0 or 1).
-                            (ty, "from", 1)
-                                if matches!(
-                                    ty,
-                                    "i8" | "i16" | "i32" | "i64" | "i128" | "isize"
-                                        | "u8" | "u16" | "u32" | "u64" | "u128" | "usize"
-                                ) =>
+                            ("i8" | "i16" | "i32" | "i64" | "i128" | "isize"
+                                | "u8" | "u16" | "u32" | "u64" | "u128" | "usize", "from", 1) =>
                             {
                                 return self.lower_expr(&args[0]);
                             }
@@ -14908,6 +14904,35 @@ impl Lower {
                 self.emit(
                     data.clone(),
                     mir::Rvalue::Field(mir::Operand::var(vname), "data".into(), is_ptr),
+                );
+                let t = self.fresh_temp(elem.clone());
+                self.emit(t.clone(), mir::Rvalue::Index(mir::Operand::var(data), i));
+                Ok(mir::Operand::var(t))
+            }
+            // `f(x)[i]` / `s.get()[i]`: any vector-valued expression, read through its hint. The
+            // value is bound to a name first, so its data and length can be read from it.
+            ExprKind::Index(base, idx)
+                if range_bounds(idx).is_none()
+                    && matches!(base.kind, ExprKind::Call(..) | ExprKind::MethodCall(..))
+                    && self.hint_of_expr(base).is_some_and(|h| {
+                        mir::vec_elem(&h).is_some() || mir::vec_ptr_elem(&h).is_some()
+                    }) =>
+            {
+                let h = self.hint_of_expr(base).unwrap_or_default();
+                let (elem, is_ptr) = match mir::vec_ptr_elem(&h) {
+                    Some(e) => (e.to_string(), true),
+                    None => (mir::vec_elem(&h).unwrap_or_default().to_string(), false),
+                };
+                let bv = self.lower_expr(base)?;
+                let bname = match &bv {
+                    mir::Operand::Var(n) => n.clone(),
+                    _ => return Err(LowerError("an indexed call result needs a named value".into())),
+                };
+                let i = self.lower_expr(idx)?;
+                let data = self.fresh_temp(format!("{elem}*"));
+                self.emit(
+                    data.clone(),
+                    mir::Rvalue::Field(mir::Operand::var(bname), "data".into(), is_ptr),
                 );
                 let t = self.fresh_temp(elem.clone());
                 self.emit(t.clone(), mir::Rvalue::Index(mir::Operand::var(data), i));
