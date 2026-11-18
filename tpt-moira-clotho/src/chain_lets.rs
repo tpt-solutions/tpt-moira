@@ -18,7 +18,7 @@
 //! every sub-expression and its span.
 
 use crate::ast::*;
-use crate::closure_return::{visit_block, visit_expr_with};
+use crate::closure_return::{visit_block, visit_block_with, visit_expr_with};
 
 /// Rewrite every fusable `let` + `for` pair in `prog` (see the module docs).
 pub fn inline_chain_lets(mut prog: Program) -> Program {
@@ -60,11 +60,15 @@ fn rewrite_block(b: &mut Block) {
     while i + 1 < b.stmts.len() {
         if let Some(name) = fusable_let(&b.stmts[i], &b.stmts[i + 1]) {
             if !mentioned_outside_loop(b, i + 1, &name) {
-                let let_stmt = b.stmts.remove(i);
-                let StmtKind::Local(local) = let_stmt.kind else {
-                    unreachable!("fusable_let checked a local");
+                let init = match &b.stmts[i].kind {
+                    StmtKind::Local(l) => l.init.clone(),
+                    _ => None,
                 };
-                let init = local.init.expect("fusable_let checked an initializer");
+                let Some(init) = init else {
+                    i += 1;
+                    continue;
+                };
+                b.stmts.remove(i);
                 if let StmtKind::Expr(e) | StmtKind::Semi(e) = &mut b.stmts[i].kind {
                     if let ExprKind::For(_, iter, _) = &mut e.kind {
                         **iter = init;
@@ -159,7 +163,7 @@ fn expr_mentions(e: &mut Expr, names: &[String]) -> bool {
 
 fn block_mentions(b: &mut Block, names: &[String]) -> bool {
     let mut found = false;
-    crate::closure_return::visit_block_with(
+    visit_block_with(
         b,
         &mut found,
         &mut |x: &mut Expr, f: &mut bool| {
