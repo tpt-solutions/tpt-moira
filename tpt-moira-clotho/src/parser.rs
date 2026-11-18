@@ -2327,8 +2327,17 @@ impl Parser {
                             }
                         }
                         if self.eat(&TokenKind::LParen) {
-                            let args =
+                            let mut args =
                                 self.parse_delimited(TokenKind::RParen, |s| s.parse_expr())?;
+                            // `flat_map(f)` with a function `f` that returns a sequence is
+                            // `flat_map(|x| f(x).iter())`: the closure form the lowering reads.
+                            if method.node == "flat_map" && args.len() == 1 {
+                                if let ExprKind::Path(p) = &args[0].kind {
+                                    if p.segments.len() == 1 {
+                                        args[0] = flat_map_closure(args[0].clone());
+                                    }
+                                }
+                            }
                             let end = self.peek().span.start;
                             let call = Expr {
                                 kind: ExprKind::MethodCall(Box::new(expr), method, args),
@@ -2956,11 +2965,18 @@ impl Parser {
                 if self.eat(&TokenKind::LParen) {
                     is_sugar = true;
                     fn_args = self.parse_delimited(TokenKind::RParen, |s| s.parse_type())?;
-                    let span = self.tokens.get(self.pos).map(|t| t.span).unwrap_or_default();
+                    let span = self
+                        .tokens
+                        .get(self.pos)
+                        .map(|t| t.span)
+                        .unwrap_or_default();
                     let ret = if self.eat(&TokenKind::Arrow) {
                         self.parse_type()?
                     } else {
-                        Type { kind: TypeKind::Tuple(Vec::new()), span }
+                        Type {
+                            kind: TypeKind::Tuple(Vec::new()),
+                            span,
+                        }
                     };
                     fn_args.push(ret);
                 }
@@ -3261,5 +3277,53 @@ fn collect_into(call: Expr, ty: Type, start: usize, end: usize) -> Expr {
             tail: Some(Box::new(tail)),
         }),
         span,
+    }
+}
+
+/// `f` (a function path) as the closure `|x| f(x).iter()` of a `flat_map` (see the call site).
+/// The generated expressions get spans of their own, far past the source text, because the
+/// checker keys its types by span: the call must not share the callee path's span.
+fn flat_map_closure(f: Expr) -> Expr {
+    let base: usize = 1 << 41;
+    let (s0, e0) = (f.span.start, f.span.end);
+    let at = |k: usize| Span::new(base + 3 * s0 + k, base + 3 * e0 + k);
+    let item = Spanned {
+        node: "__flat_item".to_string(),
+        span: at(2),
+    };
+    let arg = Expr {
+        kind: ExprKind::Path(Path {
+            segments: vec![item.clone()],
+        }),
+        span: at(2),
+    };
+    let call = Expr {
+        kind: ExprKind::Call(Box::new(f), vec![arg]),
+        span: at(0),
+    };
+    let body = Expr {
+        kind: ExprKind::MethodCall(
+            Box::new(call),
+            Spanned {
+                node: "iter".to_string(),
+                span: at(1),
+            },
+            Vec::new(),
+        ),
+        span: at(1),
+    };
+    Expr {
+        kind: ExprKind::Closure {
+            params: vec![Param {
+                pat: Pat::Ident(item),
+                ty: Type {
+                    kind: TypeKind::Infer,
+                    span: at(2),
+                },
+            }],
+            ret: None,
+            body: Box::new(body),
+        },
+        span: at(0),
     }
 }

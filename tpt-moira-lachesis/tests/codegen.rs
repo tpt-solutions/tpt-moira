@@ -4595,3 +4595,21 @@ fn range_bound_method_call_is_typed_and_labelled_break_runs() {
     };
     assert_eq!(out, "11");
 }
+
+/// `flat_map(f)` with a function that returns a vector: each item's vector is flattened in order.
+#[test]
+fn flat_map_with_function_path_runs() {
+    let out = match run_src(
+        r#"fn pieces(n: &i64) -> Vec<i64> { vec![*n, *n * 10] }
+        fn main() {
+            let v: Vec<i64> = vec![1, 2];
+            let all: Vec<i64> = v.iter().flat_map(pieces).collect();
+            print_i64(all.len() as i64);
+            print_i64(all[3]);
+        }"#,
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "4\n20");
+}
