@@ -4183,3 +4183,22 @@ fn file_stem_and_array_iter_run() {
     };
     assert_eq!(out, "file a.tar [dir]\n3");
 }
+
+/// `let &(a, b) = r;` binds the components of a tuple read through a reference.
+#[test]
+fn let_destructures_a_tuple_reference_run() {
+    let out = match run_src(
+        "fn main() {
+            let t: (i64, i64) = (3, 4);
+            let r: &(i64, i64) = &t;
+            let &(a, b) = r;
+            let pair: (i64, i64) = (5, 6);
+            let &(c, d) = &pair;
+            print_i64(a + b + c + d);
+        }",
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "18");
+}

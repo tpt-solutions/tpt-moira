@@ -2845,6 +2845,26 @@ impl Lower {
                 if matches!(local.pat, Pat::Tuple(_)) {
                     return self.lower_tuple_destructure(local);
                 }
+                // `let &(a, b) = e;` on a reference to a tuple: the tuple is read through the
+                // reference, then its components are bound as for a tuple value.
+                if let Pat::Ref(inner) = &local.pat {
+                    if let (Pat::Tuple(_), Some(init)) = (&**inner, &local.init) {
+                        let v = self.lower_expr(init)?;
+                        let mir::Operand::Var(vn) = &v else {
+                            return Err(LowerError("`let &(..)` needs a named value".into()));
+                        };
+                        let ty = self.temp_type_of(vn);
+                        let (val, base) = match ty.strip_suffix('*') {
+                            Some(base) => {
+                                let t = self.fresh_temp(base);
+                                self.emit(t.clone(), mir::Rvalue::Unary(mir::MirUnOp::Deref, v.clone()));
+                                (mir::Operand::var(t), base.to_string())
+                            }
+                            None => (v.clone(), ty.clone()),
+                        };
+                        return self.lower_bind_pattern(inner, val, &base);
+                    }
+                }
                 // `let x: T = s.parse().unwrap();` (or `unwrap_or(d)`) for a numeric `T`.
                 if let (Pat::Ident(n), Some(ty), Some(init)) = (&local.pat, &local.ty, &local.init)
                 {
