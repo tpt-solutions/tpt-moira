@@ -4402,3 +4402,29 @@ fn fold_with_numeric_max_and_min_paths_runs() {
     };
     assert_eq!(out, "4\n3");
 }
+
+/// `zip(params.iter().cloned())` after a `map` over tuples, collected into a map: the zip's other
+/// side is its sequence, with the adapters stripped.
+#[test]
+fn zip_with_cloned_sequence_after_map_collects_into_map() {
+    let out = match run_src(
+        r#"use std::collections::HashMap;
+        #[derive(Clone)]
+        enum Ty { I(i64), B }
+        struct Call { params: Vec<(String, Ty)> }
+        fn solved(call: &Call, params: &[Ty]) -> i64 {
+            let m: HashMap<String, Ty> = call.params.iter().map(|(n, _)| n.clone()).zip(params.iter().cloned()).collect();
+            let mut t: i64 = 0;
+            for (_, v) in m.iter() { if let Ty::I(x) = v { t = t + *x; } }
+            t
+        }
+        fn main() {
+            let c = Call { params: vec![(String::from("a"), Ty::I(4))] };
+            print_i64(solved(&c, &[Ty::I(9)]));
+        }"#,
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "9");
+}

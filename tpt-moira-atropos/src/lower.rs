@@ -3699,10 +3699,16 @@ impl Lower {
                 }
                 // `zip(y)` / `zip(y.iter())`: the other sequence, paired with each item.
                 "zip" if args.len() == 1 => {
-                    let other: &'a Expr = match &args[0].kind {
-                        ExprKind::MethodCall(r, m, a) if m.node == "iter" && a.is_empty() => r,
-                        _ => &args[0],
-                    };
+                    // `zip(y.iter())` / `zip(y.iter().cloned())`: the sequence `y` (the items are
+                    // copied either way).
+                    let mut other: &'a Expr = &args[0];
+                    while let ExprKind::MethodCall(r, m, a) = &other.kind {
+                        if matches!(m.node.as_str(), "iter" | "cloned" | "copied") && a.is_empty() {
+                            other = r;
+                        } else {
+                            break;
+                        }
+                    }
                     if !self.is_sequence(other) {
                         return None;
                     }
