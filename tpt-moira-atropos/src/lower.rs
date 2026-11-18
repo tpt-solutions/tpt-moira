@@ -1628,6 +1628,9 @@ struct Lower {
     specs: Vec<mir::MirFunction>,
     /// Captured variables (name and C type) that a specialised copy takes as leading parameters.
     leading_caps: Vec<(String, String)>,
+    /// In a specialised copy, a capture that the copy names differently (it is also a parameter
+    /// of the callee): capture name to the name of its leading parameter.
+    capture_alias: HashMap<String, String>,
     /// When set, the enclosing `async fn` state-machine bookkeeping: the future
     /// struct name, the `self` parameter local name, the output C type, and the
     /// list of `(slot_name, c_type)` that must be round-tripped across a
@@ -1750,6 +1753,14 @@ fn collect_path_names(
         // The arguments of a macro such as `format!` are expressions: their names are uses.
         ExprKind::Macro(m) => {
             for a in tpt_moira_clotho::parser::Parser::parse_macro_args(m.tokens.clone()) {
+                // A named argument (`name = value`) names a placeholder, not a variable: only its
+                // value is a use.
+                if let ExprKind::Binary(l, ABinOp::Assign, r) = &a.kind {
+                    if matches!(&l.kind, ExprKind::Path(p) if p.segments.len() == 1) {
+                        collect_path_names(r, bound, out, seen);
+                        continue;
+                    }
+                }
                 collect_path_names(&a, bound, out, seen);
             }
         }
@@ -1828,6 +1839,9 @@ fn collect_path_names(
             for (p, e) in arms {
                 let mut b2 = bound.clone();
                 bind_pat_names_in(p, &mut b2);
+                if let Some(g) = p.split_guard().1 {
+                    collect_path_names(g, &b2, out, seen);
+                }
                 collect_path_names(e, &b2, out, seen);
             }
         }
@@ -1904,6 +1918,7 @@ fn bind_pat_names_in(pat: &Pat, out: &mut std::collections::HashSet<String>) {
             out.insert(name.clone());
             bind_pat_names_in(p, out);
         }
+        Pat::Guard(p, _) => bind_pat_names_in(p, out),
         Pat::Wild | Pat::Lit(_) | Pat::Path(_) | Pat::Range(..) => {}
     }
 }
@@ -1990,6 +2005,7 @@ impl Lower {
             spec_done: std::collections::HashSet::new(),
             specs: Vec::new(),
             leading_caps: Vec::new(),
+            capture_alias: HashMap::new(),
             async_fns: std::sync::Arc::new(std::collections::HashSet::new()),
             async_ctx: None,
             expecting_future: false,
@@ -2615,6 +2631,23 @@ impl Lower {
         }
         sub.func.temp_types = sub.types.clone();
         self.closure_counter = sub.closure_counter;
+        // The lifted function's C parameter types (captures first, as its call sites pass them),
+        // so a call adapts an argument to the parameter: a scalar bound by a pattern passed to a
+        // `&T` parameter is addressed like any other call.
+        let lifted_tys: Vec<String> = sub
+            .func
+            .params
+            .iter()
+            .map(|p| {
+                sub.func
+                    .locals
+                    .iter()
+                    .find(|(n, _)| n == p)
+                    .and_then(|(_, t)| t.clone())
+                    .unwrap_or_else(|| "long long".to_string())
+            })
+            .collect();
+        std::sync::Arc::make_mut(&mut self.fn_param_tys).insert(name.clone(), lifted_tys);
         self.closures.push(sub.func.clone());
         self.closures.append(&mut sub.closures);
         self.specs.append(&mut sub.specs);
@@ -2791,6 +2824,12 @@ impl Lower {
     /// passed on as that pointer, or read through it.
     fn leading_capture_operand(&mut self, c: &str, want_ptr: bool) -> mir::Operand {
         let held = self.ref_names.contains(c);
+        // A capture the copy names differently reads its leading parameter (never a `held` one).
+        let aliased: String = match self.capture_alias.get(c) {
+            Some(a) if !held => a.clone(),
+            _ => c.to_string(),
+        };
+        let c: &str = &aliased;
         if want_ptr {
             if held {
                 return mir::Operand::var(format!("__ref_{c}"));
@@ -2835,6 +2874,13 @@ impl Lower {
         for (pidx, _) in found.iter().rev() {
             g.params.remove(*pidx);
         }
+        // A capture named like a parameter of the callee cannot be a parameter of the copy under
+        // its own name: the copy takes it as `__cap_<name>`, and the closure call reads that.
+        let mut callee_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for p in &f.params {
+            bind_pat_names_in(&p.pat, &mut callee_names);
+        }
+        let mut alias: HashMap<String, String> = HashMap::new();
         let mut leading = Vec::new();
         for cap in caps {
             let cap_name = self.var_name(cap);
@@ -2850,6 +2896,10 @@ impl Lower {
             };
             if written.contains(cap) {
                 leading.push((format!("__ref_{cap}"), format!("{cap_ty}*")));
+            } else if callee_names.contains(cap) {
+                let a = format!("__cap_{cap}");
+                alias.insert(cap.clone(), a.clone());
+                leading.push((a, cap_ty));
             } else {
                 leading.push((cap.clone(), cap_ty));
             }
@@ -2879,6 +2929,7 @@ impl Lower {
         l.spec_done = self.spec_done.clone();
         l.closure_counter = self.closure_counter;
         l.leading_caps = leading;
+        l.capture_alias = alias;
         let func = l.lower_function(&g)?;
         self.closure_counter = l.closure_counter;
         self.spec_done = l.spec_done;
@@ -3111,6 +3162,9 @@ impl Lower {
                         {
                             Some("int".to_string())
                         }
+                        // A `Box<T>` value of a user struct is a pointer to the struct (as the
+                        // `Box<T>` type spelling is), so the local is that pointer.
+                        _ if self.box_hint_struct(init).is_some() => self.box_hint_struct(init),
                         _ => self.hint_of_expr(init).filter(|h| {
                             h == "str"
                                 || is_scalar_pointer_hint(h)
@@ -3199,6 +3253,13 @@ impl Lower {
                         }
                     }
                     let v = self.lower_expr(init)?;
+                    // A reference local bound to a value (`let r = t;` with `r: &T` and `t: T` held
+                    // by value, as a closure's parameter is bound when the closure is inlined) is the
+                    // value's address, as a call argument of that type is.
+                    let v = match &ty {
+                        Some(t) if t.ends_with('*') => self.adapt_arg(v, t),
+                        _ => v,
+                    };
                     // `let f = |..| ..;` binds a closure value: remember the
                     // local -> lifted-fn mapping so later direct calls
                     // `f(args)` pass the captured variables.
@@ -7410,7 +7471,6 @@ impl Lower {
         }
         if pt.ends_with('*')
             && !at.ends_with('*')
-            && at != "long long"
             && pt.trim_end_matches('*') == at
         {
             let p = self.fresh_temp(format!("{at}*"));
@@ -7873,6 +7933,48 @@ impl Lower {
 
     /// The declared return type of a call to an `impl` method or associated function
     /// (`Type::f(..)`, `recv.m(..)`), if `e` is one.
+    /// The C type of a `Box<S>` value of a user struct `S` (a pointer to the struct), from the
+    /// checker's hint for the expression.
+    fn box_hint_struct(&self, e: &Expr) -> Option<String> {
+        // `Box::new(s)` is the box of `s`'s struct, when the checker typed nothing for the call.
+        if let ExprKind::Call(callee, args) = &e.kind {
+            // A call of a function declared `-> Box<S>` is the box of `S`.
+            if let ExprKind::Path(p) = &callee.kind {
+                if p.segments.len() == 1 {
+                    if let Some(ret) = self.fn_asts.get(&p.segments[0].node).and_then(|f| f.ret.as_ref()) {
+                        if let TypeKind::Path(rp, targs) = &ret.kind {
+                            if rp.segments.last().is_some_and(|s| s.node == "Box") && targs.len() == 1 {
+                                if let TypeKind::Path(ip, _) = &targs[0].kind {
+                                    let name = ip.segments.last()?.node.clone();
+                                    return self.struct_names.contains(name.as_str()).then(|| format!("{name}*"));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if let ExprKind::Path(p) = &callee.kind {
+                let segs: Vec<&str> = p.segments.iter().map(|s| s.node.as_str()).collect();
+                if segs == ["Box", "new"] && args.len() == 1 {
+                    let inner = self.hint_of_expr(&args[0])?;
+                    return self
+                        .struct_names
+                        .contains(inner.as_str())
+                        .then(|| format!("{inner}*"));
+                }
+            }
+        }
+        let h = self.hint_of_expr(e)?;
+        let (base, args) = mir::split_generic(&h)?;
+        if base != "Box" || args.len() != 1 {
+            return None;
+        }
+        let inner = args[0];
+        self.struct_names
+            .contains(inner)
+            .then(|| format!("{inner}*"))
+    }
+
     fn user_call_ret(&self, e: &Expr) -> Option<String> {
         match &e.kind {
             ExprKind::Call(callee, _) => match &callee.kind {
@@ -13961,6 +14063,19 @@ impl Lower {
                             return Ok(mir::Operand::Unit);
                         }
                         ExprKind::Deref(inner) | ExprKind::Unary(AUnOp::Deref, inner) => {
+                            // `*s = v` for a `&mut String` parameter: the body works on the `char*`
+                            // local, and the return stores it back through the pointer.
+                            if let ExprKind::Path(p) = &inner.kind {
+                                if let [seg] = p.segments.as_slice() {
+                                    let ptr = format!("__ptr_{}", seg.node);
+                                    if self.func.locals.iter().any(|(n, _)| *n == ptr) {
+                                        let local = self.var_name(&seg.node);
+                                        let rhs = self.lower_expr(r)?;
+                                        self.emit(local, mir::Rvalue::Use(rhs));
+                                        return Ok(mir::Operand::Unit);
+                                    }
+                                }
+                            }
                             let p = self.lower_expr(inner)?;
                             let rhs = self.lower_expr(r)?;
                             self.emit(
@@ -14626,7 +14741,16 @@ impl Lower {
                     return Ok(mir::Operand::var(t));
                 }
                 // A field of a reference (`item.attributes` with `item: &Item`) is read
-                // through the pointer (`->`); the struct is the pointee type.
+                // through the pointer (`->`); the struct is the pointee type. A reference to a
+                // box (`b: &Box<S>`, `S**` in C) is read through both pointers.
+                let (o, base_ty) = if base_ty.ends_with("**") {
+                    let single = base_ty[..base_ty.len() - 1].to_string();
+                    let d = self.fresh_temp(single.clone());
+                    self.emit(d.clone(), mir::Rvalue::Unary(mir::MirUnOp::Deref, o));
+                    (mir::Operand::var(d), single)
+                } else {
+                    (o, base_ty)
+                };
                 let deref = base_ty.ends_with('*');
                 let struct_ty = base_ty.trim_end_matches('*');
                 let field_ty = lookup_field_type(&self.structs, struct_ty, &field.node)
@@ -14656,11 +14780,33 @@ impl Lower {
                                     t.clone(),
                                     mir::Rvalue::FieldAddr(
                                         mir::Operand::var(bn),
-                                        field.node.clone(),
+                                        c_field_name(&field.node),
                                         true,
                                     ),
                                 );
                                 return Ok(mir::Operand::var(t));
+                            }
+                            // `&mut s.f` of a struct (or tuple) local is the address of the field
+                            // inside the local, so a write through it reaches the local.
+                            let bty = self.temp_type_of(&bn);
+                            if !bty.is_empty() && !bty.ends_with('*') {
+                                // The field's own read gives the field's C type (a tuple's struct
+                                // is named by its checker spelling, which the field table lacks).
+                                let v = self.lower_expr(e)?;
+                                let fty = self.temp_type_of(&name_of(&v));
+                                // A string is a `char*` value here, so its reference stays the value.
+                                if !fty.is_empty() && fty != "char*" && fty != "str" {
+                                    let t = self.fresh_temp(format!("{fty}*"));
+                                    self.emit(
+                                        t.clone(),
+                                        mir::Rvalue::FieldAddr(
+                                            mir::Operand::var(bn),
+                                            c_field_name(&field.node),
+                                            false,
+                                        ),
+                                    );
+                                    return Ok(mir::Operand::var(t));
+                                }
                             }
                         }
                     }
@@ -14689,7 +14835,7 @@ impl Lower {
                                     let t = self.fresh_temp(format!("{fty}*"));
                                     self.emit(
                                         t.clone(),
-                                        mir::Rvalue::FieldAddr(bop.clone(), field.node.clone(), true),
+                                        mir::Rvalue::FieldAddr(bop.clone(), c_field_name(&field.node), true),
                                     );
                                     return Ok(mir::Operand::var(t));
                                 }
@@ -16381,6 +16527,7 @@ impl Lower {
             let arm_start = self.func.blocks.len();
             let test_blk = next_test;
             self.current = test_blk;
+            let (pat, arm_guard) = pat.split_guard();
             self.mut_scrutinee =
                 arm_binds_by_mut_ref(scrutinee, pat, &|n: &str| writes_through(body, n));
             let guard = self.pattern_guard(&scrut_op, pat);
@@ -16425,6 +16572,14 @@ impl Lower {
                 self.declare_bound_name(&unique, val);
                 self.emit(unique.clone(), mir::Rvalue::Use(val.clone()));
                 renames.insert(name.clone(), unique);
+            }
+            // A guard is tested once the pattern's names are bound. When it is false the arm is
+            // not taken and matching continues at the next arm, as for a pattern that does not match.
+            if let Some(g) = arm_guard {
+                let gop = self.lower_expr(g)?;
+                let taken = self.new_block();
+                self.set_term(mir::Terminator::If(gop, taken, next_test));
+                self.current = taken;
             }
             let v = self.lower_expr(body)?;
             // A diverging arm (`=> return x`, `break`, `continue`) produces no value: its
@@ -16759,9 +16914,23 @@ impl Lower {
         };
         // Named placeholders (`{name}`, the inline arguments of Rust 2021) are the variable of that
         // name: each becomes `{}` with the variable as the argument at its place in the string.
+        // Named arguments (`name = expr`) bind the placeholder `{name}`; they are not positional.
+        let mut named: Vec<(String, ast::Expr)> = Vec::new();
+        let mut positional_args: Vec<&ast::Expr> = Vec::new();
+        for a in rest {
+            if let ExprKind::Binary(l, ABinOp::Assign, r) = &a.kind {
+                if let ExprKind::Path(p) = &l.kind {
+                    if let [seg] = p.segments.as_slice() {
+                        named.push((seg.node.clone(), (**r).clone()));
+                        continue;
+                    }
+                }
+            }
+            positional_args.push(a);
+        }
         let mut ordered: Vec<ast::Expr> = Vec::new();
         let mut plain = String::new();
-        let mut positional = rest.iter();
+        let mut positional = positional_args.iter();
         let fspan = args.first().map(|a| a.span).unwrap_or_default();
         let chars: Vec<char> = f.chars().collect();
         let mut k = 0;
@@ -16797,12 +16966,16 @@ impl Lower {
                             (1usize << 42) + fspan.start * 64 + ordered.len(),
                             (1usize << 42) + fspan.start * 64 + ordered.len() + 1,
                         );
-                        ordered.push(ast::Expr {
-                            kind: ExprKind::Path(ast::Path {
-                                segments: vec![ast::Spanned { node: inner, span: own }],
-                            }),
-                            span: own,
-                        });
+                        if let Some((_, value)) = named.iter().find(|(n, _)| *n == inner) {
+                            ordered.push(value.clone());
+                        } else {
+                            ordered.push(ast::Expr {
+                                kind: ExprKind::Path(ast::Path {
+                                    segments: vec![ast::Spanned { node: inner, span: own }],
+                                }),
+                                span: own,
+                            });
+                        }
                         plain.push_str("{}");
                         k = end + 1;
                         continue;
@@ -17421,6 +17594,10 @@ impl Lower {
     fn pattern_guard(&mut self, scrut: &mir::Operand, pat: &ast::Pat) -> Result<ScrutineeLowering> {
         let scrut_ptr = self.scrutinee_is_pointer(scrut);
         match pat {
+            // A guard is tested by `lower_match`, after the pattern's names are bound.
+            ast::Pat::Guard(..) => Err(LowerError(
+                "a match guard is only supported on a match arm".into(),
+            )),
             ast::Pat::Ident(n) => {
                 // A bare name that is a known *nullary* variant (`None`) is a
                 // tag test, not a binding — the parser cannot distinguish it
@@ -17675,7 +17852,16 @@ impl Lower {
                             continue;
                         }
                     }
-                    let fv = self.fresh_temp("long long");
+                    // The field's temporary has the field's declared type, so a name bound to it
+                    // (`S { kind: k, .. }`) is typed as the field is.
+                    let fty = self
+                        .structs
+                        .iter()
+                        .find(|d| d.name == *name)
+                        .and_then(|d| d.fields.iter().find(|(f, _)| f == fname))
+                        .map(|(_, t)| t.clone())
+                        .unwrap_or_else(|| "long long".to_string());
+                    let fv = self.fresh_temp(fty);
                     self.emit(
                         fv.clone(),
                         mir::Rvalue::Field(scrut.clone(), fname.clone(), ptr),
@@ -18228,4 +18414,13 @@ fn arm_binds_by_mut_ref(scrutinee: &Expr, pat: &ast::Pat, body: &dyn Fn(&str) ->
     let mut names = Vec::new();
     pattern_binding_names(pat, &mut names);
     names.iter().any(|n| body(n))
+}
+
+/// The C name of a field the source names: a tuple's numeric index `1` is the field `f1`.
+fn c_field_name(name: &str) -> String {
+    if !name.is_empty() && name.chars().all(|c| c.is_ascii_digit()) {
+        format!("f{name}")
+    } else {
+        name.to_string()
+    }
 }
