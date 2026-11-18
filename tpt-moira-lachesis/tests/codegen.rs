@@ -4504,3 +4504,24 @@ fn turbofish_collect_and_slice_argument_inference_run() {
     };
     assert_eq!(out, "1, 2 abc\n3");
 }
+
+/// A chain whose left side is itself a pure adapter chain (`a.iter().filter_map(..).chain(..)`),
+/// used by a `for` loop and collected.
+#[test]
+fn chain_with_adapter_left_side_runs() {
+    let out = match run_src(
+        r#"struct F { locals: Vec<(String, Option<i64>)>, values: Vec<i64> }
+        fn main() {
+            let f = F { locals: vec![(String::from("a"), Some(1)), (String::from("b"), None)], values: vec![2] };
+            let mut n: i64 = 0;
+            for ty in f.locals.iter().filter_map(|(_, t)| *t).chain(f.values.iter().map(|v| *v + 100)) { n = n + ty; }
+            let all: Vec<i64> = f.values.iter().map(|v| *v).chain(f.values.iter().map(|v| *v * 2)).collect();
+            print_i64(n);
+            print_i64(all.len() as i64);
+        }"#,
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "103\n2");
+}

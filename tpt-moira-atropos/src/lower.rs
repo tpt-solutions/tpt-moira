@@ -3642,15 +3642,25 @@ impl Lower {
                         }
                         _ => &args[0],
                     };
+                    // The left side is `x.iter()` (a sequence), or a pure adapter chain (collected
+                    // first, as the other side is).
                     let src: &'a Expr = match &unparen(r).kind {
                         ExprKind::MethodCall(s, m, a)
                             if matches!(m.node.as_str(), "iter" | "into_iter") && a.is_empty() =>
                         {
                             s
                         }
-                        _ => return None,
+                        _ => {
+                            let pure = self
+                                .iter_chain_of(r)
+                                .is_some_and(|c| chain_stages_pure(&c));
+                            if !pure {
+                                return None;
+                            }
+                            unparen(r)
+                        }
                     };
-                    if !self.is_sequence(src) {
+                    if !self.is_sequence(src) && self.iter_chain_of(src).is_none() {
                         return None;
                     }
                     // The other side is a sequence, or a pure adapter chain (collected first).
@@ -4402,7 +4412,11 @@ impl Lower {
             // `a.iter().chain(b.iter())`: a new vector holding the items of `a`, then of `b`.
             (Some(seq), _) if chain.concat.is_some() => {
                 let other = chain.concat.expect("checked above");
-                let (an, aelem, aptr) = self.chain_sequence(seq)?;
+                let (an, aelem, aptr) = if self.is_sequence(seq) {
+                    self.chain_sequence(seq)?
+                } else {
+                    self.materialize_chain(seq)?
+                };
                 let (bn, bptr) = if self.is_sequence(other) {
                     let (n, _, p) = self.chain_sequence(other)?;
                     (n, p)
@@ -6003,6 +6017,22 @@ impl Lower {
             mir::Rvalue::FieldAddr(mir::Operand::var(b), field.node.clone(), deref),
         );
         Ok(Some((p, k, v, true)))
+    }
+
+    /// The items of an adapter chain collected into a new vector: `(vector, element type, false)`.
+    fn materialize_chain(&mut self, e: &Expr) -> Result<(String, String, bool)> {
+        let chain = self
+            .iter_chain_of(e)
+            .ok_or_else(|| LowerError("`chain` of an unsupported iterator".into()))?;
+        let op = self.lower_iter_chain(e, chain, "collect", &[])?;
+        let mir::Operand::Var(vn) = op else {
+            return Err(LowerError("`chain` of an unsupported iterator".into()));
+        };
+        let ty = self.temp_type_of(&vn);
+        let Some(elem) = mir::vec_elem(&ty).map(|x| x.to_string()) else {
+            return Err(LowerError("`chain` of an unsupported iterator".into()));
+        };
+        Ok((vn, elem, false))
     }
 
     /// `set.extend(chain)`: the chain's items are collected into a vector, and each is inserted.
