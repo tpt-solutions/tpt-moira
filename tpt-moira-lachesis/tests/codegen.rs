@@ -4384,3 +4384,21 @@ fn fold_accumulates_through_the_closure() {
     };
     assert_eq!(out, "8\n9");
 }
+
+/// `fold(init, f64::max)` / `fold(init, i64::min)`: the numeric function is compared inline.
+#[test]
+fn fold_with_numeric_max_and_min_paths_runs() {
+    let out = match run_src(
+        r#"fn main() {
+            let v: Vec<f64> = vec![1.5, 4.0, 2.0];
+            let b: f64 = v.iter().map(|x| *x).fold(0.0f64, f64::max);
+            let d: i64 = vec![7i64, 3, 9].iter().map(|x| *x).fold(100, i64::min);
+            print_f64(b);
+            print_i64(d);
+        }"#,
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "4\n3");
+}

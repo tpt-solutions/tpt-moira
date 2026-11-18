@@ -4575,7 +4575,23 @@ impl Lower {
         } else {
             term_args.first().filter(|_| terminal != "nth")
         };
-        let term_callee = match closure_arg {
+        // `fold(init, f64::max)` (or `min`): the numeric function itself, compared inline.
+        let fold_path_op: Option<String> = match closure_arg.map(|a| &a.kind) {
+            Some(ExprKind::Path(p))
+                if terminal == "fold"
+                    && p.segments.len() == 2
+                    && matches!(p.segments[1].node.as_str(), "max" | "min")
+                    && matches!(
+                        p.segments[0].node.as_str(),
+                        "f32" | "f64" | "i8" | "i16" | "i32" | "i64" | "isize" | "i128"
+                            | "u8" | "u16" | "u32" | "u64" | "usize" | "u128"
+                    ) =>
+            {
+                Some(p.segments[1].node.clone())
+            }
+            _ => None,
+        };
+        let term_callee = match closure_arg.filter(|_| fold_path_op.is_none()) {
             Some(a) => {
                 self.closure_param_hint = Some(if terminal == "fold" {
                     vec![fold_acc.clone(), cur.clone()]
@@ -5289,6 +5305,22 @@ impl Lower {
                 self.set_term(mir::Terminator::Goto(step));
             }
             // `fold`: the closure's result is the new accumulator.
+            "fold" if fold_path_op.is_some() => {
+                let r = res.clone().expect("fold has a result");
+                let op = fold_path_op.clone().expect("checked above");
+                // `max` takes the item when it is greater; `min` when it is less.
+                let better = self.fresh_temp("long long");
+                let cmp = if op == "max" { mir::MirBinOp::Gt } else { mir::MirBinOp::Lt };
+                self.emit(
+                    better.clone(),
+                    mir::Rvalue::Binary(cmp, mir::Operand::var(item.clone()), mir::Operand::var(r.clone())),
+                );
+                let take = self.new_block();
+                self.set_term(mir::Terminator::If(mir::Operand::var(better), take, step));
+                self.current = take;
+                self.emit(r, mir::Rvalue::Use(mir::Operand::var(item.clone())));
+                self.set_term(mir::Terminator::Goto(step));
+            }
             "fold" => {
                 let r = res.clone().expect("fold has a result");
                 let Some((f, caps)) = term_callee.clone() else {
