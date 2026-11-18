@@ -4225,3 +4225,26 @@ fn chain_with_adapter_other_side_and_wide_parse_run() {
     };
     assert_eq!(out, "63\n4\n49");
 }
+
+/// `for line in s.split_inclusive('\n')` yields each line with its newline (the last piece has
+/// none when the text does not end in one).
+#[test]
+fn split_inclusive_newline_loop_keeps_newlines() {
+    let out = match run_src(
+        r#"fn main() {
+            let c = String::from("ab\ncd\n\nef");
+            let mut n: i64 = 0;
+            let mut pieces: i64 = 0;
+            for line in c.split_inclusive('\n') {
+                n = n + line.len() as i64;
+                pieces = pieces + 1;
+            }
+            print_i64(n);
+            print_i64(pieces);
+        }"#,
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "9\n4");
+}

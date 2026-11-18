@@ -111,6 +111,8 @@ long long moira_char_is_ascii_hexdigit(long long c) { return isxdigit((int)c) !=
 long long moira_char_to_digit(long long c, long long radix) { long long v = (c >= '0' && c <= '9') ? c - '0' : (c >= 'a' && c <= 'z') ? c - 'a' + 10 : (c >= 'A' && c <= 'Z') ? c - 'A' + 10 : -1; return (v >= 0 && v < radix) ? v : -1; }
 long long moira_char_from_u32_valid(long long c) { return (c >= 0 && c <= 0x10FFFF && !(c >= 0xD800 && c <= 0xDFFF)); }
 char* moira_str_before(char* s, long long n) { return moira_str_dup_n(s, (size_t)n); }
+/* The bytes [a, b) of a string, in a new string. */
+char* moira_str_range(char* s, long long a, long long b) { return moira_str_dup_n(s + a, (size_t)(b - a)); }
 long long moira_line_next(char* s, long long i) { char* q = strchr(s + i, '\n'); return q ? (long long)(q - s) + 1 : (long long)strlen(s); }
 #include <errno.h>
 #include <ctype.h>

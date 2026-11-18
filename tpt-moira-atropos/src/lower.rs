@@ -5325,6 +5325,7 @@ impl Lower {
         seq: &Expr,
         pat: &ast::Pat,
         body: &ast::Block,
+        inclusive: bool,
     ) -> Result<mir::Operand> {
         let s = match self.lower_expr(seq)? {
             mir::Operand::Var(n) => n,
@@ -5365,17 +5366,17 @@ impl Lower {
                 vec![mir::Operand::var(s.clone()), mir::Operand::var(idx.clone())],
             ),
         );
+        // `lines()` drops the newline; `split_inclusive` on a newline keeps it: the piece is the
+        // bytes from `idx` to `next`.
         let line = self.fresh_temp("char*");
+        let (helper, args) = if inclusive {
+            ("moira_str_range", vec![mir::Operand::var(s), mir::Operand::var(idx.clone()), mir::Operand::var(next.clone())])
+        } else {
+            ("moira_line_text", vec![mir::Operand::var(s), mir::Operand::var(idx.clone()), mir::Operand::var(next.clone())])
+        };
         self.emit(
             line.clone(),
-            mir::Rvalue::Call(
-                mir::Operand::Func("moira_line_text".to_string()),
-                vec![
-                    mir::Operand::var(s),
-                    mir::Operand::var(idx.clone()),
-                    mir::Operand::var(next.clone()),
-                ],
-            ),
+            mir::Rvalue::Call(mir::Operand::Func(helper.to_string()), args),
         );
         self.lower_bind_pattern(pat, mir::Operand::var(line), "char*")?;
         self.loops.push((exit, step));
@@ -14152,7 +14153,17 @@ impl Lower {
                     }
                 }
                 if si.lines {
-                    return self.lower_lines_for(si.seq, pat, body);
+                    return self.lower_lines_for(si.seq, pat, body, false);
+                }
+                // `s.split_inclusive(newline)`: the lines of `lines()`, each keeping its newline.
+                if let ExprKind::MethodCall(r, m, a) = &iter.kind {
+                    if m.node == "split_inclusive"
+                        && a.len() == 1
+                        && matches!(a[0].kind, ExprKind::Lit(ast::Lit::Char('\n')))
+                        && self.hint_of_expr(r).as_deref() == Some("str")
+                    {
+                        return self.lower_lines_for(r, pat, body, true);
+                    }
                 }
                 if si.chars {
                     return self.lower_str_for(si.seq, pat, body, si.indices);
