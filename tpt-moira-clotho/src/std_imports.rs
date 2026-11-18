@@ -13,8 +13,8 @@
 //! rewritten; the crates Moira compiles do not use one.
 
 use crate::ast::*;
-use crate::token::{Token, TokenKind};
 use crate::closure_return::{visit_block, visit_item_exprs};
+use crate::token::{Token, TokenKind};
 
 /// Resolve the std `Path` name of every file in `prog` (see the module docs).
 pub fn resolve_std_paths(prog: Program) -> Program {
@@ -74,7 +74,8 @@ fn shorten_tokens(tokens: &mut Vec<Token>) {
 
 fn shorten_path(p: &mut Path) {
     let n = p.segments.len();
-    if n > 2 && p.segments[0].node == "std" && STD_TYPES.contains(&p.segments[n - 2].node.as_str()) {
+    if n > 2 && p.segments[0].node == "std" && STD_TYPES.contains(&p.segments[n - 2].node.as_str())
+    {
         p.segments = p.segments[n - 2..].to_vec();
     }
 }
