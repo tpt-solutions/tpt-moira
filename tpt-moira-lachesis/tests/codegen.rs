@@ -4945,3 +4945,22 @@ fn closure_bare_return_and_print_call_run() {
     };
     assert_eq!(out, "1\n9");
 }
+
+/// Named format placeholders (`{name}`, Rust 2021's inline arguments) interpolate the variable of
+/// that name, mixed with positional ones; doubled braces are literal.
+#[test]
+fn format_named_placeholders_interpolate_variables() {
+    let out = match run_src(
+        r#"fn main() {
+            let name = String::from("ab");
+            let k: i64 = 7;
+            let s = format!("__cl_{name}_{}_{k}", 3);
+            let t = format!("{{lit}} {name}");
+            println!("{} {}", s, t);
+        }"#,
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "__cl_ab_3_7 {lit} ab");
+}

@@ -16754,6 +16754,66 @@ impl Lower {
         let Some(f) = fmt else {
             return Err(LowerError("`format!` needs a literal format string".into()));
         };
+        // Named placeholders (`{name}`, the inline arguments of Rust 2021) are the variable of that
+        // name: each becomes `{}` with the variable as the argument at its place in the string.
+        let mut ordered: Vec<ast::Expr> = Vec::new();
+        let mut plain = String::new();
+        let mut positional = rest.iter();
+        let fspan = args.first().map(|a| a.span).unwrap_or_default();
+        let chars: Vec<char> = f.chars().collect();
+        let mut k = 0;
+        while k < chars.len() {
+            if chars[k] == '{' && k + 1 < chars.len() && chars[k + 1] == '{' {
+                plain.push_str("{{");
+                k += 2;
+                continue;
+            }
+            if chars[k] == '}' && k + 1 < chars.len() && chars[k + 1] == '}' {
+                plain.push_str("}}");
+                k += 2;
+                continue;
+            }
+            if chars[k] == '{' {
+                let close = chars[k..].iter().position(|&c| c == '}').map(|p| k + p);
+                if let Some(end) = close {
+                    let inner: String = chars[k + 1..end].iter().collect();
+                    if inner.is_empty() {
+                        if let Some(a) = positional.next() {
+                            ordered.push((*a).clone());
+                        }
+                        plain.push_str("{}");
+                        k = end + 1;
+                        continue;
+                    }
+                    if inner.chars().all(|c| c.is_alphanumeric() || c == '_')
+                        && !inner.chars().next().is_some_and(|c| c.is_ascii_digit())
+                    {
+                        // A span of its own: the checker keys hints by span, and the literal's hint is
+                        // the string's.
+                        let own = tpt_moira_clotho::token::Span::new(
+                            (1usize << 42) + fspan.start * 64 + ordered.len(),
+                            (1usize << 42) + fspan.start * 64 + ordered.len() + 1,
+                        );
+                        ordered.push(ast::Expr {
+                            kind: ExprKind::Path(ast::Path {
+                                segments: vec![ast::Spanned { node: inner, span: own }],
+                            }),
+                            span: own,
+                        });
+                        plain.push_str("{}");
+                        k = end + 1;
+                        continue;
+                    }
+                }
+            }
+            plain.push(chars[k]);
+            k += 1;
+        }
+        let f = plain.replace("{{", "{").replace("}}", "}");
+        for a in positional {
+            ordered.push((*a).clone());
+        }
+        let rest: Vec<&ast::Expr> = ordered.iter().collect();
         let segments: Vec<String> = f.split("{}").map(|s| s.to_string()).collect();
         let out = self.heap_string(mir::Operand::CStr(String::new()))?;
         let out_name = match &out {
