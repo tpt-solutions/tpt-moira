@@ -886,6 +886,20 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
             Note: the self-host probe must compile the compiler's own source with the same rules
             as the rest of the code: `Option` combinators on untyped values and function paths
             used as values are rejected, so write those as `match` or closures.
+          - Status (2026-11-18, blocker pass 4): probe blockers 29 -> 24 (clotho 2, atropos 8,
+            lachesis 6, driver 8). Fixed: `&dyn Fn(A) -> R` parameters keep their signature (the
+            parser keeps the arguments; the checker and C type read them as a function); calls
+            through a reference to a function value; `collect::<T>()` takes `T` as a let annotation
+            (desugared to a typed `let`), with `_` placeholders inferred; a pending `vec!` local
+            passed as `&v` to a slice parameter takes the slice's element type; `to_string` reads
+            through a pointer only when the operand is one. Still open: `flat_map` with a function
+            path; `insert`/`push` with no hint (`collect_path_names_block`, `match_rep` extend on a
+            map entry); `fetch_add` (derive span counter, kept on purpose); `for` over
+            `split_inclusive` on a non-literal separator; `iter_mut().for_each(fn)`; `by_ref` on a
+            char iterator held in a local; `unwrap_or_default` on an unannotated value; `format!` of
+            an enum; and the driver's std process and cross-crate surface (`Command`,
+            `wait_with_output`, `from_utf8_lossy` lines, `PipelineCacheExt::checked/text`,
+            `with_backend`).
           - Status (2026-11-18, `chain` and field `extend`): `a.iter().chain(b.iter())` over two
             sequences is a source on the C path (a new vector: `a`'s items, then `b`'s; only when
             the receiver is a bare `iter()` on a sequence). `s.field.extend(x.iter().cloned())`
