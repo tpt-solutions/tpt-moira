@@ -900,6 +900,17 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
             an enum; and the driver's std process and cross-crate surface (`Command`,
             `wait_with_output`, `from_utf8_lossy` lines, `PipelineCacheExt::checked/text`,
             `with_backend`).
+          - Status (2026-11-18, blocker pass 5): probe blockers 24 -> 16 (clotho 2, atropos 2,
+            lachesis 4, driver 8). Fixed: a chain may have an adapter chain as its left side;
+            `iter_mut().for_each(f)` over vectors; `clone()` of std sets and maps keeps its type;
+            range bounds are typed (`0..=v.len()`); `flat_map` with a function path and with a
+            sequence-valued body; closure captures of shadowed references take the binding's type.
+            Also: `driver` annotates the check's `Vec<String>` result. Open: `compute_live`
+            `contains` (the real function does not reproduce standalone; investigate with the
+            bundled lachesis probe), `unwrap_or_default` on an unannotated value, `format!` of an
+            enum (`Ty`), `by_ref` on a char iterator held in a local, two atropos sites whose
+            pattern error is raised in a helper of `lower_expr_inner`, and the driver's std
+            process/thread surface and cross-crate methods.
           - Status (2026-11-18, `chain` and field `extend`): `a.iter().chain(b.iter())` over two
             sequences is a source on the C path (a new vector: `a`'s items, then `b`'s; only when
             the receiver is a bare `iter()` on a sequence). `s.field.extend(x.iter().cloned())`
