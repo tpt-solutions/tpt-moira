@@ -924,6 +924,20 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
             silent miscompile (`|&n|` read the address). Lachesis: `format!` of an enum (`Ty`) and
             `by_ref` on a char iterator held in a local. Driver: `thread::Builder`, `Command`,
             `from_utf8_lossy`, cross-crate methods, `Diag::to_string` (a user `Display`).
+          - Status (2026-11-18, C-error pass 1): the emitted `build/clotho.c` went from 427 C errors
+            to 95 (`gcc -fsyntax-only`); `build/atropos.c` is 1736 (it includes clotho). Fixed: a
+            `&mut Box<T>` argument is read through (also in closure-specialised calls); a
+            `&mut`-bound payload is written through when the arm assigns `*name` (`writes_through`);
+            generic instances named only in type aliases are emitted; `let` arrays and tuples take
+            the checker's element types; bool locals are `int`; refutable tuple-pattern elements are
+            tested and bound (a silent wrong-arm bug); `let (a, b) = map.get(k)?` reads through the
+            pointer; `let x = &user_value` is a pointer local; a bare `return;` in a valued closure;
+            prelude print functions are not captured; wildcard closure parameters are distinct; named
+            `format!` placeholders (`{name}`) interpolate (they printed the braces); `|&n|` closure
+            parameters read the referent. Still open in clotho.c: pointer/value mismatches in lifted
+            closures (`__moira_closure_*` arguments), `Option`/`Tuple` shape mismatches in closure
+            results, `Param`/`Path` confusion in a pattern binding, `ClosureCall` initialisers, and a
+            few `return;`/subscript sites.
           - Status (2026-11-18, `chain` and field `extend`): `a.iter().chain(b.iter())` over two
             sequences is a source on the C path (a new vector: `a`'s items, then `b`'s; only when
             the receiver is a bare `iter()` on a sequence). `s.field.extend(x.iter().cloned())`
