@@ -5582,6 +5582,95 @@ impl Lower {
         Ok(Some((p, k, v, true)))
     }
 
+    /// `m.retain(|k, v| keep)`: the entries whose closure answers `false` are removed. The
+    /// closure takes pointers to the entry's key and value (`&K`, `&mut V`). A removal moves the
+    /// last entry into the freed slot, so the same index is tested again. Only a closure
+    /// argument is lowered; anything else is an error.
+    fn lower_map_retain(
+        &mut self,
+        mname: &str,
+        k: &str,
+        v: &str,
+        is_ptr: bool,
+        closure: &Expr,
+    ) -> Result<mir::Operand> {
+        if !matches!(closure.kind, ExprKind::Closure { .. }) {
+            return Err(LowerError("`retain` takes a closure".into()));
+        }
+        // The closure takes `&K` and `&mut V`: pointers to the entry's key and value.
+        self.closure_param_hint = Some(vec![format!("{k}*"), format!("{v}*")]);
+        let callee = self.closure_callee(closure);
+        self.closure_param_hint = None;
+        let (f, caps) = callee?;
+        let map_ptr = if is_ptr {
+            mir::Operand::var(mname)
+        } else {
+            let p = self.fresh_temp(format!("Map<{k},{v}>*"));
+            self.emit(p.clone(), mir::Rvalue::Ref(mir::Operand::var(mname), true));
+            mir::Operand::var(p)
+        };
+        let keys = self.fresh_temp(format!("{k}*"));
+        self.emit(keys.clone(), mir::Rvalue::Field(map_ptr.clone(), "keys".into(), true));
+        let vals = self.fresh_temp(format!("{v}*"));
+        self.emit(vals.clone(), mir::Rvalue::Field(map_ptr.clone(), "vals".into(), true));
+        let idx = self.fresh_temp("long long");
+        self.emit(idx.clone(), mir::Rvalue::Use(mir::Operand::Const(0)));
+        let head = self.new_block();
+        let body = self.new_block();
+        let keep_blk = self.new_block();
+        let drop_blk = self.new_block();
+        let exit = self.new_block();
+        self.set_term(mir::Terminator::Goto(head));
+        self.current = head;
+        let len = self.fresh_temp("long long");
+        self.emit(len.clone(), mir::Rvalue::Field(map_ptr.clone(), "len".into(), true));
+        let more = self.fresh_temp("long long");
+        self.emit(
+            more.clone(),
+            mir::Rvalue::Binary(mir::MirBinOp::Lt, mir::Operand::var(idx.clone()), mir::Operand::var(len)),
+        );
+        self.set_term(mir::Terminator::If(mir::Operand::var(more), body, exit));
+        self.current = body;
+        let kp = self.fresh_temp(format!("{k}*"));
+        self.emit(
+            kp.clone(),
+            mir::Rvalue::IndexRef(mir::Operand::var(keys), mir::Operand::var(idx.clone())),
+        );
+        let vp = self.fresh_temp(format!("{v}*"));
+        self.emit(
+            vp.clone(),
+            mir::Rvalue::IndexRef(mir::Operand::var(vals), mir::Operand::var(idx.clone())),
+        );
+        let mut args = caps;
+        args.push(mir::Operand::var(kp.clone()));
+        args.push(mir::Operand::var(vp));
+        let keep = self.fresh_temp("long long");
+        self.emit(keep.clone(), mir::Rvalue::Call(mir::Operand::Func(f), args));
+        self.set_term(mir::Terminator::If(mir::Operand::var(keep), keep_blk, drop_blk));
+        // Kept: the next index.
+        self.current = keep_blk;
+        self.emit(
+            idx.clone(),
+            mir::Rvalue::Binary(mir::MirBinOp::Add, mir::Operand::var(idx.clone()), mir::Operand::Const(1)),
+        );
+        self.set_term(mir::Terminator::Goto(head));
+        // Dropped: remove the entry (the last one fills its slot), and test the same index again.
+        self.current = drop_blk;
+        let key = self.fresh_temp(k.to_string());
+        self.emit(key.clone(), mir::Rvalue::Unary(mir::MirUnOp::Deref, mir::Operand::var(kp)));
+        let removed = self.fresh_temp(format!("Option<{v}>"));
+        self.emit(
+            removed,
+            mir::Rvalue::Call(
+                mir::Operand::Func(mir::map_fn_name(k, v, "remove")),
+                vec![map_ptr, mir::Operand::var(key)],
+            ),
+        );
+        self.set_term(mir::Terminator::Goto(head));
+        self.current = exit;
+        Ok(mir::Operand::Unit)
+    }
+
     fn lower_map_method(
         &mut self,
         recv: &Expr,
@@ -5631,6 +5720,9 @@ impl Lower {
                 None => return Ok(None),
             },
         };
+        if method == "retain" && args.len() == 1 {
+            return self.lower_map_retain(&mname, &k, &v, is_ptr, &args[0]).map(Some);
+        }
         let (helper, ret_ty) = match (method, args.len()) {
             // A set's `insert(x)` and `contains(&x)` are the map's with the value `true`.
             ("insert", 1) => ("insert", format!("Option<{v}>")),

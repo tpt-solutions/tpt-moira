@@ -4063,3 +4063,44 @@ fn iterator_take_while_and_skip_while_run() {
     };
     assert_eq!(out, "123 ab4 2 3");
 }
+
+/// `HashMap::retain` removes the entries whose predicate fails, with the predicate's `&mut V`
+/// writes kept; the entry moved into a freed slot is tested too.
+#[test]
+fn map_retain_removes_failing_entries_and_keeps_writes() {
+    let out = match run_src(
+        r#"use std::collections::HashMap;
+        fn main() {
+            let mut h: HashMap<i64, i64> = HashMap::new();
+            for i in 0..10 { h.insert(i, i * 10); }
+            h.retain(|k, v| { *v = *v + 1; *k % 3 == 0 });
+            let mut s: i64 = 0;
+            let mut n: i64 = 0;
+            for (k, v) in h.iter() { s = s + *k + *v; n = n + 1; }
+            print_i64(n);
+            print_i64(s);
+        }"#,
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "4\n202");
+}
+
+/// A `std::collections::HashMap::new()` written with its module path, inside a call argument
+/// and inside a macro's arguments.
+#[test]
+fn qualified_std_constructor_paths_run() {
+    let out = match run_src(
+        r#"use std::collections::HashMap;
+        fn size(m: &HashMap<String, i64>) -> usize { m.len() }
+        fn main() {
+            let n = size(&std::collections::HashMap::new());
+            println!("{} {}", n, size(&std::collections::HashMap::new()));
+        }"#,
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "0 0");
+}

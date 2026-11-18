@@ -13,12 +13,69 @@
 //! rewritten; the crates Moira compiles do not use one.
 
 use crate::ast::*;
-use crate::closure_return::visit_block;
+use crate::token::{Token, TokenKind};
+use crate::closure_return::{visit_block, visit_item_exprs};
 
 /// Resolve the std `Path` name of every file in `prog` (see the module docs).
 pub fn resolve_std_paths(prog: Program) -> Program {
-    Program {
+    let mut prog = Program {
         items: resolve_scope(prog.items),
+    };
+    for item in &mut prog.items {
+        visit_item_exprs(item, &mut |e: &mut Expr| shorten_std_path(e));
+    }
+    prog
+}
+
+/// The std collection and wrapper types whose associated functions are written with their
+/// module path in some sources (`std::collections::HashMap::new()`).
+const STD_TYPES: &[&str] = &[
+    "HashMap", "HashSet", "BTreeMap", "BTreeSet", "Vec", "String", "Box", "Option", "Result",
+];
+
+/// `std::collections::HashMap::new` names the same function as `HashMap::new`: the expression
+/// path keeps its last two segments when the second-to-last is one of the std types above.
+fn shorten_std_path(e: &mut Expr) {
+    match &mut e.kind {
+        ExprKind::Path(p) => shorten_path(p),
+        // Macro arguments are token streams: `std::collections::HashMap::new` inside them is
+        // shortened the same way (see `shorten_tokens`).
+        ExprKind::Macro(m) => shorten_tokens(&mut m.tokens),
+        // A call's callee is a path too (the visitor does not reach it on its own).
+        ExprKind::Call(callee, _) => {
+            if let ExprKind::Path(p) = &mut callee.kind {
+                shorten_path(p);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// In a macro's tokens, `std :: MODULE :: TYPE` with TYPE one of the std types drops the
+/// `std :: MODULE ::` prefix, as `shorten_path` does for an expression path.
+fn shorten_tokens(tokens: &mut Vec<Token>) {
+    let mut out: Vec<Token> = Vec::with_capacity(tokens.len());
+    let mut i = 0;
+    while i < tokens.len() {
+        let is_std = matches!(&tokens[i].kind, TokenKind::Ident(s) if s == "std")
+            && i + 4 < tokens.len()
+            && matches!(tokens[i + 1].kind, TokenKind::ColonColon)
+            && matches!(tokens[i + 3].kind, TokenKind::ColonColon)
+            && matches!(&tokens[i + 4].kind, TokenKind::Ident(t) if STD_TYPES.contains(&t.as_str()));
+        if is_std && matches!(tokens[i + 2].kind, TokenKind::Ident(_)) {
+            i += 4;
+            continue;
+        }
+        out.push(tokens[i].clone());
+        i += 1;
+    }
+    *tokens = out;
+}
+
+fn shorten_path(p: &mut Path) {
+    let n = p.segments.len();
+    if n > 2 && p.segments[0].node == "std" && STD_TYPES.contains(&p.segments[n - 2].node.as_str()) {
+        p.segments = p.segments[n - 2..].to_vec();
     }
 }
 
