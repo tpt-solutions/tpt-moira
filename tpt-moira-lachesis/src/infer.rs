@@ -1624,12 +1624,19 @@ impl TypeChecker {
         let mut result_ty = Ty::Unknown;
         let mut first = true;
         for (pat, body) in arms {
+            let (pat, guard) = pat.split_guard();
             if let Err(msg) = self.check_pattern(pat) {
                 self.err(span, msg);
             }
-            // Bind pattern names into a fresh arm scope.
+            // Bind pattern names into a fresh arm scope; the guard sees them.
             self.env.push(HashMap::new());
             self.bind_pattern(pat, &_scrut_ty);
+            if let Some(g) = guard {
+                let gt = self.infer_expr(g);
+                if !matches!(gt, Ty::Bool | Ty::Unknown) {
+                    self.err(g.span, format!("match guard must be a bool, found {gt}"));
+                }
+            }
             let arm_ty = self.infer_expr(body);
             self.env.pop();
             // A diverging arm (`return` / `?` / `break` / `loop` / `continue`,
@@ -1681,6 +1688,7 @@ impl TypeChecker {
             | Pat::Path(_)
             | Pat::Ref(_)
             | Pat::RefIdent(_) => Ok(()),
+            Pat::Guard(p, _) => self.check_pattern(p),
             Pat::Or(a, b) => {
                 self.check_pattern(a)?;
                 self.check_pattern(b)
@@ -1710,6 +1718,7 @@ impl TypeChecker {
     /// / literal / ref patterns (which do not introduce usable bindings).
     fn bind_pattern(&mut self, pat: &Pat, scrut_ty: &Ty) {
         match pat {
+            Pat::Guard(p, _) => self.bind_pattern(p, scrut_ty),
             Pat::Ident(n) => {
                 // A bare unit-variant name (`Unknown =>` after `use Ty::*;`) tests
                 // the variant rather than binding (the codegen does the same).
@@ -7018,6 +7027,7 @@ fn bind_pat_names(pat: &Pat, bound: &mut HashSet<String>) {
             }
         }
         Pat::Ref(p) | Pat::RefIdent(p) => bind_pat_names(p, bound),
+        Pat::Guard(p, _) => bind_pat_names(p, bound),
         Pat::Or(a, b) => {
             bind_pat_names(a, bound);
             bind_pat_names(b, bound);
@@ -7153,6 +7163,9 @@ fn collect_free_vars(
             for (p, e) in arms {
                 let mut b2 = bound.clone();
                 bind_pat_names(p, &mut b2);
+                if let Some(g) = p.split_guard().1 {
+                    collect_free_vars(g, &b2, out, seen);
+                }
                 collect_free_vars(e, &b2, out, seen);
             }
         }

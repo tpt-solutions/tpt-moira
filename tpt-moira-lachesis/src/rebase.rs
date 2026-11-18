@@ -161,6 +161,10 @@ impl Rebase {
                 }
             }
             Pat::Ref(q) | Pat::RefIdent(q) | Pat::Bind(_, q) => self.pat(q),
+            Pat::Guard(q, g) => {
+                self.pat(q);
+                self.expr(g);
+            }
             Pat::Or(a, b) => {
                 self.pat(a);
                 self.pat(b);

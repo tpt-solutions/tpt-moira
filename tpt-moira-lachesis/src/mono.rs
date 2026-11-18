@@ -1132,7 +1132,10 @@ impl Mono {
             }
             ExprKind::Match(scrut, arms) => {
                 self.expr(scrut, sub);
-                for (_, body) in arms {
+                for (p, body) in arms {
+                    if let Some(g) = p.guard_mut() {
+                        self.expr(g, sub);
+                    }
                     self.expr(body, sub);
                 }
             }
@@ -1365,7 +1368,10 @@ pub fn referenced_names(e: &Expr, out: &mut Vec<String>) {
         }
         ExprKind::Match(scrut, arms) => {
             referenced_names(scrut, out);
-            for (_, body) in arms {
+            for (p, body) in arms {
+                if let Some(g) = p.split_guard().1 {
+                    referenced_names(g, out);
+                }
                 referenced_names(body, out);
             }
         }

@@ -4964,3 +4964,281 @@ fn format_named_placeholders_interpolate_variables() {
     };
     assert_eq!(out, "__cl_ab_3_7 {lit} ab");
 }
+
+/// A named argument (`name = expr`) binds the placeholder `{name}`, not the variable of that name;
+/// an inline placeholder inside a closure captures the variable it names.
+#[test]
+fn format_named_arguments_bind_by_name_and_inline_captures_in_closures() {
+    let out = match run_src(
+        r#"fn main() {
+            let v: i64 = 1;
+            let s = format!("[{v}]", v = 42);
+            let k: i64 = 5;
+            let f = |n: i64| format!("__inl_{n}_{k}");
+            println!("{} {}", s, f(9));
+        }"#,
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "[42] __inl_9_5");
+}
+
+/// A match guard is part of the arm: a false guard falls through to the next arm, for a bound
+/// name and for a variant payload. (The guard used to be parsed and dropped.)
+#[test]
+fn match_guards_gate_the_arm_and_fall_through() {
+    let out = match run_src(
+        r#"fn main() {
+            let x: i64 = 5;
+            match x {
+                n if n > 10 => println!("big"),
+                _ => println!("small"),
+            }
+            let o: Option<i64> = Some(3);
+            match o {
+                Some(v) if v > 10 => println!("some big"),
+                Some(_) => println!("some small"),
+                None => println!("none"),
+            }
+        }"#,
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "small\nsome small");
+}
+
+/// `matches!` takes a guard too, and a parenthesised or-pattern in `let ... else` binds its
+/// names with their types.
+#[test]
+fn matches_guard_and_parenthesised_or_pattern_in_let_else() {
+    let out = match run_src(
+        r#"struct Path { segments: Vec<i64> }
+        enum Kind { Path(Path), Other }
+        struct Expr { kind: Kind }
+        enum StmtKind { Expr(Expr), Semi(Expr), Other }
+        struct Stmt { kind: StmtKind }
+        fn first_len(second: &Stmt) -> usize {
+            let (StmtKind::Expr(e) | StmtKind::Semi(e)) = &second.kind else {
+                return 0;
+            };
+            match &e.kind {
+                Kind::Path(p) => p.segments.len(),
+                _ => 99,
+            }
+        }
+        fn main() {
+            let v: Vec<i64> = vec![1, 2, 30];
+            let big = v.iter().filter(|x| matches!(**x, n if n > 10)).count();
+            println!("{}", big);
+            let s = Stmt { kind: StmtKind::Semi(Expr { kind: Kind::Path(Path { segments: vec![4] }) }) };
+            let t = Stmt { kind: StmtKind::Other };
+            println!("{} {}", first_len(&s), first_len(&t));
+        }"#,
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "1\n1 0");
+}
+
+/// A capture used only by a closure nested in a `matches!` guard is captured under its own name,
+/// and the closure's parameter is not captured.
+#[test]
+fn closure_capture_used_in_matches_guard_keeps_its_name() {
+    let out = match run_src(
+        r#"enum Kind { Ident(String), Other }
+        struct Tok { kind: Kind }
+        fn each(ts: &Vec<Tok>, f: &mut impl FnMut(&Tok)) {
+            let mut i = 0usize;
+            while i < ts.len() {
+                f(&ts[i]);
+                i += 1;
+            }
+        }
+        fn count(toks: &Vec<Tok>, name: &str) -> usize {
+            let mut c = 0usize;
+            each(toks, &mut |t: &Tok| {
+                if matches!(&t.kind, Kind::Ident(s) if s == name) {
+                    c += 1;
+                }
+            });
+            c
+        }
+        fn main() {
+            let toks = vec![Tok { kind: Kind::Ident(String::from("go")) }, Tok { kind: Kind::Other }];
+            println!("{}", count(&toks, "go"));
+        }"#,
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "1");
+}
+
+/// A closure's capture that has the same name as a parameter of the function it is passed to
+/// (`ts` here) is passed under its own name, and the callee keeps its parameter.
+#[test]
+fn closure_capture_named_like_callee_parameter_runs() {
+    let out = match run_src(
+        r#"enum Kind { Ident(String), Other }
+        struct Tok { kind: Kind }
+        fn each(ts: &Vec<Tok>, f: &mut impl FnMut(&Tok)) {
+            let mut i = 0usize;
+            while i < ts.len() {
+                f(&ts[i]);
+                i += 1;
+            }
+        }
+        fn count(ts: &Vec<Tok>, name: &str) -> usize {
+            let mut c = 0usize;
+            each(ts, &mut |t: &Tok| {
+                if matches!(&t.kind, Kind::Ident(s) if s == name) {
+                    c += ts.len();
+                }
+            });
+            c
+        }
+        fn main() {
+            let toks = vec![Tok { kind: Kind::Ident(String::from("go")) }, Tok { kind: Kind::Other }];
+            println!("{}", count(&toks, "go"));
+        }"#,
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "2");
+}
+
+/// A closure taking `&T` for a struct `T`, called from a `for t in ts` loop over a `&Vec<T>`: the
+/// loop's item is a value, and the inlined closure binds it as the reference it takes.
+#[test]
+fn closure_over_for_loop_of_struct_refs_runs() {
+    let out = match run_src(
+        r#"struct Tok { n: i64 }
+        fn each(ts: &Vec<Tok>, f: &mut impl FnMut(&Tok)) {
+            for t in ts {
+                f(t);
+            }
+        }
+        fn main() {
+            let v = vec![Tok { n: 1 }, Tok { n: 2 }];
+            let mut s = 0;
+            each(&v, &mut |t: &Tok| { s += t.n; });
+            println!("{}", s);
+        }"#,
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "3");
+}
+
+/// A named format argument inside a closure that the compiler inlines is a placeholder's value,
+/// not a capture: `bs` names the placeholder, so it is not a variable the closure takes.
+#[test]
+fn named_format_argument_in_map_closure_is_not_a_capture() {
+    let out = match run_src(
+        r#"fn main() {
+            let binds: Vec<String> = vec![String::from("a"), String::from("b")];
+            let out: Vec<String> = (0..2)
+                .map(|i| format!("[{bs}] {i}", bs = binds.join(", "), i = i))
+                .collect();
+            println!("{}", out[1]);
+        }"#,
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "[a, b] 1");
+}
+
+/// A name bound to a struct field inside a struct pattern (`Token { kind: tok, .. }`) has the
+/// field's type, so an assignment of it to a variable of that type is well-formed C.
+#[test]
+fn struct_pattern_field_binding_keeps_the_field_type() {
+    let out = match run_src(
+        r#"#[derive(Clone, Copy)]
+        enum Kind { Star, Other(i64) }
+        struct Token { kind: Kind, span: i64 }
+        fn pick(tts: &Vec<Token>, next: usize) -> (i64, Option<Kind>) {
+            let mut sep = None;
+            let mut kind = 0;
+            match tts.get(next) {
+                Some(Token { kind: Kind::Star, .. }) => {
+                    kind = 1;
+                }
+                Some(Token { kind: tok, .. }) => {
+                    sep = Some(tok.clone());
+                    kind = 2;
+                }
+                None => {}
+            }
+            (kind, sep)
+        }
+        fn main() {
+            let v = vec![Token { kind: Kind::Other(7), span: 1 }];
+            let (k, s) = pick(&v, 0);
+            let x = match s { Some(Kind::Other(n)) => n, _ => 0 };
+            println!("{} {}", k, x);
+        }"#,
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "2 7");
+}
+
+/// A `Box<S>` local (from `Box::new`, or a call of a function declared `-> Box<S>`) is a pointer
+/// to the struct; a field read through `&Box<S>` goes through both pointers; `clone` of a box is a
+/// new box inside an enum payload.
+#[test]
+fn box_of_struct_locals_fields_and_clone_run() {
+    let out = match run_src(
+        r#"#[derive(Clone)]
+        struct E { n: i64 }
+        #[derive(Clone)]
+        enum K { Wrap(Box<E>, bool), Other }
+        fn dup_box(b: &Box<E>) -> Box<E> {
+            b.clone()
+        }
+        fn wrap(b: &Box<E>) -> K {
+            K::Wrap(b.clone(), false)
+        }
+        fn main() {
+            let b = Box::new(E { n: 4 });
+            let c = dup_box(&b);
+            let k = wrap(&b);
+            let n = match k { K::Wrap(x, _) => x.n, K::Other => 0 };
+            println!("{} {}", c.n, n);
+        }"#,
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "4 4");
+}
+
+/// `*s = v` through a `&mut String` parameter replaces the whole string (it was lowered as a
+/// byte store), and a reference to a tuple's field (`&p.1`) addresses that field.
+#[test]
+fn deref_assign_through_mut_string_and_tuple_field_address_run() {
+    let out = match run_src(
+        r#"fn set(name: &mut String, v: &str) {
+            *name = String::from(v);
+        }
+        fn main() {
+            let mut s = String::from("a");
+            set(&mut s, "bc");
+            let mut t: (i64, i64) = (1, 2);
+            let r = &mut t.1;
+            *r += 5;
+            println!("{} {}", s, t.1);
+        }"#,
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "bc 7");
+}
