@@ -207,6 +207,31 @@ fn return_ty_or_init(ann: &Ty, init: &Ty) -> Ty {
     }
 }
 
+/// The checker's type for a std handle that the subset models as a plain value: a file or a
+/// command is its path or command line (a string), a stdin reader is a string placeholder,
+/// a hasher is its `u64` state, and an exit status is its code.
+fn std_handle(name: &str) -> Ty {
+    match name {
+        "File" | "Command" | "Stdin" | "Cow" => Ty::Str,
+        "DefaultHasher" => Ty::U64,
+        "ExitStatus" => Ty::I64,
+        other => Ty::Struct(other.to_string()),
+    }
+}
+
+/// Whether a type still holds an unsuffixed integer that defaulted to `i32` (an expectation
+/// may give it a wider integer type).
+fn has_defaulted_int(t: &Ty) -> bool {
+    match t {
+        Ty::Int => true,
+        Ty::Apply(_, args) | Ty::Tuple(args) => args.iter().any(has_defaulted_int),
+        Ty::Ref(inner) | Ty::RefMut(inner) | Ty::Array(inner, _) | Ty::Future(inner) => {
+            has_defaulted_int(inner)
+        }
+        _ => false,
+    }
+}
+
 fn has_unknown(t: &Ty) -> bool {
     match t {
         Ty::Unknown => true,
@@ -290,6 +315,14 @@ fn generalize_params(t: &Ty, names: &[String]) -> Ty {
 
 fn hint_compound(ty: &Ty) -> Option<String> {
     match ty {
+        // An iterator is named by its item (a reference to an item is the item's value here).
+        Ty::Apply(name, args) if name == "Iter" && args.len() == 1 => {
+            let mut item = &args[0];
+            while let Ty::Ref(inner) | Ty::RefMut(inner) = item {
+                item = inner;
+            }
+            hint_elem_name(item).map(|e| format!("Iter<{e}>"))
+        }
         Ty::Apply(name, args) if name == "Option" && args.len() == 1 => {
             // A payload that is a reference to a struct is a pointer to the element
             // (`Option<&T>` from `seq.get(i)`), so the payload keeps its `*`.
@@ -399,6 +432,12 @@ fn hint_compound(ty: &Ty) -> Option<String> {
 }
 
 fn hint_elem_name(ty: &Ty) -> Option<String> {
+    // A reference to a reference names what the inner reference names (`&&String` is a string).
+    if let Ty::Ref(inner) | Ty::RefMut(inner) = ty {
+        if matches!(**inner, Ty::Ref(_) | Ty::RefMut(_)) {
+            return hint_elem_name(inner);
+        }
+    }
     if let Some(h) = hint_compound(ty) {
         return Some(h);
     }
@@ -449,6 +488,11 @@ fn hint_elem_name(ty: &Ty) -> Option<String> {
 /// those are the types whose lowering changes (printing, element access,
 /// iteration); other scalars keep the backend's default.
 pub fn hint_of_ty(ty: &Ty) -> Option<String> {
+    if let Ty::Ref(inner) | Ty::RefMut(inner) = ty {
+        if matches!(**inner, Ty::Ref(_) | Ty::RefMut(_)) {
+            return hint_of_ty(inner);
+        }
+    }
     if let Some(h) = hint_compound(ty) {
         return Some(h);
     }
@@ -738,7 +782,7 @@ impl TypeChecker {
         let mut hints: HashMap<(usize, usize), String> = cx
             .expr_types
             .iter()
-            .filter_map(|(span, ty)| hint_of_ty(ty).map(|h| (*span, h)))
+            .filter_map(|(span, ty)| hint_of_ty(&ty).map(|h| (span.clone(), h)))
             .collect();
         // A hint that names a generic struct bare (its type arguments were not solved)
         // would name a C type that is never instantiated: drop it, so the backend uses
@@ -755,8 +799,12 @@ impl TypeChecker {
             .collect();
         if !generic.is_empty() {
             hints.retain(|_, h| {
-                !h.split(|c: char| !(c.is_alphanumeric() || c == '_'))
-                    .any(|tok| generic.contains(&tok))
+                // The identifier tokens of a type name: every other character separates them.
+                let spaced: String = h
+                    .chars()
+                    .map(|c| if c.is_alphanumeric() || c == '_' { c } else { ' ' })
+                    .collect();
+                !spaced.split(' ').any(|tok| generic.contains(&tok))
             });
         }
         // A closure parameter of reference-to-struct type is a pointer to the struct.
@@ -1427,6 +1475,10 @@ impl TypeChecker {
                             let span = init.span;
                             self.expect(&it, &ann_ty, span);
                             self.refine_closure_result(init, &ann_ty);
+                            // `let x: Vec<T> = w;` fixes the element type of an open `w = Vec::new()`.
+                            self.resolve_pending_vec_value(init, &ann_ty);
+                            // A `match` or `if` initializer takes the annotation in each branch.
+                            self.push_expect(init, &ann_ty);
                             // A partly written annotation (`Vec<_>`) takes the parts the
                             // initializer determined.
                             if has_unknown(&ann_ty) && !has_unknown(&it) {
@@ -1521,6 +1573,9 @@ impl TypeChecker {
                 }
                 let ty = self.infer_expr(t);
                 self.expected_call_ty = None;
+                if let Some(e) = &tail_expected {
+                    self.push_expect(t, e);
+                }
                 ty
             }
             None => {
@@ -1929,6 +1984,163 @@ impl TypeChecker {
     /// `or_else` or `and_then` takes the type the annotation of the whole call gives it: in
     /// `let e: Result<i64, i64> = b.ok_or_else(|| 4)` the literal is an `i64`, not the default
     /// `i32`. Only a closure body the checker typed as the default integer is refined.
+    /// Definitive signatures for the std handles the subset models as values (see
+    /// [`std_handle`]). They come last, so they replace the looser entries above.
+    fn register_std_handles(&mut self) {
+        use Ty::*;
+        self.assoc_fns.insert(
+            ("fs".into(), "create_dir_all".into()),
+            sig(vec![Unknown], Apply("Result".into(), vec![I64, Str])),
+        );
+        self.assoc_fns.insert(
+            ("fs".into(), "read".into()),
+            sig(
+                vec![Unknown],
+                Apply("Result".into(), vec![Apply("Vec".into(), vec![U8]), Str]),
+            ),
+        );
+        for owner in ["fs", "File"] {
+            self.assoc_fns.insert(
+                (owner.into(), "create".into()),
+                sig(vec![Unknown], Apply("Result".into(), vec![Str, Str])),
+            );
+        }
+        self.assoc_fns.insert(
+            ("File".into(), "open".into()),
+            sig(vec![Unknown], Apply("Result".into(), vec![Str, Str])),
+        );
+        self.assoc_fns
+            .insert(("io".into(), "stdin".into()), sig(vec![], Str));
+        self.assoc_fns
+            .insert(("Command".into(), "new".into()), sig(vec![Unknown], Str));
+        self.assoc_fns
+            .insert(("DefaultHasher".into(), "new".into()), sig(vec![], U64));
+        self.methods
+            .insert(("str".into(), "write_all".into()), sig(vec![Unknown], Apply("Result".into(), vec![I64, Str])));
+        self.methods
+            .insert(("str".into(), "read_to_string".into()), sig(vec![Unknown], Apply("Result".into(), vec![I64, Str])));
+        self.methods
+            .insert(("str".into(), "arg".into()), sig(vec![Unknown], Str));
+        self.methods
+            .insert(("str".into(), "output".into()), sig(vec![], Apply("Result".into(), vec![Str, Str])));
+        self.methods
+            .insert(("str".into(), "status".into()), sig(vec![], Apply("Result".into(), vec![I64, Str])));
+        // A command's builder methods return the command; `spawn` and `wait_with_output` run it.
+        for m in ["args", "stdin", "stdout", "stderr"] {
+            self.methods
+                .insert(("str".into(), m.into()), sig(vec![Unknown], Str));
+        }
+        self.methods.insert(
+            ("str".into(), "spawn".into()),
+            sig(vec![], Apply("Result".into(), vec![Str, Str])),
+        );
+        self.methods.insert(
+            ("str".into(), "wait_with_output".into()),
+            sig(vec![], Apply("Result".into(), vec![Str, Str])),
+        );
+        self.methods
+            .insert(("u64".into(), "finish".into()), sig(vec![], U64));
+        self.methods
+            .insert(("i64".into(), "success".into()), sig(vec![], Bool));
+    }
+
+    /// Pushes an expected type into the parts of an expression whose type the checker could
+    /// not infer on its own: the payload of `Ok`/`Some`/`Err`, the elements of a tuple, and an
+    /// open `Vec::new()` / `HashMap::new()` / `HashSet::new()` call (which takes its element
+    /// types from the expectation).
+    fn push_expect(&mut self, e: &Expr, expected: &Ty) {
+        // The expression itself takes the expected type when its own type is still open.
+        let key = (e.span.start, e.span.end);
+        let open = self
+            .expr_types
+            .get(&key)
+            .is_none_or(|t| has_unknown(t) || has_defaulted_int(t));
+        // An unsuffixed integer literal takes the integer type it is expected to have.
+        let int_literal = matches!(e.kind, ExprKind::Lit(Lit::Int(_, None)))
+            && matches!(
+                expected,
+                Ty::I8 | Ty::I16 | Ty::I32 | Ty::I64 | Ty::I128 | Ty::Isize
+                    | Ty::U8 | Ty::U16 | Ty::U32 | Ty::U64 | Ty::U128 | Ty::Usize
+            );
+        if int_literal {
+            self.expr_types.insert(key, expected.clone());
+        } else if open && !has_unknown(expected) && !matches!(e.kind, ExprKind::Path(_)) {
+            self.expr_types.insert(key, expected.clone());
+        }
+        match (&e.kind, expected) {
+            (ExprKind::Tuple(elems), Ty::Tuple(tys)) if elems.len() == tys.len() => {
+                for (el, t) in elems.iter().zip(tys.iter()) {
+                    self.push_expect(el, t);
+                }
+            }
+            // Each branch of an `if` / `match` yields the expected type.
+            (ExprKind::Block(b), _) => {
+                if let Some(t) = &b.tail {
+                    self.push_expect(t, expected);
+                }
+            }
+            (ExprKind::If(_, then_b, else_e), _) => {
+                if let Some(t) = &then_b.tail {
+                    self.push_expect(t, expected);
+                }
+                if let Some(el) = else_e {
+                    self.push_expect(el, expected);
+                }
+            }
+            (ExprKind::Match(_, arms), _) => {
+                for (_, body) in arms {
+                    self.push_expect(body, expected);
+                }
+            }
+            // A bare `None` takes the option type it is expected to have.
+            (ExprKind::Path(p), Ty::Apply(n, _))
+                if n == "Option"
+                    && p.segments.len() == 1
+                    && p.segments[0].node == "None"
+                    && !has_unknown(expected) =>
+            {
+                self.expr_types
+                    .insert((e.span.start, e.span.end), expected.clone());
+            }
+            (ExprKind::Call(callee, args), _) if args.len() == 1 => {
+                let ExprKind::Path(p) = &callee.kind else {
+                    return;
+                };
+                let Some(last) = p.segments.last() else {
+                    return;
+                };
+                match (last.node.as_str(), expected) {
+                    ("Ok", Ty::Apply(n, a)) if n == "Result" && a.len() == 2 => {
+                        self.push_expect(&args[0], &a[0].clone());
+                    }
+                    ("Err", Ty::Apply(n, a)) if n == "Result" && a.len() == 2 => {
+                        self.push_expect(&args[0], &a[1].clone());
+                    }
+                    ("Some", Ty::Apply(n, a)) if n == "Option" && a.len() == 1 => {
+                        self.push_expect(&args[0], &a[0].clone());
+                    }
+                    _ => {}
+                }
+            }
+            (ExprKind::Call(callee, args), Ty::Apply(n, targs)) if args.is_empty() => {
+                let ExprKind::Path(p) = &callee.kind else {
+                    return;
+                };
+                let names: Vec<&str> = p.segments.iter().map(|s| s.node.as_str()).collect();
+                let k = names.len();
+                let owner = if k >= 2 { names[k - 2] } else { "" };
+                let fname = if k >= 1 { names[k - 1] } else { "" };
+                let open = fname == "new" && matches!(owner, "Vec" | "HashMap" | "HashSet");
+                let same_kind = owner == n.as_str();
+                if open && same_kind && !has_unknown(expected) {
+                    self.expr_types
+                        .insert((e.span.start, e.span.end), expected.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn refine_closure_result(&mut self, init: &Expr, ann: &Ty) {
         let ExprKind::MethodCall(_, method, args) = &init.kind else {
             return;
@@ -2288,6 +2500,9 @@ impl TypeChecker {
                 };
                 let ret = self.ret.clone();
                 self.expect(&t, &ret, span);
+                if let Some(e2) = opt {
+                    self.push_expect(e2, &ret);
+                }
                 // `return` diverges (type `!`); it does not produce a value.
                 Ty::Never
             }
@@ -2875,6 +3090,48 @@ impl TypeChecker {
         self.pending_vec.remove(&name);
     }
 
+    /// `f(&mut s)` where `f` takes `&mut HashSet<K>` / `&mut HashMap<K, V>` fixes the element or
+    /// key and value types of an open `s = HashSet::new()` (or `HashMap::new()`).
+    fn resolve_pending_coll_arg(&mut self, arg: &Expr, param: &Ty) {
+        let ExprKind::Ref(inner, _) = &arg.kind else {
+            return;
+        };
+        let ExprKind::Path(p) = &inner.kind else {
+            return;
+        };
+        if p.segments.len() != 1 {
+            return;
+        }
+        let name = p.segments[0].node.clone();
+        let inner_param = match param {
+            Ty::Ref(t) | Ty::RefMut(t) => &**t,
+            other => other,
+        };
+        let Ty::Apply(ctor, targs) = inner_param else {
+            return;
+        };
+        if targs.is_empty() || targs.iter().any(|t| has_unknown(t) || has_generic(t)) {
+            return;
+        }
+        let Some((init_span, pending_ctor)) = self.pending_coll.get(&name).cloned() else {
+            return;
+        };
+        if &pending_ctor != ctor {
+            return;
+        }
+        let new_ty = Ty::Apply(ctor.clone(), targs.clone());
+        for scope in self.env.iter_mut().rev() {
+            if let Some(slot) = scope.get_mut(&name) {
+                *slot = new_ty.clone();
+                break;
+            }
+        }
+        self.expr_types
+            .insert((init_span.start, init_span.end), new_ty);
+        self.pending_coll.remove(&name);
+        self.pending_coll_literal.remove(&name);
+    }
+
     fn check_call(&mut self, span: Span, callee: &Expr, args: &[Expr]) -> Ty {
         // The expected type is for this call only; nested calls must not see it.
         let expected = self.expected_call_ty.take();
@@ -2983,6 +3240,14 @@ impl TypeChecker {
             let t = self.infer_expr(&args[0]);
             return Ty::Apply("Box".to_string(), vec![t]);
         }
+        // `Arc::new(x)` / `Rc::new(x)` is `x` (see `type_to_ty`).
+        if segments.len() >= 2
+            && matches!(segments[segments.len() - 2].as_str(), "Arc" | "Rc")
+            && name == "new"
+            && args.len() == 1
+        {
+            return self.infer_expr(&args[0]);
+        }
         // A local binding (a closure, or a parameter of a function type) shadows a function of the
         // same name (Rust's scoping): the call goes through the local.
         let local_fn = segments.len() == 1 && self.lookup(&name).is_some();
@@ -3077,6 +3342,7 @@ impl TypeChecker {
                     self.expected_call_ty = Some(target);
                 }
                 self.resolve_pending_vec_arg(a, pt);
+                self.resolve_pending_coll_arg(a, pt);
                 let at = self.infer_expr(a);
                 let at = Self::coerce_box_ref(pt, &at).unwrap_or(at);
                 self.expected_call_ty = None;
@@ -3241,6 +3507,7 @@ impl TypeChecker {
         } else {
             for (a, pt) in args.iter().zip(sig.params.iter()) {
                 self.resolve_pending_vec_arg(a, pt);
+                self.resolve_pending_coll_arg(a, pt);
                 if let Some(target) = Self::ref_call_expectation(a, pt) {
                     self.expected_call_ty = Some(target);
                 }
@@ -3300,7 +3567,7 @@ impl TypeChecker {
                         Some((_, ft)) => {
                             // A generic struct's field is typed with the instance's arguments.
                             let args: &[Ty] = match &bt {
-                                Ty::Apply(_, a) => a.as_slice(),
+                                Ty::Apply(_, a) => &a[..],
                                 _ => &[],
                             };
                             let mut map: HashMap<String, Ty> = HashMap::new();
@@ -3334,6 +3601,11 @@ impl TypeChecker {
                 // An `Unknown` base means an earlier error already fired;
                 // absorb the field access instead of cascading diagnostics.
                 if matches!(bt, Ty::Unknown) {
+                    return Ty::Unknown;
+                }
+                // A command is modelled as its string, so its process streams and exit status
+                // (`child.stdin`, `output.status`) are opaque here.
+                if matches!(bt, Ty::Str) && matches!(field.node.as_str(), "stdin" | "stdout" | "stderr" | "status") {
                     return Ty::Unknown;
                 }
                 self.err(span, format!("type {} has no fields", bt));
@@ -3514,7 +3786,7 @@ impl TypeChecker {
                 _ => seg.clone(),
             })
             .collect();
-        let segments = resolved.as_slice();
+        let segments = &resolved[..];
         match segments.len() {
             1 => {
                 // A local bound to a closure (`let f = |x| ...; f(2)`) is callable with
@@ -3631,6 +3903,75 @@ impl TypeChecker {
         method: &tpt_moira_clotho::ast::Spanned<String>,
         args: &[Expr],
     ) -> Ty {
+        // `v.append(&mut w)` on an open `v = Vec::new()`: `w`'s element type is `v`'s.
+        if method.node == "append" && args.len() == 1 {
+            let at = self.infer_expr(&args[0]);
+            let vt = match self.strip_refs(&at) {
+                t @ Ty::Apply(..) => t,
+                _ => Ty::Unknown,
+            };
+            self.resolve_pending_vec_value(recv, &vt);
+        }
+        // `set.drain()` on a `HashSet<K>`: an iterator of its elements by value.
+        if method.node == "drain" && args.is_empty() {
+            let recv_ty = self.infer_expr(recv);
+            if let Ty::Apply(n, a) = self.strip_refs(&recv_ty) {
+                if n == "HashSet" && a.len() == 1 {
+                    return Ty::Apply("Iter".to_string(), vec![a[0].clone()]);
+                }
+            }
+        }
+        // `m.retain(|k, v| ..)` on a map: the closure takes the key and the value by reference.
+        if method.node == "retain" && args.len() == 1 {
+            let recv_ty = self.infer_expr(recv);
+            if let Ty::Apply(n, a) = self.strip_refs(&recv_ty) {
+                if (n == "HashMap" || n == "BTreeMap") && a.len() == 2 {
+                    let (k, v) = (a[0].clone(), a[1].clone());
+                    self.closure_expected = Some(vec![Ty::Ref(Box::new(k)), Ty::RefMut(Box::new(v))]);
+                    self.infer_expr(&args[0]);
+                    self.closure_expected = None;
+                    return Ty::Unit;
+                }
+            }
+        }
+        // `v.sort_by_key(|x| ..)` / `v.retain(|x| ..)`: the closure takes a reference to an element.
+        if matches!(method.node.as_str(), "sort_by_key" | "retain") && args.len() == 1 {
+            let recv_ty = self.infer_expr(recv);
+            if let Ty::Apply(n, a) = self.strip_refs(&recv_ty) {
+                if n == "Vec" && a.len() == 1 {
+                    let elem = a[0].clone();
+                    self.closure_result(&args[0], &Ty::Ref(Box::new(elem)));
+                    return Ty::Unit;
+                }
+            }
+        }
+        // `x.hash(&mut h)`: mixes `x` into the hasher `h` (a unit result).
+        if method.node == "hash" && args.len() == 1 {
+            self.infer_expr(recv);
+            self.infer_expr(&args[0]);
+            return Ty::Unit;
+        }
+        // `b.then(|| x)` on a bool: `Some(x)` when `b` holds, else `None`.
+        if method.node == "then" && args.len() == 1 {
+            let recv_ty = self.infer_expr(recv);
+            if matches!(recv_ty, Ty::Bool) {
+                let ret = match self.infer_expr(&args[0]) {
+                    Ty::Fn(_, ret) => *ret,
+                    _ => Ty::Unknown,
+                };
+                return Ty::Apply("Option".to_string(), vec![ret]);
+            }
+        }
+        // `s.parse::<T>()` (the parser names it `parse::<T>`): a `Result<T, str>`.
+        if let Some(target) = method
+            .node
+            .strip_prefix("parse::<")
+            .and_then(|t| t.strip_suffix('>'))
+        {
+            self.infer_expr(recv);
+            let ok = prim(target).unwrap_or(Ty::Unknown);
+            return Ty::Apply("Result".to_string(), vec![ok, Ty::Str]);
+        }
         // `collect()` takes the target a `let` annotation gives (`Vec<_>`); its element type is the
         // iterator's item.
         let collect_target = if method.node == "collect" && args.is_empty() {
@@ -3887,6 +4228,19 @@ impl TypeChecker {
                 );
                 return Ty::Apply("Option".into(), targs.clone());
             }
+            // `Result<T, E>::ok()` is `Option<T>`; `err()` is `Option<E>`.
+            if n == "Result" && targs.len() == 2 && args.is_empty() && method.node == "ok" {
+                return Ty::Apply("Option".into(), vec![targs[0].clone()]);
+            }
+            if n == "Result" && targs.len() == 2 && args.is_empty() && method.node == "err" {
+                return Ty::Apply("Option".into(), vec![targs[1].clone()]);
+            }
+            // `Option<T>::filter(|x| pred)` binds `x` to a reference to the payload and keeps the option.
+            if n == "Option" && targs.len() == 1 && args.len() == 1 && method.node == "filter" {
+                let payload = targs[0].clone();
+                self.closure_result(&args[0], &payload);
+                return Ty::Apply("Option".into(), targs.clone());
+            }
             // `Option<T>::map(|x| body)` binds `x` to the payload and is `Option<body>`.
             if n == "Option" && targs.len() == 1 && args.len() == 1 && method.node == "map" {
                 let payload = targs[0].clone();
@@ -3941,20 +4295,22 @@ impl TypeChecker {
         }
         // `set.intersection(&other)` / `set.union(&other)`: an iterator of the keys, by reference.
         if let Ty::Apply(n, targs) = self.strip_refs(&recv_ty) {
-            if n == "HashSet" && targs.len() == 1 && args.len() == 1 {
-                if matches!(method.node.as_str(), "intersection" | "union") {
-                    let other = self.infer_expr(&args[0]);
-                    let elem = targs[0].clone();
-                    let expected = self.strip_refs(&other);
-                    if !matches!(expected, Ty::Unknown) {
-                        self.expect(
-                            &expected,
-                            &Ty::Apply("HashSet".into(), vec![elem.clone()]),
-                            args[0].span,
-                        );
-                    }
-                    return Ty::Apply("Iter".into(), vec![Ty::Ref(Box::new(elem))]);
+            if n == "HashSet"
+                && targs.len() == 1
+                && args.len() == 1
+                && matches!(method.node.as_str(), "intersection" | "union")
+            {
+                let other = self.infer_expr(&args[0]);
+                let elem = targs[0].clone();
+                let expected = self.strip_refs(&other);
+                if !matches!(expected, Ty::Unknown) {
+                    self.expect(
+                        &expected,
+                        &Ty::Apply("HashSet".into(), vec![elem.clone()]),
+                        args[0].span,
+                    );
                 }
+                return Ty::Apply("Iter".into(), vec![Ty::Ref(Box::new(elem))]);
             }
         }
         // A `HashMap<K, V>` method gives its value type: `get` and `insert` are `Option<V>`.
@@ -4071,48 +4427,7 @@ impl TypeChecker {
         };
         let sig: FnSig = match sig {
             Some(s) => s,
-            None => {
-                // 3) Trait-bound method resolution through the Chalk-like
-                //    solver: the receiver may be a generic parameter bounded
-                //    by a user trait (`T: Show`) or a concrete type an `impl`
-                //    covers (`impl Show for i32`).
-                if let Some(ty) =
-                    self.resolve_trait_method(span, &recv_ty, &method.node.clone(), args)
-                {
-                    return ty;
-                }
-                // Every value has `clone` and `to_string` (Clone, Display), even when the
-                // prelude does not list them for its type.
-                if args.is_empty() && method.node == "to_string" {
-                    return Ty::Str;
-                }
-                if args.is_empty() && method.node == "clone" {
-                    return self.strip_refs(&recv_ty);
-                }
-                // `as_ref` / `borrow` / `deref` view the value through a reference (a box's
-                // contents, a shared pointer's value); `as_mut` through a mutable one.
-                if args.is_empty() && matches!(method.node.as_str(), "as_ref" | "borrow" | "deref")
-                {
-                    return Ty::Ref(Box::new(self.strip_refs(&recv_ty)));
-                }
-                if args.is_empty() && method.node == "as_mut" {
-                    return Ty::RefMut(Box::new(self.strip_refs(&recv_ty)));
-                }
-                // A method on an unknown receiver is unknown too (the absorbing type).
-                if matches!(self.strip_refs(&recv_ty), Ty::Unknown) {
-                    return Ty::Unknown;
-                }
-                // A receiver with no name to report (a generic bound by a std trait such as
-                // `Read`) is not checked here: its methods are unknown.
-                let Some(type_name) = self.type_name(&recv_ty) else {
-                    return Ty::Unknown;
-                };
-                self.err(
-                    span,
-                    format!("no method `{}` on type `{}`", method.node, type_name),
-                );
-                return Ty::Unknown;
-            }
+            None => return self.unresolved_method(span, &recv_ty, method, args),
         };
         if args.len() != sig.params.len() {
             self.err(
@@ -4126,10 +4441,64 @@ impl TypeChecker {
             );
         }
         for (a, pt) in args.iter().zip(sig.params.iter()) {
+            // `m.f(&mut v)` fixes an open `v = Vec::new()` from the parameter, as a call does.
+            self.resolve_pending_vec_arg(a, pt);
+            self.resolve_pending_coll_arg(a, pt);
             let at = self.infer_expr(a);
             self.expect(&at, pt, a.span);
         }
         sig.ret.clone()
+    }
+
+    /// The type of a method call no prelude or user signature matches: the trait-bound
+    /// resolution, the universal methods, or an error.
+    fn unresolved_method(
+        &mut self,
+        span: Span,
+        recv_ty: &Ty,
+        method: &tpt_moira_clotho::ast::Spanned<String>,
+        args: &[Expr],
+    ) -> Ty {
+        // 3) Trait-bound method resolution through the Chalk-like
+        //    solver: the receiver may be a generic parameter bounded
+        //    by a user trait (`T: Show`) or a concrete type an `impl`
+        //    covers (`impl Show for i32`).
+        if let Some(ty) =
+            self.resolve_trait_method(span, &recv_ty, &method.node.clone(), args)
+        {
+            return ty;
+        }
+        // Every value has `clone` and `to_string` (Clone, Display), even when the
+        // prelude does not list them for its type.
+        if args.is_empty() && method.node == "to_string" {
+            return Ty::Str;
+        }
+        if args.is_empty() && method.node == "clone" {
+            return self.strip_refs(&recv_ty);
+        }
+        // `as_ref` / `borrow` / `deref` view the value through a reference (a box's
+        // contents, a shared pointer's value); `as_mut` through a mutable one.
+        if args.is_empty() && matches!(method.node.as_str(), "as_ref" | "borrow" | "deref")
+        {
+            return Ty::Ref(Box::new(self.strip_refs(&recv_ty)));
+        }
+        if args.is_empty() && method.node == "as_mut" {
+            return Ty::RefMut(Box::new(self.strip_refs(&recv_ty)));
+        }
+        // A method on an unknown receiver is unknown too (the absorbing type).
+        if matches!(self.strip_refs(&recv_ty), Ty::Unknown) {
+            return Ty::Unknown;
+        }
+        // A receiver with no name to report (a generic bound by a std trait such as
+        // `Read`) is not checked here: its methods are unknown.
+        let Some(type_name) = self.type_name(&recv_ty) else {
+            return Ty::Unknown;
+        };
+        self.err(
+            span,
+            format!("no method `{}` on type `{}`", method.node, type_name),
+        );
+        Ty::Unknown
     }
 
     /// Trait-bound method resolution backed by the Chalk-like solver.
@@ -4327,6 +4696,9 @@ impl TypeChecker {
         };
         let mut arg_tys: Vec<(Ty, Ty)> = Vec::new();
         for (a, pt) in args.iter().zip(rest.iter()) {
+            // `x.f(&mut v)` fixes an open `v = Vec::new()` from the method's parameter.
+            self.resolve_pending_vec_arg(a, pt);
+            self.resolve_pending_coll_arg(a, pt);
             if let (ExprKind::Closure { .. }, Ty::Fn(ps, _)) = (&a.kind, pt) {
                 self.closure_expected = Some(ps.clone());
             }
@@ -4500,6 +4872,15 @@ impl TypeChecker {
                 return Some(Ty::Apply("Iter".to_string(), vec![item]));
             }
             return None;
+        }
+        // `m.iter()` on a map yields `(&K, &V)` pairs; `into_iter()` yields `(K, V)`.
+        if let Ty::Apply(name, kv) = &recv {
+            if name == "HashMap" && kv.len() == 2 && matches!(method, "iter" | "into_iter") && args.is_empty() {
+                let (k, v) = (kv[0].clone(), kv[1].clone());
+                // The lowering copies each pair out of the map, so the components are values.
+                let pair = Ty::Tuple(vec![deref_item(k), deref_item(v)]);
+                return Some(Ty::Apply("Iter".to_string(), vec![pair]));
+            }
         }
         let item = match &recv {
             Ty::Apply(name, a) if name == "Iter" && a.len() == 1 => a[0].clone(),
@@ -4679,7 +5060,7 @@ impl TypeChecker {
     /// `type_to_ty`).
     fn register_prelude(&mut self) {
         use Ty::*;
-        let std = |name: &str| Struct(name.to_string());
+        let std = |name: &str| std_handle(name);
 
         // Free constructors / functions.
         self.fns
@@ -4718,6 +5099,34 @@ impl TypeChecker {
         );
         self.assoc_fns
             .insert(("Box".into(), "new".into()), sig(vec![Unknown], std("Box")));
+        // `f64::from_bits(u)`: the float with the bit pattern `u`.
+        self.assoc_fns
+            .insert(("f64".into(), "from_bits".into()), sig(vec![U64], F64));
+        // `Instant::now()` (an `f64` clock reading in seconds).
+        self.assoc_fns
+            .insert(("Instant".into(), "now".into()), sig(vec![], F64));
+        // The process environment: `env::var(name)` / `env::var_os(name)` / `env::temp_dir()`.
+        self.assoc_fns
+            .insert(("env".into(), "var".into()), sig(vec![Unknown], Apply("Result".into(), vec![Str, Str])));
+        self.assoc_fns
+            .insert(("env".into(), "var_os".into()), sig(vec![Unknown], Apply("Option".into(), vec![Str])));
+        self.assoc_fns
+            .insert(("env".into(), "temp_dir".into()), sig(vec![], Str));
+        // `usize::from(x)` and the other integer conversions (`From<bool>`, widening).
+        for (t, ty) in [
+            ("i8", I8), ("i16", I16), ("i32", I32), ("i64", I64), ("i128", I128), ("isize", Isize),
+            ("u8", U8), ("u16", U16), ("u32", U32), ("u64", U64), ("u128", U128), ("usize", Usize),
+        ] {
+            self.assoc_fns
+                .insert((t.into(), "from".into()), sig(vec![Unknown], ty));
+        }
+        // `u32::from_str_radix(s, radix)` and the other integer parsers.
+        for (t, ty) in [("u32", U32), ("u64", U64), ("usize", Usize), ("i32", I32), ("i64", I64)] {
+            self.assoc_fns.insert(
+                (t.into(), "from_str_radix".into()),
+                sig(vec![Unknown, Unknown], Apply("Result".into(), vec![ty, Str])),
+            );
+        }
         // Shared pointers and slice views the self-host sources use: their result types are
         // not modeled beyond the value they wrap.
         self.assoc_fns
@@ -4985,11 +5394,11 @@ impl TypeChecker {
         // uses a path's last two segments.
         self.assoc_consts.insert(
             ("ExitCode".into(), "SUCCESS".into()),
-            Struct("ExitCode".to_string()),
+            Ty::Struct("ExitCode".to_string()),
         );
         self.assoc_consts.insert(
             ("ExitCode".into(), "FAILURE".into()),
-            Struct("ExitCode".to_string()),
+            Ty::Struct("ExitCode".to_string()),
         );
         self.assoc_fns.insert(
             ("env".into(), "args".into()),
@@ -5066,16 +5475,8 @@ impl TypeChecker {
             .insert(("fs".into(), "temp_dir".into()), sig(vec![], Str));
         self.assoc_fns
             .insert(("env".into(), "temp_dir".into()), sig(vec![], Str));
-        // The driver's `MOIRA_TIMINGS` phase timer: an environment lookup and a monotonic
-        // clock. Their values are opaque to the checker (`Unknown`, absorbing uses).
-        self.assoc_fns.insert(
-            ("env".into(), "var_os".into()),
-            sig(vec![Ref(Box::new(Str))], Unknown),
-        );
-        self.assoc_fns
-            .insert(("Instant".into(), "now".into()), sig(vec![], Unknown));
-        self.methods
-            .insert(("Instant".into(), "elapsed".into()), sig(vec![], Unknown));
+        // The driver's `MOIRA_TIMINGS` phase timer reads `env::var_os` and `Instant` (the
+        // earlier signatures in this table for those are the typed ones above).
         self.assoc_fns.insert(
             ("env".into(), "current_dir".into()),
             sig(vec![], Apply("Result".to_string(), vec![Str])),
@@ -5277,13 +5678,6 @@ impl TypeChecker {
             ("mem".into(), "take".into()),
             sig(vec![RefMut(Box::new(Unknown))], Unknown),
         );
-        self.assoc_fns.insert(
-            ("env".into(), "var".into()),
-            sig(
-                vec![Ref(Box::new(Str))],
-                Apply("Result".to_string(), vec![Str]),
-            ),
-        );
         self.assoc_fns
             .insert(("process".into(), "id".into()), sig(vec![], Usize));
         self.methods.insert(
@@ -5417,6 +5811,8 @@ impl TypeChecker {
             ("Result", "unwrap_or_default", vec![], Unknown),
             ("Result", "unwrap_or_else", vec![Unknown], Unknown),
             ("HashSet", "contains", vec![Unknown], Bool),
+            ("HashSet", "clear", vec![], Unit),
+            ("HashMap", "clear", vec![], Unit),
             ("String", "ends_with", vec![Unknown], Bool),
             ("String", "starts_with", vec![Unknown], Bool),
             (
@@ -5552,6 +5948,9 @@ impl TypeChecker {
         for (recv, m, params, ret) in [
             ("f64", "is_nan", vec![], Bool),
             ("f64", "is_infinite", vec![], Bool),
+            ("f64", "is_finite", vec![], Bool),
+            ("f64", "elapsed", vec![], F64),
+            ("f64", "as_secs_f64", vec![], F64),
             ("f64", "to_bits", vec![], U64),
             ("Option", "or", vec![Unknown], Unknown),
             ("Vec", "sort_by", vec![Unknown], Unit),
@@ -5672,10 +6071,6 @@ impl TypeChecker {
             ("fs", "create_dir_all", vec![Unknown], Unknown),
             ("cmp", "max", vec![Unknown, Unknown], Unknown),
             ("Default", "default", vec![], Unknown),
-            ("u64", "from_str_radix", vec![Unknown, U32], Unknown),
-            ("u32", "from_str_radix", vec![Unknown, U32], Unknown),
-            ("usize", "from_str_radix", vec![Unknown, U32], Unknown),
-            ("i64", "from_str_radix", vec![Unknown, U32], Unknown),
         ] {
             self.assoc_fns
                 .entry((seg.to_string(), m.to_string()))
@@ -5733,6 +6128,7 @@ impl TypeChecker {
                 generics: Generics::default(),
             },
         );
+        self.register_std_handles();
     }
 
     /// The receiver's type after a `push` may have fixed its element type.
@@ -5974,7 +6370,8 @@ impl TypeChecker {
                 // A function-pointer type `fn(A, B) -> R` is a path `fn` whose arguments are
                 // the parameter types followed by the return type: a function type.
                 if matches!(name.as_str(), "fn" | "Fn" | "FnMut" | "FnOnce") && !args.is_empty() {
-                    let (ret, params) = args.split_last().expect("non-empty");
+                    let ret = args.last().expect("non-empty");
+                    let params = &args[..args.len() - 1];
                     return Ty::Fn(
                         params.iter().map(|a| self.type_to_ty(a)).collect(),
                         Box::new(self.type_to_ty(ret)),
@@ -6001,6 +6398,22 @@ impl TypeChecker {
                 // where its value is expected, as Rust's auto-deref does.
                 if name == "Box" && args.len() == 1 {
                     return Ty::Apply(name, vec![self.type_to_ty(&args[0])]);
+                }
+                // Std handles the subset models as values (see `std_handle`), unless the crate defines
+        // a type of that name itself.
+        if matches!(name.as_str(), "File" | "Command" | "Stdin" | "DefaultHasher" | "ExitStatus" | "Cow")
+            && !self.structs.contains_key(name.as_str())
+        {
+            return std_handle(&name);
+        }
+        // `Instant` and `Duration` are seconds as an `f64` in this subset (a clock reading
+                // and a span between two readings).
+                if name == "Instant" || name == "Duration" {
+                    return Ty::F64;
+                }
+                // `Arc<T>` / `Rc<T>` are transparent: a shared handle is its value in this subset.
+                if (name == "Arc" || name == "Rc") && args.len() == 1 {
+                    return self.type_to_ty(&args[0]);
                 }
                 // A one-argument `Result<T>` is an alias that fixes the error type
                 // (`std::io::Result<T>`). The error is modeled as a string.
@@ -6170,7 +6583,7 @@ impl TypeChecker {
                             || matches!(expected, Ty::Struct(p) if p == "Path"))
                 }
                 // `&Cow<str>` coerces to `&str` like the owned forms above.
-                Ty::Ref(inner) => match inner.as_ref() {
+                Ty::Ref(inner) => match &**inner {
                     Ty::Struct(n) => {
                         n == "String" && matches!(expected, Ty::Str)
                             || n == "Cow" && matches!(expected, Ty::Str)
@@ -6191,14 +6604,14 @@ impl TypeChecker {
         // A `&Cow<str>` / `&String` also coerces to a bare `str` position
         // (array elements, let annotations) — in either argument order.
         if let Ty::Ref(x) = a {
-            if matches!(x.as_ref(), Ty::Struct(n) if n == "Cow" || n == "String")
+            if matches!(&**x, Ty::Struct(n) if n == "Cow" || n == "String")
                 && matches!(b, Ty::Str)
             {
                 return true;
             }
         }
         if let Ty::Ref(y) = b {
-            if matches!(y.as_ref(), Ty::Struct(n) if n == "Cow" || n == "String")
+            if matches!(&**y, Ty::Struct(n) if n == "Cow" || n == "String")
                 && matches!(a, Ty::Str)
             {
                 return true;
