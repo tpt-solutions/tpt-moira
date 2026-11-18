@@ -6027,6 +6027,7 @@ impl TypeChecker {
             ),
             // `lines()` yields the string's lines as string slices.
             ("str", "lines", vec![], Apply("Iter".into(), vec![Str])),
+            ("str", "split_inclusive", vec![Unknown], Apply("Iter".into(), vec![Str])),
             // `str` methods of the C string runtime (`moira_str_*`).
             ("str", "trim", vec![], Str),
             ("str", "trim_start", vec![], Str),
