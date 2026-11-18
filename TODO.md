@@ -832,6 +832,16 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
             across crates. Still `1/5`. Open: `iter` on `Vec<..>` chains that the chain recognizer
             does not take (e.g. `Vec<Item>`, `Vec<MirProgram>`, `Vec<SsaFunction>`), `get`, `contains`,
             `parse`, `to_string`, `as_str`, `join`, `clear`, and untyped path calls (`new`, `from`).
+          - Status (2026-11-18, enum payloads and string patterns): `if let V(n) = &mut e` and
+            `match &mut e` now bind a payload name to its address, so writes through it reach
+            `e` and `mem::take` works through it (`tests/codegen.rs`,
+            `mut_ref_enum_payload_binding_writes_through`). String literal patterns compared
+            pointers and never matched a runtime string; they now match by contents
+            (`string_literal_patterns_match_by_contents`). `Option::is_some_and` types its closure
+            parameter. Probe blockers: clotho 4 -> 2, atropos 31, lachesis 17, driver 9. Clotho's
+            remaining two are `fetch_add` on the derive span counter (`derive.rs`: a global atomic,
+            kept because a per-call counter would collide when bundled crates share hints) and
+            `extend` on `entry(..).or_default()` (`macrorules.rs`). Still `1/5`.
           - Status (2026-11-18, `chain` and field `extend`): `a.iter().chain(b.iter())` over two
             sequences is a source on the C path (a new vector: `a`'s items, then `b`'s; only when
             the receiver is a bare `iter()` on a sequence). `s.field.extend(x.iter().cloned())`
