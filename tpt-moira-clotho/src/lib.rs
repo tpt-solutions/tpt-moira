@@ -15,8 +15,8 @@
 pub mod alias;
 pub mod ast;
 pub mod cfg;
-pub mod closure_inline;
 pub mod chain_lets;
+pub mod closure_inline;
 pub mod closure_return;
 pub mod derive;
 pub mod error;

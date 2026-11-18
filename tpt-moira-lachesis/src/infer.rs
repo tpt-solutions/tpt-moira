@@ -2178,7 +2178,11 @@ impl TypeChecker {
                 self.push_expect(r, &Ty::Apply("Option".to_string(), vec![expected.clone()]));
             }
             (ExprKind::MethodCall(_, m, margs), Ty::Apply(n, targs))
-                if n == "Option" && targs.len() == 1 && m.node == "map" && margs.len() == 1 && !has_unknown(&targs[0]) =>
+                if n == "Option"
+                    && targs.len() == 1
+                    && m.node == "map"
+                    && margs.len() == 1
+                    && !has_unknown(&targs[0]) =>
             {
                 if let ExprKind::Closure { body, .. } = &margs[0].kind {
                     self.push_expect(body, &targs[0]);

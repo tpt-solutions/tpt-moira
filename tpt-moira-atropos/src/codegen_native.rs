@@ -527,11 +527,17 @@ impl<'a> Emitter<'a> {
             // A reference to a value that lives in a frame slot is the slot's address.
             Op::Ref(Val::Name(n)) if self.slots.named.contains_key(n) => {
                 let slot = self.slots.named[n];
-                Ok(format!("    lea rax, [rbp - {}]\n    push rax\n", (slot + 1) * 8))
+                Ok(format!(
+                    "    lea rax, [rbp - {}]\n    push rax\n",
+                    (slot + 1) * 8
+                ))
             }
             Op::Ref(Val::Value(i)) => {
                 let slot = self.slots.value[*i];
-                Ok(format!("    lea rax, [rbp - {}]\n    push rax\n", (slot + 1) * 8))
+                Ok(format!(
+                    "    lea rax, [rbp - {}]\n    push rax\n",
+                    (slot + 1) * 8
+                ))
             }
             Op::Ref(..) => Err(
                 "references are handled by the Stage-0 C backend, not the from-scratch native \
@@ -575,7 +581,9 @@ fn emit_function_asm(
     let mut name_ty: HashMap<String, String> = local_ty.clone();
     for (i, v) in func.values.iter().enumerate() {
         if let Some(n) = &v.name {
-            name_ty.entry(n.clone()).or_insert_with(|| value_ty[i].clone());
+            name_ty
+                .entry(n.clone())
+                .or_insert_with(|| value_ty[i].clone());
         }
     }
     let mut em = Emitter {
@@ -877,7 +885,8 @@ __moira_panic:
     sub rsp, 32
     mov ecx, 101
     call exit
-".to_string()
+"
+        .to_string()
     } else {
         "
 __moira_panic:
@@ -885,7 +894,8 @@ __moira_panic:
     mov rbp, rsp
     mov edi, 101
     call exit
-".to_string()
+"
+        .to_string()
     }
 }
 
@@ -1150,9 +1160,13 @@ fn libc_wrapper_asm(sym: &str, nargs: usize) -> String {
         if nargs >= 1 {
             s.push_str("    mov rcx, rdi\n");
         }
-        s.push_str(&format!("    xor eax, eax\n    call {sym}\n    mov rsp, rbp\n    pop rbp\n    ret\n"));
+        s.push_str(&format!(
+            "    xor eax, eax\n    call {sym}\n    mov rsp, rbp\n    pop rbp\n    ret\n"
+        ));
     } else {
-        s.push_str(&format!("    xor eax, eax\n    call {sym}\n    pop rbp\n    ret\n"));
+        s.push_str(&format!(
+            "    xor eax, eax\n    call {sym}\n    pop rbp\n    ret\n"
+        ));
     }
     s
 }

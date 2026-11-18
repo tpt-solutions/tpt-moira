@@ -31,7 +31,9 @@ pub fn inline_chain_lets(mut prog: Program) -> Program {
 fn visit_item_blocks(item: &mut Item) {
     match &mut item.kind {
         ItemKind::Function(func) => {
-            visit_block(&mut func.body, &mut |_| {}, &mut |b: &mut Block| rewrite_block(b));
+            visit_block(&mut func.body, &mut |_| {}, &mut |b: &mut Block| {
+                rewrite_block(b)
+            });
         }
         ItemKind::Impl(imp) => {
             for it in &mut imp.items {

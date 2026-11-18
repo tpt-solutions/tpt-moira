@@ -335,7 +335,10 @@ fn real_main() -> ExitCode {
         "c" => match lower_for_emit(&program, &extern_programs, bundle) {
             Ok(mir) => emit_text(&tpt_moira_atropos::codegen_c::emit_c(&mir), &output),
             Err(e) => {
-                eprintln!("moira: lowering error: {}", locate_byte_ranges(&e.to_string(), &source_files));
+                eprintln!(
+                    "moira: lowering error: {}",
+                    locate_byte_ranges(&e.to_string(), &source_files)
+                );
                 return ExitCode::FAILURE;
             }
         },

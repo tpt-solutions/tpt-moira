@@ -1673,7 +1673,6 @@ fn func_ptr_c_type(param_count: usize) -> String {
     }
 }
 
-
 /// Prefix of the `seen` entries that record an assigned name (a name the walk saw as the target
 /// of `=` or `op=`); plain entries are the names the walk referenced.
 const ASSIGNED_MARK: &str = "\u{0}assigned:";
@@ -1702,7 +1701,6 @@ fn collect_path_names(
 ) {
     match &e.kind {
         ExprKind::Path(p) => {
-
             if p.segments.len() == 1 {
                 let n = p.segments[0].node.clone();
                 if !bound.contains(&n) && seen.insert(n.clone()) {
@@ -1984,8 +1982,12 @@ impl Lower {
             if is_mut_string_ref(&p.ty) {
                 let ptr = format!("__ptr_{name}");
                 self.func.params.push(ptr.clone());
-                self.func.locals.push((ptr.clone(), Some("char**".to_string())));
-                self.func.locals.push((name.clone(), Some("char*".to_string())));
+                self.func
+                    .locals
+                    .push((ptr.clone(), Some("char**".to_string())));
+                self.func
+                    .locals
+                    .push((name.clone(), Some("char*".to_string())));
                 mut_strings.push((ptr, name));
                 continue;
             }
@@ -3542,7 +3544,9 @@ impl Lower {
                             stages,
                         })
                     } else if name == "iter"
-                        && self.hint_of_expr(seq).is_some_and(|h| h.starts_with("Map<") || h.starts_with("Sorted<"))
+                        && self
+                            .hint_of_expr(seq)
+                            .is_some_and(|h| h.starts_with("Map<") || h.starts_with("Sorted<"))
                     {
                         // `m.iter()` on a map: its items are `(key, value)` pairs.
                         Some(IterChain {
@@ -3605,7 +3609,9 @@ impl Lower {
                 }
                 // `seq.iter().flat_map(|x| body)`: each item's body (an iterator chain) is
                 // collected, and its items follow in order.
-                "flat_map" if args.len() == 1 && matches!(args[0].kind, ExprKind::Closure { .. }) => {
+                "flat_map"
+                    if args.len() == 1 && matches!(args[0].kind, ExprKind::Closure { .. }) =>
+                {
                     let src: &'a Expr = match &unparen(r).kind {
                         ExprKind::MethodCall(s, m, a)
                             if matches!(m.node.as_str(), "iter" | "into_iter") && a.is_empty() =>
@@ -3634,7 +3640,9 @@ impl Lower {
                         stages,
                     });
                 }
-                "map" | "filter" | "filter_map" if args.len() == 1 => {
+                "map" | "filter" | "filter_map" | "take_while" | "skip_while"
+                    if args.len() == 1 =>
+                {
                     stages.push((name.to_string(), Some(&args[0])));
                 }
                 // `take(n)` / `skip(n)`: the first `n` items reaching the stage pass (or are
@@ -3727,7 +3735,9 @@ impl Lower {
                     });
                 }
                 // `s.split(sep)` on a string: a source of its pieces.
-                "split" | "rsplit" if args.len() == 1 && self.hint_of_expr(r).as_deref() == Some("str") => {
+                "split" | "rsplit"
+                    if args.len() == 1 && self.hint_of_expr(r).as_deref() == Some("str") =>
+                {
                     stages.reverse();
                     return Some(IterChain {
                         seq: None,
@@ -4054,18 +4064,33 @@ impl Lower {
                     .ok_or_else(|| LowerError("`flat_map` needs an iterator body".into()))?;
                 let inner_elem = self
                     .hint_of_expr(body)
-                    .and_then(|h| h.strip_prefix("Iter<").and_then(|t| t.strip_suffix('>')).map(|t| t.to_string()))
-                    .ok_or_else(|| LowerError("`flat_map`: the inner item type is unknown".into()))?;
+                    .and_then(|h| {
+                        h.strip_prefix("Iter<")
+                            .and_then(|t| t.strip_suffix('>'))
+                            .map(|t| t.to_string())
+                    })
+                    .ok_or_else(|| {
+                        LowerError("`flat_map`: the inner item type is unknown".into())
+                    })?;
                 let (sn, selem, sptr) = self.chain_sequence(seq)?;
                 let out = self.fresh_temp(mir::vec_type(&inner_elem));
                 self.emit(
                     out.clone(),
-                    mir::Rvalue::Call(mir::Operand::Func(mir::vec_fn_name(&inner_elem, "new")), vec![]),
+                    mir::Rvalue::Call(
+                        mir::Operand::Func(mir::vec_fn_name(&inner_elem, "new")),
+                        vec![],
+                    ),
                 );
                 let len = self.fresh_temp("long long");
-                self.emit(len.clone(), mir::Rvalue::Field(mir::Operand::var(sn.clone()), "len".into(), sptr));
+                self.emit(
+                    len.clone(),
+                    mir::Rvalue::Field(mir::Operand::var(sn.clone()), "len".into(), sptr),
+                );
                 let data = self.fresh_temp(format!("{selem}*"));
-                self.emit(data.clone(), mir::Rvalue::Field(mir::Operand::var(sn), "data".into(), sptr));
+                self.emit(
+                    data.clone(),
+                    mir::Rvalue::Field(mir::Operand::var(sn), "data".into(), sptr),
+                );
                 let idx = self.fresh_temp("long long");
                 self.emit(idx.clone(), mir::Rvalue::Use(mir::Operand::Const(0)));
                 let head = self.new_block();
@@ -4077,23 +4102,43 @@ impl Lower {
                 let more = self.fresh_temp("long long");
                 self.emit(
                     more.clone(),
-                    mir::Rvalue::Binary(mir::MirBinOp::Lt, mir::Operand::var(idx.clone()), mir::Operand::var(len)),
+                    mir::Rvalue::Binary(
+                        mir::MirBinOp::Lt,
+                        mir::Operand::var(idx.clone()),
+                        mir::Operand::var(len),
+                    ),
                 );
                 self.set_term(mir::Terminator::If(mir::Operand::var(more), body_blk, exit));
                 self.current = body_blk;
                 let item = self.fresh_temp(selem.clone());
-                self.emit(item.clone(), mir::Rvalue::Index(mir::Operand::var(data), mir::Operand::var(idx.clone())));
+                self.emit(
+                    item.clone(),
+                    mir::Rvalue::Index(mir::Operand::var(data), mir::Operand::var(idx.clone())),
+                );
                 self.lower_bind_pattern(&param.pat, mir::Operand::var(item), &selem)?;
                 let inner = self.lower_iter_chain(body, body_chain, "collect", &[])?;
                 let mir::Operand::Var(inn) = inner else {
                     return Err(LowerError("`flat_map` needs a named inner result".into()));
                 };
-                self.map_walk(&inn, &inner_elem, "", false, &out, None, "data", &inner_elem)?;
+                self.map_walk(
+                    &inn,
+                    &inner_elem,
+                    "",
+                    false,
+                    &out,
+                    None,
+                    "data",
+                    &inner_elem,
+                )?;
                 self.set_term(mir::Terminator::Goto(step));
                 self.current = step;
                 self.emit(
                     idx.clone(),
-                    mir::Rvalue::Binary(mir::MirBinOp::Add, mir::Operand::var(idx), mir::Operand::Const(1)),
+                    mir::Rvalue::Binary(
+                        mir::MirBinOp::Add,
+                        mir::Operand::var(idx),
+                        mir::Operand::Const(1),
+                    ),
                 );
                 self.set_term(mir::Terminator::Goto(head));
                 self.current = exit;
@@ -4175,7 +4220,10 @@ impl Lower {
                     if chain.rev {
                         // `rsplit`: the pieces of `split`, last first.
                         let p = self.fresh_temp(format!("{}*", mir::vec_type(&elem)));
-                        self.emit(p.clone(), mir::Rvalue::Ref(mir::Operand::var(pieces.clone()), true));
+                        self.emit(
+                            p.clone(),
+                            mir::Rvalue::Ref(mir::Operand::var(pieces.clone()), true),
+                        );
                         let reversed = self.fresh_temp("long long");
                         self.emit(
                             reversed,
@@ -4308,7 +4356,13 @@ impl Lower {
         let out_elem = self
             .hint_of_expr(e)
             .and_then(|h| mir::vec_elem(&h).map(|s| s.to_string()))
-            .unwrap_or_else(|| if cur == "long long" { elem.clone() } else { cur.clone() });
+            .unwrap_or_else(|| {
+                if cur == "long long" {
+                    elem.clone()
+                } else {
+                    cur.clone()
+                }
+            });
         let mut out: Option<String> = None;
         let mut res: Option<String> = None;
         // `position`: the number of items that reached the terminal before the hit.
@@ -4487,6 +4541,19 @@ impl Lower {
         let counter = self.fresh_temp("long long");
         self.emit(counter.clone(), mir::Rvalue::Use(mir::Operand::Const(0)));
         // Each `take` / `skip` stage: its own counter (starting at 0) and its count.
+        // `take_while` / `skip_while`: a flag that is set once the predicate has failed (take)
+        // or once it has stopped holding (skip). Starts at 0.
+        let mut flags: Vec<Option<String>> = Vec::new();
+        for (sname, _) in &chain.stages {
+            if sname == "take_while" || sname == "skip_while" {
+                let fl = self.fresh_temp("long long");
+                let init = if sname == "skip_while" { 1 } else { 0 };
+                self.emit(fl.clone(), mir::Rvalue::Use(mir::Operand::Const(init)));
+                flags.push(Some(fl));
+            } else {
+                flags.push(None);
+            }
+        }
         let mut limits: Vec<Option<(String, mir::Operand)>> = Vec::new();
         for (sname, sarg) in &chain.stages {
             match (sname.as_str(), sarg) {
@@ -4657,6 +4724,75 @@ impl Lower {
                     item = v;
                     pos = None;
                 }
+                "take_while" => {
+                    let (f, caps) = callee.expect("take_while has a closure");
+                    let fl = flags[si].clone().expect("take_while has a flag");
+                    let open = self.fresh_temp("long long");
+                    self.emit(
+                        open.clone(),
+                        mir::Rvalue::Binary(
+                            mir::MirBinOp::Eq,
+                            mir::Operand::var(fl.clone()),
+                            mir::Operand::Const(0),
+                        ),
+                    );
+                    let test = self.new_block();
+                    self.set_term(mir::Terminator::If(mir::Operand::var(open), test, step));
+                    self.current = test;
+                    let args =
+                        self.chain_args(caps, &pos, &item, arg.expect("take_while has a closure"))?;
+                    let keep_test = self.fresh_temp("long long");
+                    self.emit(
+                        keep_test.clone(),
+                        mir::Rvalue::Call(mir::Operand::Func(f), args),
+                    );
+                    let keep = self.new_block();
+                    let stop = self.new_block();
+                    self.set_term(mir::Terminator::If(
+                        mir::Operand::var(keep_test),
+                        keep,
+                        stop,
+                    ));
+                    self.current = stop;
+                    self.emit(fl, mir::Rvalue::Use(mir::Operand::Const(1)));
+                    self.set_term(mir::Terminator::Goto(step));
+                    self.current = keep;
+                }
+                "skip_while" => {
+                    let (f, caps) = callee.expect("skip_while has a closure");
+                    let fl = flags[si].clone().expect("skip_while has a flag");
+                    // Once the flag is 0 every item passes; while it is 1, items are tested.
+                    let skipping = self.fresh_temp("long long");
+                    self.emit(
+                        skipping.clone(),
+                        mir::Rvalue::Binary(
+                            mir::MirBinOp::Eq,
+                            mir::Operand::var(fl.clone()),
+                            mir::Operand::Const(1),
+                        ),
+                    );
+                    let test = self.new_block();
+                    let pass = self.new_block();
+                    self.set_term(mir::Terminator::If(mir::Operand::var(skipping), test, pass));
+                    self.current = test;
+                    let args =
+                        self.chain_args(caps, &pos, &item, arg.expect("skip_while has a closure"))?;
+                    let skip_test = self.fresh_temp("long long");
+                    self.emit(
+                        skip_test.clone(),
+                        mir::Rvalue::Call(mir::Operand::Func(f), args),
+                    );
+                    let first_pass = self.new_block();
+                    self.set_term(mir::Terminator::If(
+                        mir::Operand::var(skip_test),
+                        step,
+                        first_pass,
+                    ));
+                    self.current = first_pass;
+                    self.emit(fl, mir::Rvalue::Use(mir::Operand::Const(0)));
+                    self.set_term(mir::Terminator::Goto(pass));
+                    self.current = pass;
+                }
                 "filter" => {
                     let (f, caps) = callee.expect("filter has a closure");
                     let args =
@@ -4695,11 +4831,7 @@ impl Lower {
                     let more = self.fresh_temp("long long");
                     self.emit(
                         more.clone(),
-                        mir::Rvalue::Binary(
-                            mir::MirBinOp::Lt,
-                            mir::Operand::var(c.clone()),
-                            lim,
-                        ),
+                        mir::Rvalue::Binary(mir::MirBinOp::Lt, mir::Operand::var(c.clone()), lim),
                     );
                     let pass = self.new_block();
                     self.set_term(mir::Terminator::If(mir::Operand::var(more), pass, step));
@@ -4718,11 +4850,7 @@ impl Lower {
                     let done = self.fresh_temp("long long");
                     self.emit(
                         done.clone(),
-                        mir::Rvalue::Binary(
-                            mir::MirBinOp::Ge,
-                            mir::Operand::var(c.clone()),
-                            lim,
-                        ),
+                        mir::Rvalue::Binary(mir::MirBinOp::Ge, mir::Operand::var(c.clone()), lim),
                     );
                     let pass = self.new_block();
                     let count = self.new_block();
@@ -5471,8 +5599,13 @@ impl Lower {
                 // (A sorted map's iteration order is its own: only its order-free methods here.)
                 None if matches!(recv.kind, ExprKind::MethodCall(..) | ExprKind::Call(..))
                     && self.map_value_hint(recv).is_some()
-                    && (!self.hint_of_expr(recv).is_some_and(|h| h.trim_end_matches('*').starts_with("Sorted<"))
-                        || matches!(method, "len" | "is_empty" | "insert" | "contains" | "contains_key")) =>
+                    && (!self
+                        .hint_of_expr(recv)
+                        .is_some_and(|h| h.trim_end_matches('*').starts_with("Sorted<"))
+                        || matches!(
+                            method,
+                            "len" | "is_empty" | "insert" | "contains" | "contains_key"
+                        )) =>
                 {
                     let (k, v) = self.map_value_hint(recv).expect("checked above");
                     let value = self.lower_expr(recv)?;
@@ -5827,7 +5960,10 @@ impl Lower {
                     let empty = self.fresh_temp(t.to_string());
                     self.emit(
                         empty.clone(),
-                        mir::Rvalue::Call(mir::Operand::Func(mir::map_fn_name(&sk, &sv, "new")), Vec::new()),
+                        mir::Rvalue::Call(
+                            mir::Operand::Func(mir::map_fn_name(&sk, &sv, "new")),
+                            Vec::new(),
+                        ),
                     );
                     Some(mir::Operand::var(empty))
                 }
@@ -6518,21 +6654,15 @@ impl Lower {
     /// `v.contains(&x)` on a vector of a user type with its own `eq` (a derived `PartialEq`): a loop
     /// over the elements that calls `eq` on each through a pointer, stopping at the first match.
     /// `None` for other element types (word elements and strings use the vector helper).
-    fn lower_vec_contains_user(
-        &mut self,
-        recv: &Expr,
-        arg: &Expr,
-    ) -> Result<Option<mir::Operand>> {
+    fn lower_vec_contains_user(&mut self, recv: &Expr, arg: &Expr) -> Result<Option<mir::Operand>> {
         let Some(hint) = self.hint_of_expr(recv) else {
             return Ok(None);
         };
-        let Some(elem) = mir::vec_elem(&hint).map(|e| e.trim_start_matches("struct ").to_string()) else {
+        let Some(elem) = mir::vec_elem(&hint).map(|e| e.trim_start_matches("struct ").to_string())
+        else {
             return Ok(None);
         };
-        let Some((cname, kind, ret)) = self
-            .methods
-            .get(&(elem.clone(), "eq".to_string()))
-            .cloned()
+        let Some((cname, kind, ret)) = self.methods.get(&(elem.clone(), "eq".to_string())).cloned()
         else {
             return Ok(None);
         };
@@ -6815,13 +6945,25 @@ impl Lower {
     }
 
     /// A runtime status (1 on success, 0 on failure) as a `Result<i64, str>`.
-    fn lower_status_result(&mut self, helper: &str, ops: Vec<mir::Operand>, err: &str) -> mir::Operand {
+    fn lower_status_result(
+        &mut self,
+        helper: &str,
+        ops: Vec<mir::Operand>,
+        err: &str,
+    ) -> mir::Operand {
         let ok = self.fresh_temp("long long");
-        self.emit(ok.clone(), mir::Rvalue::Call(mir::Operand::Func(helper.to_string()), ops));
+        self.emit(
+            ok.clone(),
+            mir::Rvalue::Call(mir::Operand::Func(helper.to_string()), ops),
+        );
         let failed = self.fresh_temp("long long");
         self.emit(
             failed.clone(),
-            mir::Rvalue::Binary(mir::MirBinOp::Eq, mir::Operand::var(ok.clone()), mir::Operand::Const(0)),
+            mir::Rvalue::Binary(
+                mir::MirBinOp::Eq,
+                mir::Operand::var(ok.clone()),
+                mir::Operand::Const(0),
+            ),
         );
         let result = self.fresh_temp("Result<i64,str>");
         self.emit(
@@ -6839,13 +6981,25 @@ impl Lower {
     }
 
     /// A runtime exit code (negative when the command could not run) as a `Result<i64, str>`.
-    fn lower_code_result(&mut self, helper: &str, ops: Vec<mir::Operand>, err: &str) -> mir::Operand {
+    fn lower_code_result(
+        &mut self,
+        helper: &str,
+        ops: Vec<mir::Operand>,
+        err: &str,
+    ) -> mir::Operand {
         let code = self.fresh_temp("long long");
-        self.emit(code.clone(), mir::Rvalue::Call(mir::Operand::Func(helper.to_string()), ops));
+        self.emit(
+            code.clone(),
+            mir::Rvalue::Call(mir::Operand::Func(helper.to_string()), ops),
+        );
         let failed = self.fresh_temp("long long");
         self.emit(
             failed.clone(),
-            mir::Rvalue::Binary(mir::MirBinOp::Lt, mir::Operand::var(code.clone()), mir::Operand::Const(0)),
+            mir::Rvalue::Binary(
+                mir::MirBinOp::Lt,
+                mir::Operand::var(code.clone()),
+                mir::Operand::Const(0),
+            ),
         );
         let result = self.fresh_temp("Result<i64,str>");
         self.emit(
@@ -6863,13 +7017,25 @@ impl Lower {
     }
 
     /// A runtime call returning a string (NULL on failure) as a `Result<str, str>`.
-    fn lower_ptr_result(&mut self, helper: &str, ops: Vec<mir::Operand>, err: &str) -> mir::Operand {
+    fn lower_ptr_result(
+        &mut self,
+        helper: &str,
+        ops: Vec<mir::Operand>,
+        err: &str,
+    ) -> mir::Operand {
         let p = self.fresh_temp("char*");
-        self.emit(p.clone(), mir::Rvalue::Call(mir::Operand::Func(helper.to_string()), ops));
+        self.emit(
+            p.clone(),
+            mir::Rvalue::Call(mir::Operand::Func(helper.to_string()), ops),
+        );
         let failed = self.fresh_temp("long long");
         self.emit(
             failed.clone(),
-            mir::Rvalue::Binary(mir::MirBinOp::Eq, mir::Operand::var(p.clone()), mir::Operand::Const(0)),
+            mir::Rvalue::Binary(
+                mir::MirBinOp::Eq,
+                mir::Operand::var(p.clone()),
+                mir::Operand::Const(0),
+            ),
         );
         let result = self.fresh_temp("Result<str,str>");
         self.emit(
@@ -6888,7 +7054,11 @@ impl Lower {
 
     /// The std calls the subset models as values (see `std_handle` in the checker): files,
     /// directories, stdin, the hasher and commands. `None` for other paths.
-    fn lower_std_path_call(&mut self, segs: &[&str], args: &[Expr]) -> Result<Option<mir::Operand>> {
+    fn lower_std_path_call(
+        &mut self,
+        segs: &[&str],
+        args: &[Expr],
+    ) -> Result<Option<mir::Operand>> {
         let n = segs.len();
         if n < 2 {
             return Ok(None);
@@ -6898,22 +7068,37 @@ impl Lower {
         match (owner, name, args.len()) {
             ("fs", "create_dir_all", 1) => {
                 let p = self.lower_expr(&args[0])?;
-                Ok(Some(self.lower_status_result("moira_mkdir_all", vec![p], "cannot create directory")))
+                Ok(Some(self.lower_status_result(
+                    "moira_mkdir_all",
+                    vec![p],
+                    "cannot create directory",
+                )))
             }
             ("fs" | "File", "create", 1) => {
                 let p = self.lower_expr(&args[0])?;
-                Ok(Some(self.lower_ptr_result("moira_file_create", vec![p], "cannot create file")))
+                Ok(Some(self.lower_ptr_result(
+                    "moira_file_create",
+                    vec![p],
+                    "cannot create file",
+                )))
             }
             ("File", "open", 1) => {
                 let p = self.lower_expr(&args[0])?;
-                Ok(Some(self.lower_ptr_result("moira_file_open", vec![p], "cannot open file")))
+                Ok(Some(self.lower_ptr_result(
+                    "moira_file_open",
+                    vec![p],
+                    "cannot open file",
+                )))
             }
             ("fs", "read", 1) => {
                 let p = self.lower_expr(&args[0])?;
                 let len = self.fresh_temp("long long");
                 self.emit(len.clone(), mir::Rvalue::Use(mir::Operand::Const(0)));
                 let len_ptr = self.fresh_temp("long long*");
-                self.emit(len_ptr.clone(), mir::Rvalue::Ref(mir::Operand::var(len.clone()), true));
+                self.emit(
+                    len_ptr.clone(),
+                    mir::Rvalue::Ref(mir::Operand::var(len.clone()), true),
+                );
                 let data = self.fresh_temp("u8*");
                 self.emit(
                     data.clone(),
@@ -6933,7 +7118,11 @@ impl Lower {
                 let failed = self.fresh_temp("long long");
                 self.emit(
                     failed.clone(),
-                    mir::Rvalue::Binary(mir::MirBinOp::Eq, mir::Operand::var(data), mir::Operand::Const(0)),
+                    mir::Rvalue::Binary(
+                        mir::MirBinOp::Eq,
+                        mir::Operand::var(data),
+                        mir::Operand::Const(0),
+                    ),
                 );
                 let result = self.fresh_temp("Result<Vec<u8>,str>");
                 self.emit(
@@ -6943,7 +7132,10 @@ impl Lower {
                         vec![
                             ("tag".to_string(), mir::Operand::var(failed)),
                             ("f0".to_string(), mir::Operand::var(bytes)),
-                            ("e0".to_string(), mir::Operand::CStr("cannot read file".to_string())),
+                            (
+                                "e0".to_string(),
+                                mir::Operand::CStr("cannot read file".to_string()),
+                            ),
                         ],
                     ),
                 );
@@ -6952,9 +7144,15 @@ impl Lower {
             // `env::args()`: the process arguments, as a vector of strings (the C `main` keeps them).
             ("env", "args", 0) => {
                 let n = self.fresh_temp("long long");
-                self.emit(n.clone(), mir::Rvalue::Call(mir::Operand::Func("moira_args_count".into()), vec![]));
+                self.emit(
+                    n.clone(),
+                    mir::Rvalue::Call(mir::Operand::Func("moira_args_count".into()), vec![]),
+                );
                 let d = self.fresh_temp("char**");
-                self.emit(d.clone(), mir::Rvalue::Call(mir::Operand::Func("moira_args_data".into()), vec![]));
+                self.emit(
+                    d.clone(),
+                    mir::Rvalue::Call(mir::Operand::Func("moira_args_data".into()), vec![]),
+                );
                 let v = self.fresh_temp(mir::vec_type("str"));
                 self.emit(
                     v.clone(),
@@ -6967,7 +7165,10 @@ impl Lower {
             }
             ("io", "stdin", 0) => {
                 let t = self.fresh_temp("char*");
-                self.emit(t.clone(), mir::Rvalue::Use(mir::Operand::CStr(String::new())));
+                self.emit(
+                    t.clone(),
+                    mir::Rvalue::Use(mir::Operand::CStr(String::new())),
+                );
                 Ok(Some(mir::Operand::var(t)))
             }
             ("DefaultHasher", "new", 0) => {
@@ -7042,20 +7243,33 @@ impl Lower {
             "i32" => ("int32_t", false),
             _ => ("long long", false),
         };
-        let bits = if ct == "uint32_t" || ct == "int32_t" { 32 } else { 64 };
+        let bits = if ct == "uint32_t" || ct == "int32_t" {
+            32
+        } else {
+            64
+        };
         let out = self.fresh_temp(ct);
         let out_ptr = self.fresh_temp(format!("{ct}*"));
         self.emit(
             out_ptr.clone(),
             mir::Rvalue::Ref(mir::Operand::var(out.clone()), true),
         );
-        let helper = if unsigned { "moira_try_radix_u" } else { "moira_try_radix_s" };
+        let helper = if unsigned {
+            "moira_try_radix_u"
+        } else {
+            "moira_try_radix_s"
+        };
         let parsed = self.fresh_temp("long long");
         self.emit(
             parsed.clone(),
             mir::Rvalue::Call(
                 mir::Operand::Func(helper.to_string()),
-                vec![s, radix, mir::Operand::var(out_ptr), mir::Operand::Const(bits)],
+                vec![
+                    s,
+                    radix,
+                    mir::Operand::var(out_ptr),
+                    mir::Operand::Const(bits),
+                ],
             ),
         );
         let failed = self.fresh_temp("long long");
@@ -7241,7 +7455,9 @@ impl Lower {
         let Some((mn, k, v, mptr)) = self.map_from_hint(m)? else {
             return Err(LowerError("`iter` on a map needs a named map".into()));
         };
-        let sorted_map = self.hint_of_expr(m).is_some_and(|h| h.starts_with("Sorted<"));
+        let sorted_map = self
+            .hint_of_expr(m)
+            .is_some_and(|h| h.starts_with("Sorted<"));
         let elem = format!("Tuple<{k},{v}>");
         let out = self.fresh_temp(mir::vec_type(&elem));
         self.emit(
@@ -7289,7 +7505,10 @@ impl Lower {
                 mir::Operand::var(mn.clone())
             } else {
                 let p = self.fresh_temp(format!("Map<{k},{v}>*"));
-                self.emit(p.clone(), mir::Rvalue::Ref(mir::Operand::var(mn.clone()), true));
+                self.emit(
+                    p.clone(),
+                    mir::Rvalue::Ref(mir::Operand::var(mn.clone()), true),
+                );
                 mir::Operand::var(p)
             };
             let j = self.fresh_temp("long long");
@@ -7310,14 +7529,14 @@ impl Lower {
             mir::Rvalue::Index(mir::Operand::var(keys), at.clone()),
         );
         let val = self.fresh_temp(v.clone());
-        self.emit(
-            val.clone(),
-            mir::Rvalue::Index(mir::Operand::var(vals), at),
-        );
+        self.emit(val.clone(), mir::Rvalue::Index(mir::Operand::var(vals), at));
         let pair = self.fresh_temp(elem.clone());
         self.emit(
             pair.clone(),
-            mir::Rvalue::Tuple(elem.clone(), vec![mir::Operand::var(key), mir::Operand::var(val)]),
+            mir::Rvalue::Tuple(
+                elem.clone(),
+                vec![mir::Operand::var(key), mir::Operand::var(val)],
+            ),
         );
         self.emit_vec_push(&out, &elem, mir::Operand::var(pair));
         self.emit(
@@ -8389,7 +8608,8 @@ impl Lower {
         let mut src_expr: &Expr = drain_inner;
         let mut stripped = false;
         while let ExprKind::MethodCall(r, m, a) = &src_expr.kind {
-            if a.is_empty() && matches!(m.node.as_str(), "iter" | "cloned" | "copied" | "into_iter") {
+            if a.is_empty() && matches!(m.node.as_str(), "iter" | "cloned" | "copied" | "into_iter")
+            {
                 src_expr = r;
                 stripped = true;
             } else {
@@ -9019,7 +9239,8 @@ impl Lower {
         let recv_hint = self
             .hint_of_expr(recv)
             .map(|h| h.trim_end_matches('*').to_string());
-        let Some(("Option", targs)) = recv_hint.as_deref().and_then(|t| mir::split_generic(t)) else {
+        let Some(("Option", targs)) = recv_hint.as_deref().and_then(|t| mir::split_generic(t))
+        else {
             return Ok(None);
         };
         if targs.len() != 1 {
@@ -9184,7 +9405,8 @@ impl Lower {
             return Ok(None);
         };
         let recv_hint = self.hint_of_expr(recv);
-        let Some(("Result", targs)) = recv_hint.as_deref().and_then(|t| mir::split_generic(t)) else {
+        let Some(("Result", targs)) = recv_hint.as_deref().and_then(|t| mir::split_generic(t))
+        else {
             return Ok(None);
         };
         if targs.len() != 2 || mir::split_generic(&out_ty).map(|(b, _)| b) != Some("Result") {
@@ -9297,9 +9519,7 @@ impl Lower {
         args: &[Expr],
     ) -> Result<Option<mir::Operand>> {
         // `b.then(|| x)` on a bool: a branch that calls the closure only when `b` holds.
-        if method == "then"
-            && args.len() == 1
-            && self.hint_of_expr(recv).as_deref() == Some("bool")
+        if method == "then" && args.len() == 1 && self.hint_of_expr(recv).as_deref() == Some("bool")
         {
             let (f, caps) = self.closure_callee(&args[0])?;
             let ret = self
@@ -9343,33 +9563,66 @@ impl Lower {
         if method == "hash" && args.len() == 1 {
             let hint = self.hint_of_expr(recv);
             if let ExprKind::Ref(inner, _) = &args[0].kind {
-                if matches!(hint.as_deref(), Some("str") | Some("long long") | Some("int64_t") | Some("i64")
-                    | Some("bool") | Some("usize") | Some("u64") | Some("unsigned long long"))
-                {
+                if matches!(
+                    hint.as_deref(),
+                    Some("str")
+                        | Some("long long")
+                        | Some("int64_t")
+                        | Some("i64")
+                        | Some("bool")
+                        | Some("usize")
+                        | Some("u64")
+                        | Some("unsigned long long")
+                ) {
                     let value = self.lower_expr(recv)?;
                     let h = self.lower_expr(inner)?;
                     let mir::Operand::Var(hn) = &h else {
                         return Err(LowerError("`hash` needs a named hasher".into()));
                     };
                     let hp = self.fresh_temp("unsigned long long*");
-                    self.emit(hp.clone(), mir::Rvalue::Ref(mir::Operand::var(hn.clone()), true));
-                    let helper = if hint.as_deref() == Some("str") { "moira_hash_mix_s" } else { "moira_hash_mix_u" };
+                    self.emit(
+                        hp.clone(),
+                        mir::Rvalue::Ref(mir::Operand::var(hn.clone()), true),
+                    );
+                    let helper = if hint.as_deref() == Some("str") {
+                        "moira_hash_mix_s"
+                    } else {
+                        "moira_hash_mix_u"
+                    };
                     let t = self.fresh_temp("long long");
                     self.emit(
                         t.clone(),
-                        mir::Rvalue::Call(mir::Operand::Func(helper.into()), vec![mir::Operand::var(hp), value]),
+                        mir::Rvalue::Call(
+                            mir::Operand::Func(helper.into()),
+                            vec![mir::Operand::var(hp), value],
+                        ),
                     );
                     return Ok(Some(mir::Operand::Unit));
                 }
             }
         }
-        if method == "finish" && args.is_empty() && matches!(self.hint_of_expr(recv).as_deref(), Some("u64") | Some("unsigned long long")) {
+        if method == "finish"
+            && args.is_empty()
+            && matches!(
+                self.hint_of_expr(recv).as_deref(),
+                Some("u64") | Some("unsigned long long")
+            )
+        {
             return Ok(Some(self.lower_expr(recv)?));
         }
-        if method == "success" && args.is_empty() && matches!(self.hint_of_expr(recv).as_deref(), Some("i64") | Some("long long")) {
+        if method == "success"
+            && args.is_empty()
+            && matches!(
+                self.hint_of_expr(recv).as_deref(),
+                Some("i64") | Some("long long")
+            )
+        {
             let code = self.lower_expr(recv)?;
             let t = self.fresh_temp("long long");
-            self.emit(t.clone(), mir::Rvalue::Binary(mir::MirBinOp::Eq, code, mir::Operand::Const(0)));
+            self.emit(
+                t.clone(),
+                mir::Rvalue::Binary(mir::MirBinOp::Eq, code, mir::Operand::Const(0)),
+            );
             return Ok(Some(mir::Operand::var(t)));
         }
         // `t.elapsed()` on an `Instant` (seconds as a double) and `as_secs_f64()` on a `Duration`.
@@ -9391,7 +9644,9 @@ impl Lower {
         // `x.is_nan()` / `x.to_bits()` on a float: runtime helpers over the bit pattern.
         if matches!(method, "is_nan" | "is_infinite" | "is_finite" | "to_bits")
             && args.is_empty()
-            && self.hint_of_expr(recv).is_some_and(|h| matches!(h.as_str(), "f64" | "f32" | "double"))
+            && self
+                .hint_of_expr(recv)
+                .is_some_and(|h| matches!(h.as_str(), "f64" | "f32" | "double"))
         {
             let x = self.lower_expr(recv)?;
             let (helper, ty) = match method {
@@ -9401,7 +9656,10 @@ impl Lower {
                 _ => ("moira_f64_to_bits", "unsigned long long"),
             };
             let t = self.fresh_temp(ty);
-            self.emit(t.clone(), mir::Rvalue::Call(mir::Operand::Func(helper.to_string()), vec![x]));
+            self.emit(
+                t.clone(),
+                mir::Rvalue::Call(mir::Operand::Func(helper.to_string()), vec![x]),
+            );
             return Ok(Some(mir::Operand::var(t)));
         }
         // `n.max(m)` / `n.min(m)` on an integer: a compare and a select between the operands.
@@ -10470,8 +10728,10 @@ impl Lower {
         }
         // The std handles that are strings here (see `std_handle`): a file written with
         // `write_all`, stdin read into a string, a command's argument, output and status.
-        if matches!(method, "write_all" | "read_to_string" | "arg" | "output" | "status")
-            && self.hint_of_expr(recv).as_deref() == Some("str")
+        if matches!(
+            method,
+            "write_all" | "read_to_string" | "arg" | "output" | "status"
+        ) && self.hint_of_expr(recv).as_deref() == Some("str")
         {
             let path = self.lower_expr(recv)?;
             match (method, args.len()) {
@@ -10481,9 +10741,15 @@ impl Lower {
                         return Err(LowerError("`write_all` needs a named byte slice".into()));
                     };
                     let data = self.fresh_temp("u8*");
-                    self.emit(data.clone(), mir::Rvalue::Field(bytes.clone(), "data".into(), false));
+                    self.emit(
+                        data.clone(),
+                        mir::Rvalue::Field(bytes.clone(), "data".into(), false),
+                    );
                     let len = self.fresh_temp("long long");
-                    self.emit(len.clone(), mir::Rvalue::Field(mir::Operand::var(bn.clone()), "len".into(), false));
+                    self.emit(
+                        len.clone(),
+                        mir::Rvalue::Field(mir::Operand::var(bn.clone()), "len".into(), false),
+                    );
                     return Ok(Some(self.lower_status_result(
                         "moira_file_append",
                         vec![path, mir::Operand::var(data), mir::Operand::var(len)],
@@ -10493,13 +10759,20 @@ impl Lower {
                 ("read_to_string", 1) => {
                     let target = match &args[0].kind {
                         ExprKind::Ref(inner, _) => self.lower_expr(inner)?,
-                        _ => return Err(LowerError("`read_to_string` needs `&mut` of a string".into())),
+                        _ => {
+                            return Err(LowerError(
+                                "`read_to_string` needs `&mut` of a string".into(),
+                            ))
+                        }
                     };
                     let mir::Operand::Var(tn) = &target else {
                         return Err(LowerError("`read_to_string` needs a named string".into()));
                     };
                     let tp = self.fresh_temp("char**");
-                    self.emit(tp.clone(), mir::Rvalue::Ref(mir::Operand::var(tn.clone()), true));
+                    self.emit(
+                        tp.clone(),
+                        mir::Rvalue::Ref(mir::Operand::var(tn.clone()), true),
+                    );
                     return Ok(Some(self.lower_status_result(
                         "moira_stdin_read_all",
                         vec![mir::Operand::var(tp)],
@@ -10509,14 +10782,28 @@ impl Lower {
                 ("arg", 1) => {
                     let a = self.lower_expr(&args[0])?;
                     let t = self.fresh_temp("char*");
-                    self.emit(t.clone(), mir::Rvalue::Call(mir::Operand::Func("moira_cmd_arg".into()), vec![path, a]));
+                    self.emit(
+                        t.clone(),
+                        mir::Rvalue::Call(
+                            mir::Operand::Func("moira_cmd_arg".into()),
+                            vec![path, a],
+                        ),
+                    );
                     return Ok(Some(mir::Operand::var(t)));
                 }
                 ("output", 0) => {
-                    return Ok(Some(self.lower_ptr_result("moira_cmd_output", vec![path], "cannot run command")));
+                    return Ok(Some(self.lower_ptr_result(
+                        "moira_cmd_output",
+                        vec![path],
+                        "cannot run command",
+                    )));
                 }
                 ("status", 0) => {
-                    return Ok(Some(self.lower_code_result("moira_cmd_status", vec![path], "cannot run command")));
+                    return Ok(Some(self.lower_code_result(
+                        "moira_cmd_status",
+                        vec![path],
+                        "cannot run command",
+                    )));
                 }
                 _ => {}
             }
@@ -10529,7 +10816,8 @@ impl Lower {
             return Ok(Some(self.lower_expr(recv)?));
         }
         // `s.clear()` on a string local or parameter: the string becomes a fresh empty buffer.
-        if method == "clear" && args.is_empty() && self.hint_of_expr(recv).as_deref() == Some("str") {
+        if method == "clear" && args.is_empty() && self.hint_of_expr(recv).as_deref() == Some("str")
+        {
             let place = self.lower_expr(recv)?;
             let ptr = match &place {
                 mir::Operand::Var(n) if self.temp_type_of(n) == "char**" => place.clone(),
@@ -10538,7 +10826,11 @@ impl Lower {
                     self.emit(p.clone(), mir::Rvalue::Ref(place.clone(), true));
                     mir::Operand::var(p)
                 }
-                _ => return Err(LowerError("a string can only be cleared in a named place".into())),
+                _ => {
+                    return Err(LowerError(
+                        "a string can only be cleared in a named place".into(),
+                    ))
+                }
             };
             let t = self.fresh_temp("long long");
             self.emit(
@@ -10941,7 +11233,11 @@ impl Lower {
         }
         // The place's type from the checker, or, for a vector local whose element type was
         // only fixed by a later `push`, the local's own lowered type.
-        let elem = match self.hint_of_expr(place).as_deref().and_then(|t| mir::vec_elem(t)) {
+        let elem = match self
+            .hint_of_expr(place)
+            .as_deref()
+            .and_then(|t| mir::vec_elem(t))
+        {
             Some(e) => e.to_string(),
             None => match self.vec_local(place) {
                 Some((_, elem, _)) => elem,
@@ -11383,7 +11679,10 @@ impl Lower {
                             let empty = self.fresh_temp(t.to_string());
                             self.emit(
                                 empty.clone(),
-                                mir::Rvalue::Call(mir::Operand::Func(mir::vec_fn_name(&elem, "new")), Vec::new()),
+                                mir::Rvalue::Call(
+                                    mir::Operand::Func(mir::vec_fn_name(&elem, "new")),
+                                    Vec::new(),
+                                ),
                             );
                             mir::Operand::var(empty)
                         }
@@ -11393,7 +11692,10 @@ impl Lower {
                             let empty = self.fresh_temp(t.to_string());
                             self.emit(
                                 empty.clone(),
-                                mir::Rvalue::Call(mir::Operand::Func(mir::map_fn_name(&k, &v, "new")), Vec::new()),
+                                mir::Rvalue::Call(
+                                    mir::Operand::Func(mir::map_fn_name(&k, &v, "new")),
+                                    Vec::new(),
+                                ),
                             );
                             mir::Operand::var(empty)
                         }
@@ -11764,7 +12066,9 @@ impl Lower {
                     return Err(LowerError("`extend` needs a named iterator result".into()));
                 };
                 let tn_elem = self.temp_type_of(&tn);
-                let src_elem = mir::vec_elem(&tn_elem).map(|e| e.to_string()).unwrap_or(elem.clone());
+                let src_elem = mir::vec_elem(&tn_elem)
+                    .map(|e| e.to_string())
+                    .unwrap_or(elem.clone());
                 self.map_walk(&tn, &src_elem, "", false, &vname, None, "data", &elem)?;
                 return Ok(Some(mir::Operand::Unit));
             }
@@ -12026,7 +12330,10 @@ impl Lower {
         let mut field_addrs = false;
         if si.mutable && !si.enumerate {
             if let ast::Pat::Tuple(ps) = pat {
-                if ps.iter().all(|p| matches!(p, ast::Pat::Ident(_) | ast::Pat::Wild)) {
+                if ps
+                    .iter()
+                    .all(|p| matches!(p, ast::Pat::Ident(_) | ast::Pat::Wild))
+                {
                     field_addrs = true;
                     for (i, sp) in ps.iter().enumerate() {
                         let ast::Pat::Ident(n) = sp else { continue };
@@ -12042,7 +12349,9 @@ impl Lower {
                             .unwrap_or_else(|| "long long".to_string());
                         let addr_ty = format!("{ct}*");
                         if !self.func.locals.iter().any(|(l, _)| l == &n.node) {
-                            self.func.locals.push((n.node.clone(), Some(addr_ty.clone())));
+                            self.func
+                                .locals
+                                .push((n.node.clone(), Some(addr_ty.clone())));
                         }
                         self.types.insert(n.node.clone(), addr_ty.clone());
                         self.emit(
@@ -14797,7 +15106,10 @@ impl Lower {
         };
         // Variant / nullary-variant patterns get a real guard + payload binds.
         if matches!(local.pat, ast::Pat::Variant(..) | ast::Pat::Path(_)) {
-            self.mut_scrutinee = matches!(local.init.as_ref().map(|e| &e.kind), Some(ExprKind::Ref(_, true)));
+            self.mut_scrutinee = matches!(
+                local.init.as_ref().map(|e| &e.kind),
+                Some(ExprKind::Ref(_, true))
+            );
             let guard = self.pattern_guard(&init_op, &local.pat);
             self.mut_scrutinee = false;
             let (cond, binds) = guard?;
@@ -16519,9 +16831,10 @@ fn lookup_field_type(structs: &[mir::MirStructDef], base_ty: &str, field: &str) 
 fn pure_expr(e: &Expr) -> bool {
     match &e.kind {
         ExprKind::Lit(_) | ExprKind::Path(_) => true,
-        ExprKind::Field(b, _) | ExprKind::Unary(_, b) | ExprKind::Ref(b, _) | ExprKind::Deref(b) => {
-            pure_expr(b)
-        }
+        ExprKind::Field(b, _)
+        | ExprKind::Unary(_, b)
+        | ExprKind::Ref(b, _)
+        | ExprKind::Deref(b) => pure_expr(b),
         ExprKind::Cast(b, _) => pure_expr(b),
         ExprKind::Binary(a, _, b) => pure_expr(a) && pure_expr(b),
         ExprKind::Tuple(es) | ExprKind::Array(es) => es.iter().all(pure_expr),

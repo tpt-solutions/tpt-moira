@@ -4042,3 +4042,24 @@ fn entry_or_default_set_insert_and_sorted_len_run() {
     };
     assert_eq!(out, "2\n2");
 }
+
+/// `take_while` stops at the first item that fails the predicate; `skip_while` drops the items
+/// up to it and keeps the rest.
+#[test]
+fn iterator_take_while_and_skip_while_run() {
+    let out = match run_src(
+        r#"fn main() {
+            let rest = String::from("123ab4");
+            let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+            let tail: String = rest.chars().skip_while(|c| c.is_ascii_digit()).collect();
+            let v: Vec<i64> = vec![1, 2, 5, 1, 9];
+            let a: Vec<i64> = v.iter().take_while(|x| **x < 5).cloned().collect();
+            let b: Vec<i64> = v.iter().skip_while(|x| **x < 5).cloned().collect();
+            println!("{} {} {} {}", digits, tail, a.len(), b.len());
+        }"#,
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "123 ab4 2 3");
+}
