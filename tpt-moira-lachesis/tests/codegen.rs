@@ -4271,3 +4271,22 @@ fn map_into_iter_runs_in_loop_and_chain() {
     };
     assert_eq!(out, "7\n7");
 }
+
+/// An array used as an iterator chain's source (`KEYWORDS.iter().any(..)`) is walked as its items.
+#[test]
+fn array_as_iterator_chain_source_runs() {
+    let out = match run_src(
+        r#"const KEYWORDS: [&str; 3] = ["fn", "let", "if"];
+        fn is_kw(s: &str) -> bool { KEYWORDS.iter().any(|k| *k == s) }
+        fn main() {
+            let names = ["a", "bb"];
+            println!("{} {}", is_kw("let"), is_kw("x"));
+            let total: usize = names.iter().map(|n| n.len()).sum();
+            print_i64(total as i64);
+        }"#,
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "true false\n3");
+}

@@ -3845,6 +3845,7 @@ impl Lower {
                 mir::vec_elem(&h).is_some()
                     || mir::slice_elem(&h).is_some()
                     || mir::vec_ptr_elem(&h).is_some()
+                    || matches!(mir::split_generic(&h), Some(("Array", a)) if a.len() == 2)
             })
     }
 
@@ -3858,6 +3859,15 @@ impl Lower {
             Some(h) => h,
             None => return Err(LowerError("iterator chain over an unknown sequence".into())),
         };
+        // A fixed-size array (`Array<T,N>`) has no data and length fields: its items are copied
+        // into a vector, which the chain walks.
+        if let Some(("Array", a)) = mir::split_generic(&hint) {
+            if a.len() == 2 {
+                if let Ok(len) = a[1].parse::<i128>() {
+                    return self.array_as_vector(seq, a[0], len);
+                }
+            }
+        }
         let set_key = match mir::split_generic(&hint) {
             Some(("Set", a)) if a.len() == 1 => Some(a[0].to_string()),
             Some(("Sorted", a)) if a.len() == 2 && a[1] == "bool" => Some(a[0].to_string()),
@@ -3882,6 +3892,46 @@ impl Lower {
         }
         let is_ptr = hinted_ptr || self.temp_type_of(&n).ends_with('*');
         Ok((n, elem, is_ptr))
+    }
+
+    /// A fixed-size array's items copied into a new vector: `(vector, element type, false)`.
+    fn array_as_vector(&mut self, seq: &Expr, elem: &str, len: i128) -> Result<(String, String, bool)> {
+        let arr = match self.lower_expr(seq)? {
+            mir::Operand::Var(n) => n,
+            _ => return Err(LowerError("iterator chain needs a named array".into())),
+        };
+        let out = self.fresh_temp(mir::vec_type(elem));
+        self.emit(
+            out.clone(),
+            mir::Rvalue::Call(mir::Operand::Func(mir::vec_fn_name(elem, "new")), vec![]),
+        );
+        let idx = self.fresh_temp("long long");
+        self.emit(idx.clone(), mir::Rvalue::Use(mir::Operand::Const(0)));
+        let head = self.new_block();
+        let body = self.new_block();
+        let exit = self.new_block();
+        self.set_term(mir::Terminator::Goto(head));
+        self.current = head;
+        let more = self.fresh_temp("long long");
+        self.emit(
+            more.clone(),
+            mir::Rvalue::Binary(mir::MirBinOp::Lt, mir::Operand::var(idx.clone()), mir::Operand::Const(len)),
+        );
+        self.set_term(mir::Terminator::If(mir::Operand::var(more), body, exit));
+        self.current = body;
+        let item = self.fresh_temp(elem.to_string());
+        self.emit(
+            item.clone(),
+            mir::Rvalue::Index(mir::Operand::var(arr), mir::Operand::var(idx.clone())),
+        );
+        self.emit_vec_push(&out, elem, mir::Operand::var(item));
+        self.emit(
+            idx.clone(),
+            mir::Rvalue::Binary(mir::MirBinOp::Add, mir::Operand::var(idx.clone()), mir::Operand::Const(1)),
+        );
+        self.set_term(mir::Terminator::Goto(head));
+        self.current = exit;
+        Ok((out, elem.to_string(), false))
     }
 
     /// The lifted function of a closure argument and the captured variables it
