@@ -14227,7 +14227,7 @@ impl Lower {
                         let sname = p.segments[0].node.clone();
                         let tuple_like = self.structs.iter().find(|d| d.name == sname).is_some_and(|d| {
                             !d.fields.is_empty()
-                                && d.fields.iter().enumerate().all(|(i, (n, _))| *n == format!("f{i}"))
+                                && d.fields.iter().enumerate().all(|(i, field)| field.0 == format!("f{i}"))
                         });
                         if tuple_like && self.variants.get(&sname).is_none() {
                             let mut fvals = Vec::new();
