@@ -4290,3 +4290,21 @@ fn array_as_iterator_chain_source_runs() {
     };
     assert_eq!(out, "true false\n3");
 }
+
+/// `max()` / `min()` after a `map` compare the mapped items, not the source tuples.
+#[test]
+fn max_after_map_compares_mapped_items() {
+    let out = match run_src(
+        r#"fn main() {
+            let v: Vec<(String, i64)> = vec![(String::from("a"), 4), (String::from("b"), 9)];
+            let best: i64 = v.iter().map(|p| p.1).max().unwrap_or(0);
+            let low: i64 = v.iter().map(|(_, t)| *t).min().unwrap_or(0);
+            print_i64(best);
+            print_i64(low);
+        }"#,
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "9\n4");
+}

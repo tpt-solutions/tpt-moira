@@ -4556,7 +4556,7 @@ impl Lower {
                         "`{terminal}` on an iterator of `{cur}` is not in the codegen subset"
                     )));
                 }
-                let r = self.fresh_temp(format!("Option<{elem}>"));
+                let r = self.fresh_temp(format!("Option<{cur}>"));
                 self.emit(
                     r.clone(),
                     mir::Rvalue::StructLit(
@@ -5047,7 +5047,8 @@ impl Lower {
                     tag.clone(),
                     mir::Rvalue::Field(mir::Operand::var(r.clone()), "tag".into(), false),
                 );
-                let best = self.fresh_temp(elem.clone());
+                let item_ty = self.temp_type_of(&item);
+                let best = self.fresh_temp(item_ty);
                 self.emit(
                     best.clone(),
                     mir::Rvalue::Field(mir::Operand::var(r.clone()), "f0".into(), false),
