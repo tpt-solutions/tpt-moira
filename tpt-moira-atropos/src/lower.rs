@@ -15688,10 +15688,16 @@ impl Lower {
             ast::Pat::Lit(lit) => {
                 let lit_op = self.lower_lit_operand(lit);
                 let t = self.fresh_temp("long long");
-                self.emit(
-                    t.clone(),
-                    mir::Rvalue::Binary(mir::MirBinOp::Eq, scrut.clone(), lit_op),
-                );
+                // A string literal pattern matches by contents (`moira_str_eq`), not by pointer.
+                let rv = if matches!(lit, ast::Lit::Str(_)) {
+                    mir::Rvalue::Call(
+                        mir::Operand::Func("moira_str_eq".into()),
+                        vec![scrut.clone(), lit_op],
+                    )
+                } else {
+                    mir::Rvalue::Binary(mir::MirBinOp::Eq, scrut.clone(), lit_op)
+                };
+                self.emit(t.clone(), rv);
                 Ok((Some(mir::Operand::var(t)), Vec::new()))
             }
             ast::Pat::Range(lo, hi, inclusive) => {

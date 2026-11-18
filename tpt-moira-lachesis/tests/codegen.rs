@@ -3764,3 +3764,50 @@ fn mem_take_through_mut_enum_payload_binding_runs() {
     };
     assert_eq!(out, "3\n0");
 }
+
+/// A string literal pattern (`match`, `matches!`) matches the string's contents, not its
+/// address: a runtime `String` equal to the literal is taken.
+#[test]
+fn string_literal_patterns_match_by_contents() {
+    let out = match run_src(
+        r#"fn kind(s: String) -> i64 {
+            match s.as_str() {
+                "Fn" => 1,
+                _ => 0,
+            }
+        }
+        fn is_fn(s: String) -> bool {
+            matches!(s.as_str(), "Fn" | "FnMut")
+        }
+        fn main() {
+            print_i64(kind(String::from("Fn")));
+            print_i64(kind(String::from("Other")));
+            if is_fn(String::from("FnMut")) { print_i64(7); }
+        }"#,
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "1\n0\n7");
+}
+
+/// `Option::is_some_and` binds its closure parameter to the payload (typed from the receiver).
+#[test]
+fn option_is_some_and_binds_payload_type() {
+    let out = match run_src(
+        "struct Seg { n: i64 }
+        fn big(segs: Vec<Seg>) -> bool {
+            segs.last().is_some_and(|s| s.n > 5)
+        }
+        fn main() {
+            let a = vec![Seg { n: 9 }];
+            let b = vec![Seg { n: 2 }];
+            if big(a) { print_i64(1); }
+            if big(b) { print_i64(2); }
+        }",
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "1");
+}

@@ -4252,6 +4252,17 @@ impl TypeChecker {
                 let result = self.closure_result(&args[0], &payload);
                 return Ty::Apply("Option".into(), vec![result]);
             }
+            // `Option<T>::is_some_and(|x| body)` / `is_none_or` bind `x` to the payload and
+            // answer a `bool`.
+            if n == "Option"
+                && targs.len() == 1
+                && args.len() == 1
+                && matches!(method.node.as_str(), "is_some_and" | "is_none_or")
+            {
+                let payload = targs[0].clone();
+                let _ = self.closure_result(&args[0], &payload);
+                return Ty::Bool;
+            }
             // The payload of an `Option`/`Result` is the value of `unwrap`, `expect`
             // and `unwrap_or`.
             let m = method.node.as_str();
