@@ -80,5 +80,8 @@ fn vec_contains_of_user_types_calls_eq_run() {
         Some(o) => o,
         None => return,
     };
-    assert_eq!(out, "1\n0\n1\n0\n", "contains on user types should use their eq");
+    assert_eq!(
+        out, "1\n0\n1\n0\n",
+        "contains on user types should use their eq"
+    );
 }

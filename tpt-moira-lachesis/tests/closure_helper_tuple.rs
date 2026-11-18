@@ -44,8 +44,11 @@ fn reference_to_tuple_is_a_pointer_to_the_tuple() {
         Some(o) => o,
         None => return,
     };
-    assert_eq!(out, "5
-");
+    assert_eq!(
+        out,
+        "5
+"
+    );
 }
 
 #[test]
@@ -72,6 +75,9 @@ fn generic_helper_with_two_closures_over_a_tuple_state() {
         Some(o) => o,
         None => return,
     };
-    assert_eq!(out, "6 3
-");
+    assert_eq!(
+        out,
+        "6 3
+"
+    );
 }

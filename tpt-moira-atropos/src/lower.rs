@@ -5469,7 +5469,7 @@ impl Lower {
                 Some(m) => m,
                 // A map that an expression yields (`m.entry(k).or_default()`): a pointer to it.
                 // (A sorted map's iteration order is its own: only its order-free methods here.)
-                None if matches!(recv.kind, ExprKind::MethodCall(..))
+                None if matches!(recv.kind, ExprKind::MethodCall(..) | ExprKind::Call(..))
                     && self.map_value_hint(recv).is_some()
                     && (!self.hint_of_expr(recv).is_some_and(|h| h.trim_end_matches('*').starts_with("Sorted<"))
                         || matches!(method, "len" | "is_empty" | "insert" | "contains" | "contains_key")) =>

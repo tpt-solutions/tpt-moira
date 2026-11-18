@@ -79,5 +79,8 @@ fn fs_write_creates_the_file_and_reports_failure() {
         None => return,
     };
     assert_eq!(out, "wrote\ncannot write file\n");
-    assert_eq!(std::fs::read_to_string(&target).expect("written file"), "hello");
+    assert_eq!(
+        std::fs::read_to_string(&target).expect("written file"),
+        "hello"
+    );
 }

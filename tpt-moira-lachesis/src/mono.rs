@@ -962,7 +962,8 @@ impl Mono {
                 for (i, tok) in toks.iter().enumerate() {
                     match &tok.kind {
                         TokenKind::Ident(_) => {
-                            let after_sep = i >= 1 && matches!(toks[i - 1].kind, TokenKind::ColonColon);
+                            let after_sep =
+                                i >= 1 && matches!(toks[i - 1].kind, TokenKind::ColonColon);
                             if !after_sep {
                                 cur = Some(tok.span.start);
                             }
@@ -974,11 +975,13 @@ impl Mono {
                 }
                 let callee_after: Vec<Option<String>> = (0..toks.len())
                     .map(|i| match (toks.get(i + 1), toks.get(i + 2)) {
-                        (Some(sep), Some(tpt_moira_clotho::token::Token { kind: TokenKind::Ident(n), .. }))
-                            if matches!(sep.kind, TokenKind::ColonColon) =>
-                        {
-                            Some(n.clone())
-                        }
+                        (
+                            Some(sep),
+                            Some(tpt_moira_clotho::token::Token {
+                                kind: TokenKind::Ident(n),
+                                ..
+                            }),
+                        ) if matches!(sep.kind, TokenKind::ColonColon) => Some(n.clone()),
                         _ => None,
                     })
                     .collect();

@@ -59,9 +59,13 @@ fn mem_take_through_a_pointer_and_mem_replace_on_a_field() {
         Some(o) => o,
         None => return,
     };
-    assert_eq!(out, "0 3
+    assert_eq!(
+        out,
+        "0 3
 9 11
 0 7
 2
-", "mem::take and mem::replace should match Rust");
+",
+        "mem::take and mem::replace should match Rust"
+    );
 }
