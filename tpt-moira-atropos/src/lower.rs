@@ -14928,9 +14928,10 @@ impl Lower {
             ExprKind::MethodCall(recv, method, args)
                 if method.node == "find_map" && args.len() == 1 && self.iter_chain_of(recv).is_some() =>
             {
-                let mut chain = self
-                    .iter_chain_of(recv)
-                    .expect("guard checked the chain");
+                let mut chain = match self.iter_chain_of(recv) {
+                    Some(c) => c,
+                    None => return Err(LowerError("`next` needs an iterator chain".into())),
+                };
                 chain.stages.push(("filter_map".to_string(), Some(&args[0])));
                 self.lower_iter_chain(e, chain, "next", &[])
             }
