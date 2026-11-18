@@ -4786,3 +4786,27 @@ fn writes_through_pattern_names_and_boxed_arguments_run() {
     };
     assert_eq!(out, "5\n5");
 }
+
+/// A closure-specialised call (`apply(e, |..| ..)`) passes a `&mut Box<T>` where the generic
+/// function takes `&mut T`: the box is read through, as for a plain call.
+#[test]
+fn specialised_call_reads_boxed_argument_through_the_box() {
+    let out = match run_src(
+        r#"enum E { Num(i64), Add(Box<E>, Box<E>) }
+        fn apply<F: Fn(i64) -> i64>(e: &mut E, f: F) -> i64 {
+            match e { E::Num(n) => f(*n), E::Add(_, _) => 0 }
+        }
+        fn main() {
+            let mut e = E::Add(Box::new(E::Num(2)), Box::new(E::Num(5)));
+            let mut total: i64 = 0;
+            if let E::Add(a, _) = &mut e {
+                total = apply(a, |x| x * 10);
+            }
+            print_i64(total);
+        }"#,
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "20");
+}

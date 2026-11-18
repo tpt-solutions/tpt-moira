@@ -2744,7 +2744,10 @@ impl Lower {
                         continue;
                     }
                 }
-                operands.push(self.lower_expr(a)?);
+                let v = self.lower_expr(a)?;
+                // The declared parameter type adapts the argument (a `&mut Box<T>` to `&mut T`).
+                let pt = type_to_c(&f.params[i].ty, &self.aliases);
+                operands.push(self.adapt_arg(v, &pt));
             }
         }
         let ret = self
