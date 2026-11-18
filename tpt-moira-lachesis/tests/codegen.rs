@@ -3979,3 +3979,43 @@ fn struct_field_initializer_takes_declared_nested_type() {
     };
     assert_eq!(out, "1");
 }
+
+/// A `let` annotation reaches a `collect()` inside `opt.map(|x| ..)` through `unwrap_or_default`:
+/// the collected vector takes the annotated element type.
+#[test]
+fn let_annotation_reaches_collect_inside_option_map() {
+    let out = match run_src(
+        "struct Field { name: i64 }
+        struct Variant { fields: Option<Vec<Field>> }
+        fn count(v: &Variant) -> usize {
+            let tys: Vec<i64> = v.fields.as_ref().map(|fs| fs.iter().map(|f| f.name).collect()).unwrap_or_default();
+            tys.len()
+        }
+        fn main() {
+            let v = Variant { fields: Some(vec![Field { name: 4 }, Field { name: 5 }]) };
+            print_i64(count(&v) as i64);
+            let none = Variant { fields: None };
+            print_i64(count(&none) as i64);
+        }",
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "2\n0");
+}
+
+/// `join` on a vector reached through a reference (`&Vec<String>`).
+#[test]
+fn join_through_vector_reference_runs() {
+    let out = match run_src(
+        "fn names(params: &Vec<String>) -> String { params.join(\", \") }
+        fn main() {
+            let v = vec![String::from(\"a\"), String::from(\"b\")];
+            println!(\"{}\", names(&v));
+        }",
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "a, b");
+}

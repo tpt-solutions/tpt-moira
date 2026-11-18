@@ -563,7 +563,10 @@ pub fn hint_of_ty(ty: &Ty) -> Option<String> {
             // A reference to a map or set is named as the map or set itself: the lowering reads
             // whether it is a pointer from the value's C type.
             Ty::Apply(name, _)
-                if matches!(name.as_str(), "HashMap" | "HashSet" | "BTreeMap" | "BTreeSet") =>
+                if matches!(
+                    name.as_str(),
+                    "HashMap" | "HashSet" | "BTreeMap" | "BTreeSet"
+                ) =>
             {
                 hint_elem_name(inner)
             }
@@ -806,7 +809,13 @@ impl TypeChecker {
                 // The identifier tokens of a type name: every other character separates them.
                 let spaced: String = h
                     .chars()
-                    .map(|c| if c.is_alphanumeric() || c == '_' { c } else { ' ' })
+                    .map(|c| {
+                        if c.is_alphanumeric() || c == '_' {
+                            c
+                        } else {
+                            ' '
+                        }
+                    })
                     .collect();
                 !spaced.split(' ').any(|tok| generic.contains(&tok))
             });
@@ -2019,16 +2028,24 @@ impl TypeChecker {
             .insert(("Command".into(), "new".into()), sig(vec![Unknown], Str));
         self.assoc_fns
             .insert(("DefaultHasher".into(), "new".into()), sig(vec![], U64));
-        self.methods
-            .insert(("str".into(), "write_all".into()), sig(vec![Unknown], Apply("Result".into(), vec![I64, Str])));
-        self.methods
-            .insert(("str".into(), "read_to_string".into()), sig(vec![Unknown], Apply("Result".into(), vec![I64, Str])));
+        self.methods.insert(
+            ("str".into(), "write_all".into()),
+            sig(vec![Unknown], Apply("Result".into(), vec![I64, Str])),
+        );
+        self.methods.insert(
+            ("str".into(), "read_to_string".into()),
+            sig(vec![Unknown], Apply("Result".into(), vec![I64, Str])),
+        );
         self.methods
             .insert(("str".into(), "arg".into()), sig(vec![Unknown], Str));
-        self.methods
-            .insert(("str".into(), "output".into()), sig(vec![], Apply("Result".into(), vec![Str, Str])));
-        self.methods
-            .insert(("str".into(), "status".into()), sig(vec![], Apply("Result".into(), vec![I64, Str])));
+        self.methods.insert(
+            ("str".into(), "output".into()),
+            sig(vec![], Apply("Result".into(), vec![Str, Str])),
+        );
+        self.methods.insert(
+            ("str".into(), "status".into()),
+            sig(vec![], Apply("Result".into(), vec![I64, Str])),
+        );
         // A command's builder methods return the command; `spawn` and `wait_with_output` run it.
         for m in ["args", "stdin", "stdout", "stderr"] {
             self.methods
@@ -2063,8 +2080,18 @@ impl TypeChecker {
         let int_literal = matches!(e.kind, ExprKind::Lit(Lit::Int(_, None)))
             && matches!(
                 expected,
-                Ty::I8 | Ty::I16 | Ty::I32 | Ty::I64 | Ty::I128 | Ty::Isize
-                    | Ty::U8 | Ty::U16 | Ty::U32 | Ty::U64 | Ty::U128 | Ty::Usize
+                Ty::I8
+                    | Ty::I16
+                    | Ty::I32
+                    | Ty::I64
+                    | Ty::I128
+                    | Ty::Isize
+                    | Ty::U8
+                    | Ty::U16
+                    | Ty::U32
+                    | Ty::U64
+                    | Ty::U128
+                    | Ty::Usize
             );
         if int_literal {
             self.expr_types.insert(key, expected.clone());
@@ -2139,6 +2166,22 @@ impl TypeChecker {
                         self.push_expect(&args[0], &a[0].clone());
                     }
                     _ => {}
+                }
+            }
+            // `r.unwrap_or_default()` / `unwrap()` / `expect(..)` expected as `T`: `r` is an
+            // `Option<T>`. `r.map(|x| body)` expected as `Option<T>`: `body` is `T`. These carry
+            // the expectation to a `collect()` or a literal inside them.
+            (ExprKind::MethodCall(r, m, _), _)
+                if matches!(m.node.as_str(), "unwrap_or_default" | "unwrap" | "expect")
+                    && !has_unknown(expected) =>
+            {
+                self.push_expect(r, &Ty::Apply("Option".to_string(), vec![expected.clone()]));
+            }
+            (ExprKind::MethodCall(_, m, margs), Ty::Apply(n, targs))
+                if n == "Option" && targs.len() == 1 && m.node == "map" && margs.len() == 1 && !has_unknown(&targs[0]) =>
+            {
+                if let ExprKind::Closure { body, .. } = &margs[0].kind {
+                    self.push_expect(body, &targs[0]);
                 }
             }
             (ExprKind::Call(callee, args), Ty::Apply(n, targs)) if args.is_empty() => {
@@ -3629,7 +3672,12 @@ impl TypeChecker {
                 }
                 // A command is modelled as its string, so its process streams and exit status
                 // (`child.stdin`, `output.status`) are opaque here.
-                if matches!(bt, Ty::Str) && matches!(field.node.as_str(), "stdin" | "stdout" | "stderr" | "status") {
+                if matches!(bt, Ty::Str)
+                    && matches!(
+                        field.node.as_str(),
+                        "stdin" | "stdout" | "stderr" | "status"
+                    )
+                {
                     return Ty::Unknown;
                 }
                 self.err(span, format!("type {} has no fields", bt));
@@ -3946,16 +3994,24 @@ impl TypeChecker {
         method: &tpt_moira_clotho::ast::Spanned<String>,
         args: &[Expr],
     ) {
-        let Some(recv_ty) = self.expr_types.get(&(recv.span.start, recv.span.end)).cloned() else {
+        let Some(recv_ty) = self
+            .expr_types
+            .get(&(recv.span.start, recv.span.end))
+            .cloned()
+        else {
             return;
         };
         let base = self.strip_refs(&recv_ty);
         let expects: Vec<Ty> = match (&base, method.node.as_str(), args.len()) {
             (Ty::Apply(v, a), "push", 1) if v == "Vec" && a.len() == 1 => vec![a[0].clone()],
-            (Ty::Apply(m, a), "insert", 2) if (m == "HashMap" || m == "BTreeMap") && a.len() == 2 => {
+            (Ty::Apply(m, a), "insert", 2)
+                if (m == "HashMap" || m == "BTreeMap") && a.len() == 2 =>
+            {
                 a.clone()
             }
-            (Ty::Apply(s, a), "insert", 1) if (s == "HashSet" || s == "BTreeSet") && a.len() == 1 => {
+            (Ty::Apply(s, a), "insert", 1)
+                if (s == "HashSet" || s == "BTreeSet") && a.len() == 1 =>
+            {
                 a.clone()
             }
             _ => Vec::new(),
@@ -3999,7 +4055,8 @@ impl TypeChecker {
             if let Ty::Apply(n, a) = self.strip_refs(&recv_ty) {
                 if (n == "HashMap" || n == "BTreeMap") && a.len() == 2 {
                     let (k, v) = (a[0].clone(), a[1].clone());
-                    self.closure_expected = Some(vec![Ty::Ref(Box::new(k)), Ty::RefMut(Box::new(v))]);
+                    self.closure_expected =
+                        Some(vec![Ty::Ref(Box::new(k)), Ty::RefMut(Box::new(v))]);
                     self.infer_expr(&args[0]);
                     self.closure_expected = None;
                     return Ty::Unit;
@@ -4546,9 +4603,7 @@ impl TypeChecker {
         //    solver: the receiver may be a generic parameter bounded
         //    by a user trait (`T: Show`) or a concrete type an `impl`
         //    covers (`impl Show for i32`).
-        if let Some(ty) =
-            self.resolve_trait_method(span, &recv_ty, &method.node.clone(), args)
-        {
+        if let Some(ty) = self.resolve_trait_method(span, &recv_ty, &method.node.clone(), args) {
             return ty;
         }
         // Every value has `clone` and `to_string` (Clone, Display), even when the
@@ -4561,8 +4616,7 @@ impl TypeChecker {
         }
         // `as_ref` / `borrow` / `deref` view the value through a reference (a box's
         // contents, a shared pointer's value); `as_mut` through a mutable one.
-        if args.is_empty() && matches!(method.node.as_str(), "as_ref" | "borrow" | "deref")
-        {
+        if args.is_empty() && matches!(method.node.as_str(), "as_ref" | "borrow" | "deref") {
             return Ty::Ref(Box::new(self.strip_refs(&recv_ty)));
         }
         if args.is_empty() && method.node == "as_mut" {
@@ -4958,7 +5012,11 @@ impl TypeChecker {
         }
         // `m.iter()` on a map yields `(&K, &V)` pairs; `into_iter()` yields `(K, V)`.
         if let Ty::Apply(name, kv) = &recv {
-            if name == "HashMap" && kv.len() == 2 && matches!(method, "iter" | "into_iter") && args.is_empty() {
+            if name == "HashMap"
+                && kv.len() == 2
+                && matches!(method, "iter" | "into_iter")
+                && args.is_empty()
+            {
                 let (k, v) = (kv[0].clone(), kv[1].clone());
                 // The lowering copies each pair out of the map, so the components are values.
                 let pair = Ty::Tuple(vec![deref_item(k), deref_item(v)]);
@@ -5189,25 +5247,48 @@ impl TypeChecker {
         self.assoc_fns
             .insert(("Instant".into(), "now".into()), sig(vec![], F64));
         // The process environment: `env::var(name)` / `env::var_os(name)` / `env::temp_dir()`.
-        self.assoc_fns
-            .insert(("env".into(), "var".into()), sig(vec![Unknown], Apply("Result".into(), vec![Str, Str])));
-        self.assoc_fns
-            .insert(("env".into(), "var_os".into()), sig(vec![Unknown], Apply("Option".into(), vec![Str])));
+        self.assoc_fns.insert(
+            ("env".into(), "var".into()),
+            sig(vec![Unknown], Apply("Result".into(), vec![Str, Str])),
+        );
+        self.assoc_fns.insert(
+            ("env".into(), "var_os".into()),
+            sig(vec![Unknown], Apply("Option".into(), vec![Str])),
+        );
         self.assoc_fns
             .insert(("env".into(), "temp_dir".into()), sig(vec![], Str));
         // `usize::from(x)` and the other integer conversions (`From<bool>`, widening).
         for (t, ty) in [
-            ("i8", I8), ("i16", I16), ("i32", I32), ("i64", I64), ("i128", I128), ("isize", Isize),
-            ("u8", U8), ("u16", U16), ("u32", U32), ("u64", U64), ("u128", U128), ("usize", Usize),
+            ("i8", I8),
+            ("i16", I16),
+            ("i32", I32),
+            ("i64", I64),
+            ("i128", I128),
+            ("isize", Isize),
+            ("u8", U8),
+            ("u16", U16),
+            ("u32", U32),
+            ("u64", U64),
+            ("u128", U128),
+            ("usize", Usize),
         ] {
             self.assoc_fns
                 .insert((t.into(), "from".into()), sig(vec![Unknown], ty));
         }
         // `u32::from_str_radix(s, radix)` and the other integer parsers.
-        for (t, ty) in [("u32", U32), ("u64", U64), ("usize", Usize), ("i32", I32), ("i64", I64)] {
+        for (t, ty) in [
+            ("u32", U32),
+            ("u64", U64),
+            ("usize", Usize),
+            ("i32", I32),
+            ("i64", I64),
+        ] {
             self.assoc_fns.insert(
                 (t.into(), "from_str_radix".into()),
-                sig(vec![Unknown, Unknown], Apply("Result".into(), vec![ty, Str])),
+                sig(
+                    vec![Unknown, Unknown],
+                    Apply("Result".into(), vec![ty, Str]),
+                ),
             );
         }
         // Shared pointers and slice views the self-host sources use: their result types are
@@ -6483,13 +6564,15 @@ impl TypeChecker {
                     return Ty::Apply(name, vec![self.type_to_ty(&args[0])]);
                 }
                 // Std handles the subset models as values (see `std_handle`), unless the crate defines
-        // a type of that name itself.
-        if matches!(name.as_str(), "File" | "Command" | "Stdin" | "DefaultHasher" | "ExitStatus" | "Cow")
-            && !self.structs.contains_key(name.as_str())
-        {
-            return std_handle(&name);
-        }
-        // `Instant` and `Duration` are seconds as an `f64` in this subset (a clock reading
+                // a type of that name itself.
+                if matches!(
+                    name.as_str(),
+                    "File" | "Command" | "Stdin" | "DefaultHasher" | "ExitStatus" | "Cow"
+                ) && !self.structs.contains_key(name.as_str())
+                {
+                    return std_handle(&name);
+                }
+                // `Instant` and `Duration` are seconds as an `f64` in this subset (a clock reading
                 // and a span between two readings).
                 if name == "Instant" || name == "Duration" {
                     return Ty::F64;
@@ -6687,15 +6770,13 @@ impl TypeChecker {
         // A `&Cow<str>` / `&String` also coerces to a bare `str` position
         // (array elements, let annotations) — in either argument order.
         if let Ty::Ref(x) = a {
-            if matches!(&**x, Ty::Struct(n) if n == "Cow" || n == "String")
-                && matches!(b, Ty::Str)
+            if matches!(&**x, Ty::Struct(n) if n == "Cow" || n == "String") && matches!(b, Ty::Str)
             {
                 return true;
             }
         }
         if let Ty::Ref(y) = b {
-            if matches!(&**y, Ty::Struct(n) if n == "Cow" || n == "String")
-                && matches!(a, Ty::Str)
+            if matches!(&**y, Ty::Struct(n) if n == "Cow" || n == "String") && matches!(a, Ty::Str)
             {
                 return true;
             }

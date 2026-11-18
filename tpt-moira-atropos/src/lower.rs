@@ -9530,7 +9530,10 @@ impl Lower {
         }
         if method == "join" && args.len() == 1 {
             // A vector of strings, or a slice of them (`v[a..b].join(sep)`).
-            let is_vec_of_str = matches!(self.hint_of_expr(recv).as_deref(), Some("Vec<str>") | Some("Slice<str>"));
+            let is_vec_of_str = matches!(
+                self.hint_of_expr(recv).as_deref(),
+                Some("Vec<str>") | Some("Vec<str>*") | Some("Slice<str>")
+            );
             if is_vec_of_str {
                 return self.lower_join(recv, &args[0]).map(Some);
             }
