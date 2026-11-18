@@ -12,7 +12,7 @@
 //! stages are decoupled.
 
 use crate::ast::Program;
-use crate::derive::expand_derives;
+use crate::derive::expand_derives_at;
 use crate::error::{Diag, ParseResult};
 use crate::lexer;
 use crate::macrorules::{expand_macro_rules_calls, extract_macro_rules};
@@ -46,7 +46,7 @@ pub fn compile_at(source: &str, base: usize) -> ParseResult<Program> {
     let (mr_table, rest2) = extract_macro_rules(&rest)?;
     let expanded_tokens = expand_macro_rules_calls(&rest2, &mr_table);
     let parsed = Parser::new(expanded_tokens).parse_program()?;
-    let with_derives = expand_derives(&parsed);
+    let with_derives = expand_derives_at(&parsed, base);
     let expanded = expand_program_concurrent(&with_derives, &table);
     Ok(crate::closure_inline::inline_closure_calls(
         crate::closure_return::inline_returned_closures(

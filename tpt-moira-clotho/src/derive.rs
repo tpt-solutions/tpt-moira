@@ -22,6 +22,13 @@ use crate::parser::Parser;
 /// trait `impl`s, returning a program whose item list contains both the
 /// original definitions and the derived `impl`s.
 pub fn expand_derives(prog: &Program) -> Program {
+    expand_derives_at(prog, 0)
+}
+
+/// [`expand_derives`] for a file whose source starts at span offset `file_base`: the derived
+/// impls' spans are unique to that file (each file's range is disjoint, see `compile_at`).
+pub fn expand_derives_at(prog: &Program, file_base: usize) -> Program {
+    let mut n = file_base * DERIVE_IMPLS_PER_FILE;
     let mut items = Vec::with_capacity(prog.items.len());
     for item in &prog.items {
         items.push(item.clone());
@@ -29,14 +36,14 @@ pub fn expand_derives(prog: &Program) -> Program {
             ItemKind::Struct(s) => {
                 for t in derives_of(item) {
                     if let Some(src) = derive_struct(&t, s) {
-                        append_impl(&mut items, &src);
+                        append_impl(&mut items, &src, &mut n);
                     }
                 }
             }
             ItemKind::Enum(e) => {
                 for t in derives_of(item) {
                     if let Some(src) = derive_enum(&t, e) {
-                        append_impl(&mut items, &src);
+                        append_impl(&mut items, &src, &mut n);
                     }
                 }
             }
@@ -72,16 +79,17 @@ fn derives_of(item: &Item) -> Vec<String> {
 /// Where the spans of derived code start, and the room given to each derived impl.
 const DERIVE_SPAN_BASE: usize = 1 << 40;
 const DERIVE_SPAN_STRIDE: usize = 1 << 20;
+/// The derived impls numbered per file: a file's range of numbers is `file_base` times this.
+const DERIVE_IMPLS_PER_FILE: usize = 4096;
 
 /// Parse a generated `impl` source and append it (preserving the original
 /// item's visibility attributes are not carried onto impls).
-fn append_impl(items: &mut Vec<Item>, src: &str) {
+fn append_impl(items: &mut Vec<Item>, src: &str, n: &mut usize) {
     // The generated text has its own byte offsets; they are moved to a region of their own,
     // so that no span of a derived impl equals a span of the user's source (spans key the
     // type hints of the lowering).
-    static NEXT_BASE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-    let n = NEXT_BASE.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    let base = DERIVE_SPAN_BASE + n * DERIVE_SPAN_STRIDE;
+    let base = DERIVE_SPAN_BASE + *n * DERIVE_SPAN_STRIDE;
+    *n += 1;
     let mut tokens = crate::lexer::tokenize(src);
     for t in tokens.iter_mut() {
         t.span.start += base;
