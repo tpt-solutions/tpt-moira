@@ -872,6 +872,20 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
             cross-crate `PipelineCacheExt` methods (only enums are passed to other units' lowering,
             so a method of another crate's struct is not visible to the root unit). Also open:
             indexing a call result (`f(x)[0]`) gives a C error.
+          - Status (2026-11-18, blocker pass 3): probe blockers 32 -> 29 (clotho 2, atropos 11,
+            lachesis 7, driver 9). Fixed since pass 2: `f(x)[i]` on call and method results;
+            `v.iter_mut().find(..)` with `Some((_, t))` writing through `t`; `fold` (closure, and
+            `f64::max`/`i64::min` inline); `max_by_key`/`min_by_key`; `zip` with a cloned sequence;
+            user-function arguments take their parameter's element type (`f(&vec![..])`). Also
+            fixed two of this session's own regressions: a lint cleanup that made `map(AllowKey::Hash)`
+            (a path the subset does not lower) and a `Option::or_else` in new code. Open: `trim` and
+            `by_ref` on closure results and char iterators held in locals; `unwrap_or_default` with
+            no annotation; `format!` of an enum; `first`/`as_str`/`push` with no hint; `flat_map` with
+            a function path; `join` and `insert` with no hint; `iter_mut().for_each(fn)`; and the
+            driver's cross-crate methods (`checked`, `text`, `len`, `wait_with_output`, `lines`).
+            Note: the self-host probe must compile the compiler's own source with the same rules
+            as the rest of the code: `Option` combinators on untyped values and function paths
+            used as values are rejected, so write those as `match` or closures.
           - Status (2026-11-18, `chain` and field `extend`): `a.iter().chain(b.iter())` over two
             sequences is a source on the C path (a new vector: `a`'s items, then `b`'s; only when
             the receiver is a bare `iter()` on a sequence). `s.field.extend(x.iter().cloned())`
@@ -2168,6 +2182,29 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
         (see `docs/SELF_HOSTING.md`); probe currently reports 0/5 crates
         self-hostable, blocked by generics (`<`) and `mod` parsing gaps.
   - [ ] Verify behavior parity of the self-compiled binary
+    - **Probe run (2026-11-18): still `1/5`.** `moira-alloc` is self-hostable. Parse and check
+      pass for all five crates. Codegen fails for clotho, atropos, lachesis and the driver.
+      Blockers by kind (`build/self_host_report.md`): `iter` 5, `new` (path call) 2, `checked` 2,
+      `len` 2, `with_backend` 1, `as_str`, `by_ref`, `contains`, `extend`, `fetch_add`, `first`,
+      `insert`, `iter_mut`, `join`, `lines`, `push`, `text`, `trim`, `unwrap_or_default`,
+      `wait_with_output` 1 each. Non-method blockers: `for` over a non-range, non-array
+      iterator (`codegen_native.rs:1437`, `:1463`), `flat_map` (`lower.rs` `lower_closure`),
+      non-identifier patterns (`lower_expr_inner`), and `format!` of a `Ty` value (lachesis).
+      Open themes, grouped:
+      1. Iterator sources and `for` loops: `for` over `Vec` iterators, `flat_map`, `skip`/`take`,
+         `iter()` on `Vec` fields inside closures.
+      2. Std surface: `File`/`fs`/`BufReader::lines`/`stdin` (needs `io::Result`, `?`, `Vec<u8>`,
+         handles), `Command::wait_with_output`, `thread::scope`/`Builder`, `Atomic*::fetch_add`.
+      3. Hashing: `DefaultHasher`, `Hash::hash`/`finish`, derived `Hash` (`solver.rs` hashes `Ty`).
+      4. Map iteration: `m.iter()` yields `(K, V)` values where the Rust source expects `(&K, &V)`.
+         Needs reference types in the hint model; the source is rewritten around it for now.
+      5. Path calls in untyped positions: `Vec::new()` inside `Ok((.., Vec::new()))`, and
+         `with_backend` (driver `llm_proposer_from_env`).
+      6. Hint gaps: receivers the checker types as `None` (`join`, `insert`, `push`, `first`,
+         `trim`, `len`), `unwrap_or_default` on `Option`, `as_str`, `checked`/`text` on
+         `PipelineCacheExt`.
+      7. Miscompile (blocks trusting any Stage-1 binary, not counted above): `&mut String`
+         parameters can go stale after a realloc; the probes cannot see it.
     - Blocked (2026-11-15): no Stage-1 binary exists; the probe is `1/5`. The parity
       harness (`tests/stage_parity.rs`) and the CI gate are ready and skip until
       `MOIRA_STAGE1_BIN` is set.
