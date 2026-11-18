@@ -4925,3 +4925,23 @@ fn refutable_tuple_pattern_elements_test_and_bind_runs() {
     };
     assert_eq!(out, "5\n0\n5");
 }
+
+/// A closure that returns early with `return;` (a `()` result) and prints: the prelude's print
+/// function is called, not captured.
+#[test]
+fn closure_bare_return_and_print_call_run() {
+    let out = match run_src(
+        r#"fn main() {
+            let f = |x: &i64| { if *x > 2 { return; } print_i64(*x); };
+            let a: i64 = 1;
+            let b: i64 = 5;
+            f(&a);
+            f(&b);
+            print_i64(9);
+        }"#,
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "1\n9");
+}

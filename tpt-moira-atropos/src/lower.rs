@@ -2654,6 +2654,20 @@ impl Lower {
             .cloned()
             .collect();
         not_captured.extend(self.variants.keys().cloned());
+        // The prelude's output functions are called by name, never captured.
+        for p in [
+            "print_i64",
+            "print_i32",
+            "print_usize",
+            "print_f64",
+            "print_str",
+            "print_bool",
+            "print_char",
+        ] {
+            if !scope_names.contains(p) {
+                not_captured.insert(p.to_string());
+            }
+        }
         Ok(closure_captures(body, &param_names, &not_captured))
     }
 
@@ -3301,7 +3315,10 @@ impl Lower {
             match ty.strip_suffix('*') {
                 Some(base) => {
                     let t = self.fresh_temp(base.to_string());
-                    self.emit(t.clone(), mir::Rvalue::Unary(mir::MirUnOp::Deref, o.clone()));
+                    self.emit(
+                        t.clone(),
+                        mir::Rvalue::Unary(mir::MirUnOp::Deref, o.clone()),
+                    );
                     (mir::Operand::var(t), base.to_string())
                 }
                 None => (o.clone(), ty),
@@ -15106,7 +15123,12 @@ impl Lower {
                         self.expect_ty = None;
                         Some(r?)
                     }
-                    None => None,
+                    // A bare `return;` in a function that returns a C value (a closure whose result is
+                    // `()`, lifted as `long long`) returns the unit value, zero.
+                    None => match self.func.ret.as_deref() {
+                        Some(r) if r != "void" && r != "unit" => Some(mir::Operand::Const(0)),
+                        _ => None,
+                    },
                 };
                 self.set_term(mir::Terminator::Return(v));
                 // Subsequent statements land in a fresh unreachable block.
@@ -16229,7 +16251,10 @@ impl Lower {
             None => mir::Operand::Unit,
         };
         // Variant / nullary-variant patterns get a real guard + payload binds.
-        if matches!(local.pat, ast::Pat::Variant(..) | ast::Pat::Path(_) | ast::Pat::Tuple(_)) {
+        if matches!(
+            local.pat,
+            ast::Pat::Variant(..) | ast::Pat::Path(_) | ast::Pat::Tuple(_)
+        ) {
             self.mut_scrutinee = local.init.as_ref().is_some_and(|init| {
                 arm_binds_by_mut_ref(init, &local.pat, &|n: &str| block_writes_through(then_b, n))
             });
