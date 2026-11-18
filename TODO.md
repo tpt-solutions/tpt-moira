@@ -824,6 +824,132 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
       Probe now: clotho C 230, atropos 1215 (check 143, up 4 from an untraced cause), lachesis
       1250 (check 88), driver 209 (check ok).
     - [ ] Re-run `x.py self-host` after each milestone above; update the crate-by-crate self-hostable count (the `mod` and generics-`<` parse gaps are resolved — remaining blockers are type-check depth: `match`/closures/generics-in-`infer`/tuple-destructure)
+          - Status (2026-11-18, map iterator chains): `m.iter()` on a `HashMap` is now an iterator
+            source on the C path (`count`, `filter`, `map`, `sum`, `next`, ...), materialised as a
+            vector of `(key, value)` pairs in the map's own order (`map_iter_to_vec`; `infer.rs`
+            types `iter`/`into_iter` on `HashMap` as `Iter<(K, V)>`). Test:
+            `tpt-moira-lachesis/tests/map_iter_chain.rs`. Blockers: atropos 142 -> 139; `iter` 24 -> 18
+            across crates. Still `1/5`. Open: `iter` on `Vec<..>` chains that the chain recognizer
+            does not take (e.g. `Vec<Item>`, `Vec<MirProgram>`, `Vec<SsaFunction>`), `get`, `contains`,
+            `parse`, `to_string`, `as_str`, `join`, `clear`, and untyped path calls (`new`, `from`).
+          - Status (2026-11-18, `chain` and field `extend`): `a.iter().chain(b.iter())` over two
+            sequences is a source on the C path (a new vector: `a`'s items, then `b`'s; only when
+            the receiver is a bare `iter()` on a sequence). `s.field.extend(x.iter().cloned())`
+            (any `iter`/`cloned`/`copied`/`into_iter` adapters over a sequence) is accepted.
+            Tests: `tpt-moira-lachesis/tests/vec_iter_chain.rs`. Blockers: clotho 6 -> 5, atropos
+            139 -> 138, `iter` 18 -> 16. Still `1/5`.
+          - Status (2026-11-18, backward inference for untyped constructors): an open
+            `let w = Vec::new()` is fixed by an annotated `let x: Vec<T> = w;` (the existing
+            `resolve_pending_vec_value`, now also called from annotated `let`s), and an open
+            `let s = HashSet::new()` / `HashMap::new()` is fixed by `f(&mut s)` where `f` takes
+            `&mut HashSet<K>` / `&mut HashMap<K, V>` (`resolve_pending_coll_arg`, in
+            `tpt-moira-lachesis/src/infer.rs`). Test: `tpt-moira-lachesis/tests/backward_infer.rs`.
+            Blockers: clotho 5 -> 4, atropos 138 -> 137, lachesis 76 -> 70. Still `1/5`; lachesis still
+            fails its check. Not done: (a) an open constructor fixed only by a use this does not cover
+            (e.g. `Arc::new(..)`, `Command::new`, `Path::new` through a `let` with no other use, and
+            `x = w` assignments not yet wired to `resolve_pending_vec_value`). (b) `flat_map` as a chain source (`borrow.rs:368`, `bundle.rs:311`)
+            needs a nested loop. (c) A chain whose receiver already has adapters before `chain`
+            (`filter_map(..).chain(..)`) needs the receiver materialised first.
+          - Status (2026-11-18, blocker pass): every crate now passes the type and borrow check
+            (`check_ok` true for all five, lachesis included). Codegen blockers went from 241 to
+            about 144 unique sites. Resolved this pass: `Arc<T>`/`Rc<T>` are transparent (checker
+            and lowering); `HashMap::clear`/`HashSet::clear`/`HashSet::drain` (runtime `clear`,
+            set `drain` materialises then clears); `str::parse::<T>()` as a `Result<T, str>` (the
+            parser names the method `parse::<T>`; runtime `moira_try_parse_*`); `rsplit`;
+            `bool::then`; `f64::{is_nan, is_infinite, is_finite, to_bits, from_bits}`;
+            `String::clear`; `contains` on struct/enum vectors now borrows its argument shared
+            (it was a false "cannot borrow as mutable" in lachesis's `parity`); `return` as an
+            arm's tail (moved to `unresolved_method`). Tests: `tests/std_methods_c.rs`,
+            `tests/shared_handles.rs`, `tests/backward_infer.rs`, `tests/vec_iter_chain.rs`,
+            `tests/map_iter_chain.rs`.
+            Later in the same session: `&mut String` parameters are fixed (`char**` at the call and
+            the callee loads a local and stores it back before every return; `tests/mut_string_params.rs`).
+            Expected types now reach `Ok`/`Some`/`None` payloads, tuple elements and branches
+            (`push_expect` in `tpt-moira-lachesis/src/infer.rs`); `Result::ok`/`err` and
+            `Option::filter` are typed; `usize::from(b)` and the other integer `From`s lower as casts;
+            `max`/`min` after a `map` use the post-adapter item; `v.extend(chain)` materialises the
+            chain first. Tests: `tests/expected_types.rs`, `tests/iter_extend_option.rs`.
+            Latest pass: `flat_map` over a bare `iter()` of a sequence (the inner iterator is collected per
+            item, its items appended; `tests/flat_map.rs`); closure captures now see names inside macro
+            arguments (`format!`); `thread_local!` removed from the lowering (assigned names are marked in
+            the walk's `seen` set); `entry(k).or_default()` for set values, and map methods on map-valued
+            expressions; `BTreeMap::iter` in key order (keys and values by the same rank slot;
+            `tests/collections_c.rs`); iterator hints are named by their item.
+            Probe now: `atropos` 32, `lachesis` 19, `moira` driver 10, `clotho` 5 constructs (about 66).
+            Latest: `std::thread::scope` in `codegen_native.rs` is now a sequential map over the functions
+            (the same output in the same order; the parallel emission is given up). `Cow<str>` is a string;
+            `PathBuf::from` is its argument; an annotated `let` pushes its type into `match`/`if` arms;
+            `extend_from_slice` uses the `extend` lowering; `unwrap_or_default` gives a vector or map payload
+            an empty value; `HashMap::retain` types its closure's key and value; `Command`'s `args`/`spawn`
+            and friends are typed (the piped process is not lowered yet). Tests: `tests/misc_c.rs`.
+            Also: `env::args()` (the C `main` keeps `argc`/`argv`; `tests/std_handles.rs`); `.map(mir::f)`
+            style function values rewritten as closures; the driver's argument loop reads by position;
+            `Command` builder methods are typed (the piped `spawn`/`wait_with_output` path is not lowered yet).
+            Known remaining (from the probes): a literal `vec![1, 2]` passed where `&Vec<i64>` is expected
+            stays `Vec<i32>` (the parameter does not type the literal); a function named `check` or `count`
+            is reported as a missing function at its call site.
+            Earlier status: `atropos` 50, `lachesis` 27, `moira` driver 14, `clotho` 5 construct
+            notes (about 96, from about 127 before this pass). This pass also did the approved std models:
+            `File` is its path (`File::create` truncates, `write_all` appends, `File::open`), `fs::read`
+            returns `Vec<u8>`, `fs::create_dir_all`, `io::stdin().read_to_string`, `DefaultHasher` is a
+            `u64` (`x.hash(&mut h)` mixes, `finish` reads it), and `Command` is a shell-out string
+            (`arg` quotes, `output`/`status` run `popen`/`system`; `success` on the code). The checker maps
+            these handle types with `std_handle`; `register_std_handles` holds the definitive signatures.
+            Source rewrites with the same behaviour: `BufReader::new(f).lines()` became
+            `fs::read_to_string` plus `lines()` (`propose.rs`); `Ty::Struct(..)` written out in full;
+            `split_last`/`as_slice`/`slice::from_ref`/`matches(..).count()` in their equivalent forms;
+            `map(AllowKey::Hash)` became a closure. Also: `Option::filter`, `Result::ok`/`err`, closures
+            of `sort_by_key`/`retain` take references, references to references are named in hints,
+            `v.extend(chain)` and `collect` take the post-adapter item type, sorted-map iteration follows
+            key order (`rank`), `join` accepts slices of strings, pending constructors are fixed from
+            method arguments.
+            Known remaining gap found: a tuple built inside `vec![..]` takes the `__tuple_` name while
+            the `Vec<(..)>` element type takes the `Tuple_..` instance name (C type mismatch on push).
+            Not yet started: `flat_map` as a chain source (needs the element type from the terminal's
+            hint), `std::fs`/`File`/`BufReader`/`stdin`, `DefaultHasher`, `Command`, `thread::scope`.
+            Decisions made: `&mut String` fixed now (done); the file, hasher and `Command` models
+            (`File` as its path, `DefaultHasher` as a `u64` mix, `Command` as a shell-out) are the
+            agreed approach but are not implemented yet.
+            Open, found while working on this:
+            * **Miscompile: `&mut String` parameters.** The caller passes the `char*` value, so a
+              `push_str`/`clear` through the parameter writes the callee's copy of the pointer and
+              the caller's string can go stale after a realloc. Needs `&mut String` as `char**` at
+              the call sites and in the body. Not fixed; the probes cannot see it.
+            * **Map iteration pairs are values.** `m.iter()` yields `(K, V)` values in the checker
+              (so chains and `next()` work), but the Rust in `lachesis/src/infer.rs` (`expr_types
+              .iter()`) needs `(&K, &V)`. That line is rewritten to an equivalent form
+              (`hint_of_ty(&ty)`, `span.clone()`). Proper fix: reference types for tuples and
+              scalars in the hint model.
+            * Std surface still missing (about 45 sites): `Instant::now`/`elapsed`, `env::var`,
+              `env::var_os`, `temp_dir`, `fs::read`/`create_dir_all`/`File::create`/`File::open`,
+              `BufReader::lines`, `stdin`, `Command`, `thread::scope`/`Builder`, `DefaultHasher`,
+              `from_str_radix`, `by_ref`, `into_owned`.
+          - Status (2026-11-18, later pass): all five crates pass parse, check and borrow check. Codegen
+            blockers: about 117 unique sites (was 241). Added since the previous note: `Instant` and
+            `Duration` as `f64` seconds (`Instant::now`, `elapsed`, `as_secs_f64`); `env::var`,
+            `env::var_os`, `env::temp_dir`; `u32`/`u64`/`usize`/`i32`/`i64::from_str_radix`;
+            `Path::new` (identity); `to_path_buf`, `to_string_lossy`, `into_owned` on strings;
+            `Vec::append(&mut w)` fixes an open `Vec::new()`; `println!` of a `bool` local (a
+            comparison's temporary was printing `1`); `String::clear`; `f64::is_infinite`/`is_finite`.
+            Fixed a checker override: older `Instant`/`env`/`from_str_radix` signatures in the prelude
+            were overriding the typed ones. Lachesis's `parity` false positive came from `contains`
+            taking a mutable borrow of its argument (now shared).
+            Still open (each needs a design decision, listed so they can be decided):
+            * `File::create`/`File::open`/`write_all`/`BufReader::lines`/`fs::read`/`create_dir_all`
+              and `stdin().read_to_string`: needs `io::Result` with `?`, `Vec<u8>` bytes and file
+              handles. A possible model is `File` as its path (write-once truncate-then-append).
+            * `DefaultHasher` + `Hash::hash` + `finish`, and derived `Hash` on structs and enums
+              (`solver.rs` hashes a `Ty`): needs a hashing model.
+            * `Command` (`output`, `wait_with_output`, `success`), `thread::scope`, `thread::Builder`:
+              `codegen_native.rs` and `main.rs` use them to build and run the native backend.
+            * `Vec::new()` inside a returned `Ok((.., Vec::new()))`: needs expected types pushed
+              through `Ok` and tuple expressions.
+            * Sequence sources not recognised: `flat_map`, `iter()` on `Vec<..>` fields inside
+              closures (several `map`/`fold` chains over `Vec<HashSet<..>>`), `skip`/`take` stages.
+            * Hint gaps: `unwrap_or_default` and `as_deref` on payloads the checker leaves unknown,
+              `to_string` on `mir::Operand::Const` payloads from another module, `ends_with` and
+              `starts_with` on closure parameters.
+            * Miscompile: `&mut String` parameters (see above).
           - Status (2026-11-16): `x.py self-host` still reports `1/5`. This pass added
             `str::as_bytes` (checker signature `&str -> &[u8]`, lowered to a `Slice<u8>`
             aliasing the string's bytes via a generated `from_str` helper), so a `&[u8]`
