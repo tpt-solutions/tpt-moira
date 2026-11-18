@@ -3651,9 +3651,7 @@ impl Lower {
                             s
                         }
                         _ => {
-                            let pure = self
-                                .iter_chain_of(r)
-                                .is_some_and(|c| chain_stages_pure(&c));
+                            let pure = self.iter_chain_of(r).is_some_and(|c| chain_stages_pure(&c));
                             if !pure {
                                 return None;
                             }
@@ -3990,7 +3988,11 @@ impl Lower {
         let more = self.fresh_temp("long long");
         self.emit(
             more.clone(),
-            mir::Rvalue::Binary(mir::MirBinOp::Lt, mir::Operand::var(idx.clone()), mir::Operand::var(len)),
+            mir::Rvalue::Binary(
+                mir::MirBinOp::Lt,
+                mir::Operand::var(idx.clone()),
+                mir::Operand::var(len),
+            ),
         );
         self.set_term(mir::Terminator::If(mir::Operand::var(more), body, exit));
         self.current = body;
@@ -4005,7 +4007,11 @@ impl Lower {
         self.emit(sink, mir::Rvalue::Call(mir::Operand::Func(func), args));
         self.emit(
             idx.clone(),
-            mir::Rvalue::Binary(mir::MirBinOp::Add, mir::Operand::var(idx.clone()), mir::Operand::Const(1)),
+            mir::Rvalue::Binary(
+                mir::MirBinOp::Add,
+                mir::Operand::var(idx.clone()),
+                mir::Operand::Const(1),
+            ),
         );
         self.set_term(mir::Terminator::Goto(head));
         self.current = exit;
@@ -4091,7 +4097,11 @@ impl Lower {
                 Some(d) => d.fields.iter().map(|(_, t)| t.clone()).collect(),
                 None => match mir::split_generic(&elem) {
                     Some(("Tuple", a)) => a.iter().map(|x| x.to_string()).collect(),
-                    _ => return Err(LowerError("`iter_mut().find` on an unsupported tuple".into())),
+                    _ => {
+                        return Err(LowerError(
+                            "`iter_mut().find` on an unsupported tuple".into(),
+                        ))
+                    }
                 },
             };
             for (i, ft) in fields.iter().enumerate() {
@@ -4383,15 +4393,19 @@ impl Lower {
                 let Some(param) = params.first() else {
                     return Err(LowerError("`flat_map` closure needs a parameter".into()));
                 };
-                let body_chain = self
-                    .iter_chain_of(body)
-                    .ok_or_else(|| LowerError("`flat_map` needs an iterator body".into()))?;
+                // The body is an iterator chain, or a value that is a sequence (`|x| f(x)` for a
+                // function returning a vector), whose items are the body's.
+                let body_chain = self.iter_chain_of(body);
+                if body_chain.is_none() && !self.is_sequence(body) {
+                    return Err(LowerError("`flat_map` needs an iterator body".into()));
+                }
                 let inner_elem = self
                     .hint_of_expr(body)
                     .and_then(|h| {
                         h.strip_prefix("Iter<")
                             .and_then(|t| t.strip_suffix('>'))
                             .map(|t| t.to_string())
+                            .or_else(|| mir::vec_elem(&h).map(|e| e.to_string()))
                     })
                     .ok_or_else(|| {
                         LowerError("`flat_map`: the inner item type is unknown".into())
@@ -4440,7 +4454,10 @@ impl Lower {
                     mir::Rvalue::Index(mir::Operand::var(data), mir::Operand::var(idx.clone())),
                 );
                 self.lower_bind_pattern(&param.pat, mir::Operand::var(item), &selem)?;
-                let inner = self.lower_iter_chain(body, body_chain, "collect", &[])?;
+                let inner = match body_chain {
+                    Some(bc) => self.lower_iter_chain(body, bc, "collect", &[])?,
+                    None => self.lower_expr(body)?,
+                };
                 let mir::Operand::Var(inn) = inner else {
                     return Err(LowerError("`flat_map` needs a named inner result".into()));
                 };
@@ -4672,7 +4689,9 @@ impl Lower {
         // `fold(init, |acc, x| ..)`: the accumulator has the fold's type; the closure takes it
         // and the item.
         let fold_acc: String = if terminal == "fold" {
-            self.hint_of_expr(e).map(|h| c_scalar_name(&h)).unwrap_or_else(|| "long long".to_string())
+            self.hint_of_expr(e)
+                .map(|h| c_scalar_name(&h))
+                .unwrap_or_else(|| "long long".to_string())
         } else {
             String::new()
         };
@@ -4689,8 +4708,20 @@ impl Lower {
                     && matches!(p.segments[1].node.as_str(), "max" | "min")
                     && matches!(
                         p.segments[0].node.as_str(),
-                        "f32" | "f64" | "i8" | "i16" | "i32" | "i64" | "isize" | "i128"
-                            | "u8" | "u16" | "u32" | "u64" | "usize" | "u128"
+                        "f32"
+                            | "f64"
+                            | "i8"
+                            | "i16"
+                            | "i32"
+                            | "i64"
+                            | "isize"
+                            | "i128"
+                            | "u8"
+                            | "u16"
+                            | "u32"
+                            | "u64"
+                            | "usize"
+                            | "u128"
                     ) =>
             {
                 Some(p.segments[1].node.clone())
@@ -5450,21 +5481,36 @@ impl Lower {
                 let key = self.fresh_temp(self.temp_type_of(&best));
                 self.emit(key.clone(), mir::Rvalue::Call(mir::Operand::Func(f), args));
                 let tag = self.fresh_temp("long long");
-                self.emit(tag.clone(), mir::Rvalue::Field(mir::Operand::var(r.clone()), "tag".into(), false));
+                self.emit(
+                    tag.clone(),
+                    mir::Rvalue::Field(mir::Operand::var(r.clone()), "tag".into(), false),
+                );
                 let none = self.fresh_temp("long long");
                 self.emit(
                     none.clone(),
-                    mir::Rvalue::Binary(mir::MirBinOp::Eq, mir::Operand::var(tag), mir::Operand::Const(1)),
+                    mir::Rvalue::Binary(
+                        mir::MirBinOp::Eq,
+                        mir::Operand::var(tag),
+                        mir::Operand::Const(1),
+                    ),
                 );
                 let check = self.new_block();
                 let take = self.new_block();
                 self.set_term(mir::Terminator::If(mir::Operand::var(none), take, check));
                 self.current = check;
                 let better = self.fresh_temp("long long");
-                let cmp = if terminal == "max_by_key" { mir::MirBinOp::Gt } else { mir::MirBinOp::Lt };
+                let cmp = if terminal == "max_by_key" {
+                    mir::MirBinOp::Gt
+                } else {
+                    mir::MirBinOp::Lt
+                };
                 self.emit(
                     better.clone(),
-                    mir::Rvalue::Binary(cmp, mir::Operand::var(key.clone()), mir::Operand::var(best.clone())),
+                    mir::Rvalue::Binary(
+                        cmp,
+                        mir::Operand::var(key.clone()),
+                        mir::Operand::var(best.clone()),
+                    ),
                 );
                 self.set_term(mir::Terminator::If(mir::Operand::var(better), take, step));
                 self.current = take;
@@ -5487,10 +5533,18 @@ impl Lower {
                 let op = fold_path_op.clone().expect("checked above");
                 // `max` takes the item when it is greater; `min` when it is less.
                 let better = self.fresh_temp("long long");
-                let cmp = if op == "max" { mir::MirBinOp::Gt } else { mir::MirBinOp::Lt };
+                let cmp = if op == "max" {
+                    mir::MirBinOp::Gt
+                } else {
+                    mir::MirBinOp::Lt
+                };
                 self.emit(
                     better.clone(),
-                    mir::Rvalue::Binary(cmp, mir::Operand::var(item.clone()), mir::Operand::var(r.clone())),
+                    mir::Rvalue::Binary(
+                        cmp,
+                        mir::Operand::var(item.clone()),
+                        mir::Operand::var(r.clone()),
+                    ),
                 );
                 let take = self.new_block();
                 self.set_term(mir::Terminator::If(mir::Operand::var(better), take, step));

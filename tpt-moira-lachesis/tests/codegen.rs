@@ -4613,3 +4613,21 @@ fn flat_map_with_function_path_runs() {
     };
     assert_eq!(out, "4\n20");
 }
+
+/// `flat_map(|x| f(x))` whose body is a vector value (not an iterator chain) flattens its items.
+#[test]
+fn flat_map_with_sequence_valued_body_runs() {
+    let out = match run_src(
+        r#"fn names(n: &i64) -> Vec<i64> { vec![*n, *n + 100] }
+        fn main() {
+            let v: Vec<i64> = vec![1, 2];
+            let all: Vec<i64> = v.iter().flat_map(|x| names(x)).collect();
+            print_i64(all.len() as i64);
+            print_i64(all[3]);
+        }"#,
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "4\n102");
+}
