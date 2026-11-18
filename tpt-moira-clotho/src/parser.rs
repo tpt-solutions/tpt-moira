@@ -2307,13 +2307,18 @@ impl Parser {
                         || matches!(self.peek_kind(), TokenKind::Ident(_))
                         || is_primitive_keyword(self.peek_kind())
                     {
-                        let method = self.expect_ident()?;
+                        let mut method = self.expect_ident()?;
                         // Optional turbofish `::<T>` (e.g. `.collect::<Vec<_>>()`).
                         // The Phase-1 subset ignores the inferred type arguments,
                         // but the parser must accept them so method chains in real
-                        // Rust code parse.
+                        // Rust code parse. The one exception is `parse::<T>()`: its
+                        // target type decides the result, so the method name carries it
+                        // as `parse::<T>`.
                         if self.eat(&TokenKind::ColonColon) && self.eat_lt() {
-                            self.parse_generic_args()?;
+                            let targs = self.parse_generic_args()?;
+                            if method.node == "parse" && targs.len() == 1 {
+                                method.node = format!("parse::<{}>", targs[0].node_name());
+                            }
                         }
                         if self.eat(&TokenKind::LParen) {
                             let args =

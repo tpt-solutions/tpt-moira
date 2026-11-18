@@ -114,6 +114,49 @@ char* moira_str_before(char* s, long long n) { return moira_str_dup_n(s, (size_t
 long long moira_line_next(char* s, long long i) { char* q = strchr(s + i, '\n'); return q ? (long long)(q - s) + 1 : (long long)strlen(s); }
 #include <errno.h>
 #include <ctype.h>
+#include <time.h>
+/* `parse::<T>()` as a status: 1 when the whole text is a number of the type (stored in *out), 0 otherwise. */
+long long moira_try_parse_s(char* s, void* out, int bits) { char* e; errno = 0; if (*s == 0 || isspace((unsigned char)*s)) return 0; long long v = strtoll(s, &e, 10); long long lim = bits < 64 ? (1LL << (bits - 1)) : 0; if (*e == 0 && errno == 0 && (bits == 64 || (v >= -lim && v < lim))) { if (bits == 8) *(int8_t *)out = (int8_t)v; else if (bits == 16) *(int16_t *)out = (int16_t)v; else if (bits == 32) *(int32_t *)out = (int32_t)v; else *(long long*)out = v; return 1; } return 0; }
+long long moira_try_parse_u(char* s, void* out, int bits) { char* e; errno = 0; if (*s == 0 || isspace((unsigned char)*s) || *s == '-') return 0; unsigned long long v = strtoull(s, &e, 10); unsigned long long mx = bits < 64 ? ((1ULL << bits) - 1) : 0ULL; if (*e == 0 && errno == 0 && (bits == 64 || v <= mx)) { if (bits == 8) *(uint8_t *)out = (uint8_t)v; else if (bits == 16) *(uint16_t *)out = (uint16_t)v; else if (bits == 32) *(uint32_t *)out = (uint32_t)v; else *(unsigned long long*)out = v; return 1; } return 0; }
+long long moira_try_parse_f(char* s, double* out) { char* e; errno = 0; if (*s == 0 || isspace((unsigned char)*s)) return 0; double v = strtod(s, &e); if (*e == 0 && errno == 0) { *out = v; return 1; } return 0; }
+static long long moira_f64_is_nan(double x) { return x != x; }
+static long long moira_f64_is_infinite(double x) { return x == 1.0 / 0.0 || x == -1.0 / 0.0; }
+static long long moira_f64_is_finite(double x) { return x - x == 0.0; }
+static unsigned long long moira_f64_to_bits(double x) { unsigned long long u; memcpy(&u, &x, sizeof u); return u; }
+static double moira_f64_from_bits(unsigned long long u) { double x; memcpy(&x, &u, sizeof x); return x; }
+/* std: clocks, the environment, radix parsing. */
+double moira_instant_now(void) { struct timespec ts; timespec_get(&ts, TIME_UTC); return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9; }
+double moira_instant_elapsed(double t) { return moira_instant_now() - t; }
+char* moira_env_get(char* k) { return getenv(k); }
+char* moira_temp_dir(void) { char* t = getenv("TMPDIR"); if (!t) t = getenv("TEMP"); if (!t) t = getenv("TMP"); return moira_str_dup(t ? t : "."); }
+long long moira_try_radix_u(char* s, long long radix, void* out, int bits) { char* e; errno = 0; if (*s == 0 || isspace((unsigned char)*s) || *s == '-') return 0; unsigned long long v = strtoull(s, &e, (int)radix); unsigned long long mx = bits < 64 ? ((1ULL << bits) - 1) : 0ULL; if (*e == 0 && errno == 0 && (bits == 64 || v <= mx)) { if (bits == 32) *(uint32_t *)out = (uint32_t)v; else *(unsigned long long*)out = v; return 1; } return 0; }
+long long moira_try_radix_s(char* s, long long radix, void* out, int bits) { char* e; errno = 0; if (*s == 0 || isspace((unsigned char)*s)) return 0; long long v = strtoll(s, &e, (int)radix); long long lim = bits < 64 ? (1LL << (bits - 1)) : 0; if (*e == 0 && errno == 0 && (bits == 64 || (v >= -lim && v < lim))) { if (bits == 32) *(int32_t *)out = (int32_t)v; else *(long long*)out = v; return 1; } return 0; }
+/* The process arguments (`env::args()`): main stores them on entry. */
+int moira_argc = 0;
+char** moira_argv = NULL;
+long long moira_args_count(void) { return (long long)moira_argc; }
+char** moira_args_data(void) { return moira_argv; }
+/* std handles as values: files, directories, stdin, commands and the hasher. */
+#ifdef _WIN32
+#include <direct.h>
+#define mkdir_ok(p) _mkdir(p)
+#else
+#include <sys/stat.h>
+#define mkdir_ok(p) mkdir(p, 0777)
+#endif
+static void mkdir_or_ok(char* p) { mkdir_ok(p); }
+long long moira_mkdir_all(char* p) { char* q = moira_str_dup(p); for (char* s = q + 1; *s; s++) { if (*s == '/' || *s == '\\') { char c = *s; *s = 0; mkdir_or_ok(q); *s = c; } } mkdir_or_ok(q); free(q); return 1; }
+uint8_t* moira_fs_read_bytes(char* p, long long* len) { FILE* f = fopen(p, "rb"); *len = 0; if (!f) return NULL; fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET); uint8_t* b = (uint8_t*)malloc((size_t)(sz > 0 ? sz : 1)); size_t n = fread(b, 1, (size_t)(sz > 0 ? sz : 0), f); fclose(f); *len = (long long)n; return b; }
+char* moira_file_create(char* p) { FILE* f = fopen(p, "wb"); if (!f) return NULL; fclose(f); return moira_str_dup(p); }
+char* moira_file_open(char* p) { FILE* f = fopen(p, "rb"); if (!f) return NULL; fclose(f); return moira_str_dup(p); }
+long long moira_file_append(char* p, void* data, long long n) { FILE* f = fopen(p, "ab"); if (!f) return 0; size_t w = fwrite(data, 1, (size_t)n, f); fclose(f); return w == (size_t)n; }
+long long moira_stdin_read_all(char** out) { size_t cap = 4096, len = 0; char* b = (char*)malloc(cap); size_t n; while ((n = fread(b + len, 1, cap - len, stdin)) > 0) { len += n; if (len == cap) { cap *= 2; b = (char*)realloc(b, cap); } } b[len] = 0; size_t a = strlen(*out); char* r = (char*)malloc(a + len + 1); memcpy(r, *out, a); memcpy(r + a, b, len + 1); *out = r; free(b); return 1; }
+char* moira_cmd_arg(char* cmd, char* a) { char* r = (char*)malloc(strlen(cmd) + strlen(a) + 4); sprintf(r, "%s \"%s\"", cmd, a); return r; }
+char* moira_cmd_output(char* cmd) { FILE* f = popen(cmd, "r"); if (!f) return NULL; size_t cap = 4096, len = 0; char* b = (char*)malloc(cap); size_t n; while ((n = fread(b + len, 1, cap - len, f)) > 0) { len += n; if (len == cap) { cap *= 2; b = (char*)realloc(b, cap); } } b[len] = 0; pclose(f); return b; }
+long long moira_cmd_status(char* cmd) { return (long long)system(cmd); }
+long long moira_hash_mix_u(unsigned long long* h, long long v) { *h = (*h ^ (unsigned long long)v) * 1099511628211ULL; return 0; }
+long long moira_hash_mix_s(unsigned long long* h, char* s) { for (; *s; s++) *h = (*h ^ (unsigned char)*s) * 1099511628211ULL; *h = (*h ^ 0xff) * 1099511628211ULL; return 0; }
+long long moira_str_clear(char** s) { *s = (char*)malloc(1); (*s)[0] = 0; return 0; }
 long long moira_parse_s(char* s, long long d, int has_default, int bits) { char* e; errno = 0; if (*s == 0 || isspace((unsigned char)*s)) goto bad; long long v = strtoll(s, &e, 10); long long lim = bits < 64 ? (1LL << (bits - 1)) : 0; if (*e == 0 && errno == 0 && (bits == 64 || (v >= -lim && v < lim))) return v; bad: if (has_default) return d; __moira_panic(); return 0; }
 unsigned long long moira_parse_u(char* s, unsigned long long d, int has_default, int bits) { char* e; errno = 0; if (*s == 0 || isspace((unsigned char)*s) || *s == '-') goto bad; unsigned long long v = strtoull(s, &e, 10); unsigned long long mx = bits < 64 ? ((1ULL << bits) - 1) : 0ULL; if (*e == 0 && errno == 0 && (bits == 64 || v <= mx)) return v; bad: if (has_default) return d; __moira_panic(); return 0; }
 double moira_parse_f(char* s, double d, int has_default) { char* e; errno = 0; if (*s == 0 || isspace((unsigned char)*s)) goto bad; double v = strtod(s, &e); if (*e == 0 && errno == 0) return v; bad: if (has_default) return d; __moira_panic(); return 0; }
@@ -409,7 +452,7 @@ pub fn emit_c(prog: &mir::MirProgram) -> String {
     }
     // Inner element types first: a nested vector's typedef needs its element's.
     let mut ordered: Vec<&String> = vec_elems.iter().collect();
-    ordered.sort_by_key(|e| e.matches("Vec<").count());
+    ordered.sort_by_key(|e| e.split("Vec<").count() - 1);
     for elem in &ordered {
         out.push_str(&vec_typedef(elem, &struct_names));
     }
@@ -525,7 +568,10 @@ fn c_signature(f: &mir::MirFunction, struct_names: &std::collections::HashSet<&s
             c_decl(t, p, struct_names)
         })
         .collect();
-    let param_str = if params.is_empty() {
+    // `main` takes the process arguments (kept for `env::args()`).
+    let param_str = if params.is_empty() && f.name == "main" {
+        "int argc, char** argv".to_string()
+    } else if params.is_empty() {
         "void".to_string()
     } else {
         params.join(", ")
@@ -598,13 +644,20 @@ fn emit_function(
             c_decl(t, p, struct_names).to_string()
         })
         .collect();
-    let param_str = if params.is_empty() {
+    // `main` takes the process arguments (kept for `env::args()`).
+    let is_main_args = params.is_empty() && f.name == "main";
+    let param_str = if is_main_args {
+        "int argc, char** argv".to_string()
+    } else if params.is_empty() {
         "void".to_string()
     } else {
         params.join(", ")
     };
 
     let mut out = format!("{} {{\n", fn_header(&ret, &f.name, &param_str));
+    if is_main_args {
+        out.push_str("    moira_argc = argc;\n    moira_argv = argv;\n");
+    }
 
     // Local variable declarations. Skip locals that are also parameters or that
     // have already been declared (the async poll path may register a slot as
@@ -1044,7 +1097,8 @@ fn c_type(ty: &str, struct_names: &std::collections::HashSet<&str>) -> String {
     }
     // A function type `Fn<params..,result>` is a function pointer with that signature.
     if let Some(("Fn", parts)) = mir::split_generic(ty) {
-        if let Some((ret, params)) = parts.split_last() {
+        if let Some(ret) = parts.last() {
+            let params = &parts[..parts.len() - 1];
             let ret_c = c_type(ret, struct_names);
             let params_c: Vec<String> = params.iter().map(|p| c_type(p, struct_names)).collect();
             let list = if params_c.is_empty() {
@@ -1523,6 +1577,11 @@ fn map_helpers(
     ));
     s.push_str(&format!(
         "static long long {is_empty}({name}* m) {{ return m->len == 0; }}\n"
+    ));
+    // `clear()`: the table keeps its storage and forgets its entries.
+    let clear = mir::map_fn_name(k, v, "clear");
+    s.push_str(&format!(
+        "static long long {clear}({name}* m) {{ m->len = 0; return 0; }}\n"
     ));
     // `rank(m, i)`: the slot of the i-th smallest key (sorted maps iterate through it).
     let less = key_less(k, "a", "b", structs);
