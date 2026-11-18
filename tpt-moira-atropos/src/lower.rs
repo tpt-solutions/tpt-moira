@@ -2559,7 +2559,12 @@ impl Lower {
                 matches!(&p.pat, ast::Pat::Ref(inner) if matches!(&**inner, ast::Pat::Ident(_)));
             let mut j = 0;
             while j < names_of_p.len() {
-                let n = names_of_p[j].clone();
+                // A wildcard parameter is a parameter of its own (two `_` would clash in C).
+                let n = if names_of_p[j] == "_" {
+                    format!("__wild_{k}_{j}")
+                } else {
+                    names_of_p[j].clone()
+                };
                 let ty = tys[j].clone();
                 if by_ref_pattern && ty.ends_with('*') {
                     let hidden = format!("__deref_{n}");
@@ -3279,7 +3284,19 @@ impl Lower {
                 ))
             }
         };
-        let base_ty = self.temp_type_of(&name_of(&o));
+        // A tuple read through a reference (`let (a, b) = map.get(k)?;`) is read through its
+        // pointer: the components are the referent's.
+        let (o, base_ty) = {
+            let ty = self.temp_type_of(&name_of(&o));
+            match ty.strip_suffix('*') {
+                Some(base) => {
+                    let t = self.fresh_temp(base.to_string());
+                    self.emit(t.clone(), mir::Rvalue::Unary(mir::MirUnOp::Deref, o.clone()));
+                    (mir::Operand::var(t), base.to_string())
+                }
+                None => (o.clone(), ty),
+            }
+        };
         for (i, pat) in elems.iter().enumerate() {
             let name =
                 match pat {

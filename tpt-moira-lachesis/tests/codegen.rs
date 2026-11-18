@@ -4834,3 +4834,28 @@ fn let_else_over_reference_to_field_runs() {
     };
     assert_eq!(out, "7\n-1");
 }
+
+/// A closure with two wildcard parameters (`|_: &i64, _: &i64|`) and a `let` that destructures a
+/// tuple read through a map lookup with `?`.
+#[test]
+fn wildcard_closure_parameters_and_destructured_lookup_run() {
+    let out = match run_src(
+        r#"use std::collections::HashMap;
+        fn look(m: &HashMap<String, (String, i64)>, k: &str) -> Option<i64> {
+            let (name, n) = m.get(k)?;
+            Some(*n + name.len() as i64)
+        }
+        fn main() {
+            let v = vec![1i64, 2, 3];
+            let f = |_: &i64, _: &i64| 1i64;
+            print_i64(f(&v[0], &v[1]) + v.iter().filter(|_| true).count() as i64);
+            let mut m: HashMap<String, (String, i64)> = HashMap::new();
+            m.insert(String::from("a"), (String::from("xy"), 5));
+            print_i64(look(&m, "a").unwrap_or(0));
+        }"#,
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "4\n7");
+}
