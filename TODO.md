@@ -911,6 +911,19 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
             enum (`Ty`), `by_ref` on a char iterator held in a local, two atropos sites whose
             pattern error is raised in a helper of `lower_expr_inner`, and the driver's std
             process/thread surface and cross-crate methods.
+          - Status (2026-11-18, blocker pass 6): the Rust-side lowering now succeeds for clotho
+            and atropos (the probe's remaining lowering errors are lachesis 2 and the driver 8).
+            The next gate is the emitted C: `build/clotho.c` has 427 C errors and `build/atropos.c`
+            1303 (mostly argument and assignment types: specialised `visit_expr_with`-style helpers
+            whose closure arguments are passed as pointers where values are expected, and
+            `Spanned__String` / `ABinOp` used as type names before their definitions). Fixed in
+            this pass: flat_map over map entries and sequence bodies, chain left sides, `&n`
+            closure parameters, `dyn Fn` signatures, `collect::<T>()` annotations, derive spans
+            from the file base (the global counter is gone), entry-slot `extend`, nested tuple
+            closure patterns (written as a binding), reference-pattern closure parameters, and a
+            silent miscompile (`|&n|` read the address). Lachesis: `format!` of an enum (`Ty`) and
+            `by_ref` on a char iterator held in a local. Driver: `thread::Builder`, `Command`,
+            `from_utf8_lossy`, cross-crate methods, `Diag::to_string` (a user `Display`).
           - Status (2026-11-18, `chain` and field `extend`): `a.iter().chain(b.iter())` over two
             sequences is a source on the C path (a new vector: `a`'s items, then `b`'s; only when
             the receiver is a bare `iter()` on a sequence). `s.field.extend(x.iter().cloned())`
