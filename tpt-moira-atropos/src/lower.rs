@@ -3708,17 +3708,25 @@ impl Lower {
                 "flat_map"
                     if args.len() == 1 && matches!(args[0].kind, ExprKind::Closure { .. }) =>
                 {
+                    // The source is `x.iter()` (a sequence or a map's entries), or a pure adapter
+                    // chain collected first.
                     let src: &'a Expr = match &unparen(r).kind {
                         ExprKind::MethodCall(s, m, a)
-                            if matches!(m.node.as_str(), "iter" | "into_iter") && a.is_empty() =>
+                            if matches!(m.node.as_str(), "iter" | "into_iter") && a.is_empty()
+                                && self.is_sequence(s) =>
                         {
                             s
                         }
-                        _ => return None,
+                        _ => {
+                            let pure = self
+                                .iter_chain_of(r)
+                                .is_some_and(|c| chain_stages_pure(&c));
+                            if !pure {
+                                return None;
+                            }
+                            unparen(r)
+                        }
                     };
-                    if !self.is_sequence(src) {
-                        return None;
-                    }
                     stages.reverse();
                     return Some(IterChain {
                         seq: Some(src),
@@ -4416,7 +4424,11 @@ impl Lower {
                 // The body is an iterator chain, or a value that is a sequence (`|x| f(x)` for a
                 // function returning a vector), whose items are the body's.
                 let body_chain = self.iter_chain_of(body);
-                if body_chain.is_none() && !self.is_sequence(body) {
+                let body_array = match self.hint_of_expr(body).as_deref().and_then(|h| mir::split_generic(h)) {
+                    Some(("Array", a)) if a.len() == 2 => a[1].parse::<i128>().ok().map(|n| (a[0].to_string(), n)),
+                    _ => None,
+                };
+                if body_chain.is_none() && body_array.is_none() && !self.is_sequence(body) {
                     return Err(LowerError("`flat_map` needs an iterator body".into()));
                 }
                 let inner_elem = self
@@ -4426,11 +4438,16 @@ impl Lower {
                             .and_then(|t| t.strip_suffix('>'))
                             .map(|t| t.to_string())
                             .or_else(|| mir::vec_elem(&h).map(|e| e.to_string()))
+                            .or_else(|| body_array.as_ref().map(|(e, _)| e.clone()))
                     })
                     .ok_or_else(|| {
                         LowerError("`flat_map`: the inner item type is unknown".into())
                     })?;
-                let (sn, selem, sptr) = self.chain_sequence(seq)?;
+                let (sn, selem, sptr) = if self.is_sequence(seq) {
+                    self.chain_sequence(seq)?
+                } else {
+                    self.materialize_chain(seq)?
+                };
                 let out = self.fresh_temp(mir::vec_type(&inner_elem));
                 self.emit(
                     out.clone(),
@@ -4474,9 +4491,14 @@ impl Lower {
                     mir::Rvalue::Index(mir::Operand::var(data), mir::Operand::var(idx.clone())),
                 );
                 self.lower_bind_pattern(&param.pat, mir::Operand::var(item), &selem)?;
-                let inner = match body_chain {
-                    Some(bc) => self.lower_iter_chain(body, bc, "collect", &[])?,
-                    None => self.lower_expr(body)?,
+                let inner = match (body_chain, &body_array) {
+                    (Some(bc), _) => self.lower_iter_chain(body, bc, "collect", &[])?,
+                    // An array body is copied into a vector first (the walk reads vectors).
+                    (None, Some((e, n))) => {
+                        let (v, _, _) = self.array_as_vector(body, e, *n)?;
+                        mir::Operand::var(v)
+                    }
+                    (None, None) => self.lower_expr(body)?,
                 };
                 let mir::Operand::Var(inn) = inner else {
                     return Err(LowerError("`flat_map` needs a named inner result".into()));
@@ -15577,7 +15599,9 @@ impl Lower {
                 // the C backend emits its `elem_ty name[len] = {..}` declaration inline.
                 let t = format!("t{}", self.temp_counter);
                 self.temp_counter += 1;
-                let elem_ct = self.array_elem_ct(elems);
+                let elem_ct = self
+                    .hint_array_elem_ct(e)
+                    .unwrap_or_else(|| self.array_elem_ct(elems));
                 self.emit(
                     t.clone(),
                     mir::Rvalue::Array(elem_ct, operands),
@@ -16234,6 +16258,22 @@ impl Lower {
     /// when the expression is not a variant construction.
     /// The C element type of an array literal: the enum when its first element is a
     /// variant (`[T::Add, T::Sub]`), else `long long`.
+    /// The C element type of an array literal from the checker's `Array<E, N>` hint, for a string
+    /// or a scalar element (`None` for anything else: the first element decides then).
+    fn hint_array_elem_ct(&self, e: &ast::Expr) -> Option<String> {
+        let h = self.hint_of_expr(e)?;
+        let (base, a) = mir::split_generic(&h)?;
+        if base != "Array" || a.len() != 2 {
+            return None;
+        }
+        match a[0] {
+            "str" => Some("char*".to_string()),
+            "i8" | "i16" | "i32" | "i64" | "isize" | "u8" | "u16" | "u32" | "u64" | "usize" | "bool"
+            | "char" => Some(c_scalar_name(a[0])),
+            _ => None,
+        }
+    }
+
     fn array_elem_ct(&self, elems: &[ast::Expr]) -> String {
         if let Some(ExprKind::Lit(ast::Lit::Str(_))) = elems.first().map(|e| &e.kind) {
             return "char*".to_string();

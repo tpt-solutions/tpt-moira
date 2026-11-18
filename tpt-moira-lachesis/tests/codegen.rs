@@ -4694,3 +4694,26 @@ fn parameter_shadowing_a_function_name_and_nested_vector_stores_run() {
     };
     assert_eq!(out, "7\n1\n2");
 }
+
+/// `map.iter().flat_map(|(k, v)| [..])` over a map's entries, with an array of strings as each
+/// body, chained after a set's items.
+#[test]
+fn flat_map_over_map_entries_with_array_bodies_runs() {
+    let out = match run_src(
+        r#"use std::collections::BTreeSet;
+        use std::collections::HashMap;
+        fn main() {
+            let mut m: HashMap<String, i64> = HashMap::new();
+            m.insert(String::from("k"), 3);
+            let s: BTreeSet<String> = BTreeSet::new();
+            let all: Vec<String> = m.iter().flat_map(|(k, v)| [k.clone(), format!("{}", v)]).collect();
+            let more: Vec<String> = s.iter().map(|x| x.clone()).chain(all.iter().map(|x| x.clone())).collect();
+            print_i64(all.len() as i64);
+            print_i64(more.len() as i64);
+        }"#,
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "2\n2");
+}
