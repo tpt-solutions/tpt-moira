@@ -762,6 +762,7 @@ fn is_iter_terminal(name: &str) -> bool {
             | "last"
             | "next"
             | "nth"
+            | "fold"
     )
 }
 
@@ -4562,9 +4563,25 @@ impl Lower {
             stage_callees.push(callee);
         }
         // `nth(i)` takes an index, not a closure.
-        let term_callee = match term_args.first().filter(|_| terminal != "nth") {
+        // `fold(init, |acc, x| ..)`: the accumulator has the fold's type; the closure takes it
+        // and the item.
+        let fold_acc: String = if terminal == "fold" {
+            self.hint_of_expr(e).map(|h| c_scalar_name(&h)).unwrap_or_else(|| "long long".to_string())
+        } else {
+            String::new()
+        };
+        let closure_arg = if terminal == "fold" {
+            term_args.get(1)
+        } else {
+            term_args.first().filter(|_| terminal != "nth")
+        };
+        let term_callee = match closure_arg {
             Some(a) => {
-                self.closure_param_hint = Some(vec![cur.clone()]);
+                self.closure_param_hint = Some(if terminal == "fold" {
+                    vec![fold_acc.clone(), cur.clone()]
+                } else {
+                    vec![cur.clone()]
+                });
                 let r = self.closure_callee(a);
                 self.closure_param_hint = None;
                 Some(r?)
@@ -4655,6 +4672,15 @@ impl Lower {
             "count" | "sum" => {
                 let r = self.fresh_temp("long long");
                 self.emit(r.clone(), mir::Rvalue::Use(mir::Operand::Const(0)));
+                res = Some(r);
+            }
+            "fold" => {
+                let Some(init) = term_args.first() else {
+                    return Err(LowerError("`fold` needs an initial value".into()));
+                };
+                let v = self.lower_expr(init)?;
+                let r = self.fresh_temp(fold_acc.clone());
+                self.emit(r.clone(), mir::Rvalue::Use(v));
                 res = Some(r);
             }
             // `nth(i)`: `None` until the item at position `i` arrives.
@@ -5260,6 +5286,18 @@ impl Lower {
                         mir::Operand::Const(1),
                     ),
                 );
+                self.set_term(mir::Terminator::Goto(step));
+            }
+            // `fold`: the closure's result is the new accumulator.
+            "fold" => {
+                let r = res.clone().expect("fold has a result");
+                let Some((f, caps)) = term_callee.clone() else {
+                    return Err(LowerError("`fold` needs a closure".into()));
+                };
+                let mut args = caps;
+                args.push(mir::Operand::var(r.clone()));
+                args.push(mir::Operand::var(item.clone()));
+                self.emit(r, mir::Rvalue::Call(mir::Operand::Func(f), args));
                 self.set_term(mir::Terminator::Goto(step));
             }
             "sum" => {

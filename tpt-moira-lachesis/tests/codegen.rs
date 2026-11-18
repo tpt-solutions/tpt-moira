@@ -4365,3 +4365,22 @@ fn iter_mut_find_writes_through_the_found_element() {
     };
     assert_eq!(out, "102\n1\n9\n1");
 }
+
+/// `fold(init, |acc, x| ..)` over a chain: the closure takes the accumulator and each item, and
+/// its result is the next accumulator.
+#[test]
+fn fold_accumulates_through_the_closure() {
+    let out = match run_src(
+        r#"fn main() {
+            let v: Vec<f64> = vec![1.5, 4.0, 2.0];
+            let a: f64 = v.iter().map(|x| *x * 2.0).fold(0.0f64, |acc, x| if x > acc { x } else { acc });
+            let n: i64 = vec![1i64, 5, 3].iter().fold(0, |acc, x| acc + *x);
+            print_f64(a);
+            print_i64(n);
+        }"#,
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "8\n9");
+}
