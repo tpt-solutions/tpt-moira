@@ -974,7 +974,10 @@ pub(crate) fn visit_expr(
         }
         ExprKind::Match(s, arms) => {
             visit_expr(s, fe, fb);
-            for (_, x) in arms {
+            for (p, x) in arms {
+                if let Some(g) = p.guard_mut() {
+                    visit_expr(g, fe, fb);
+                }
                 visit_expr(x, fe, fb);
             }
         }
@@ -1093,7 +1096,10 @@ pub(crate) fn visit_expr_with<S>(
         }
         ExprKind::Match(s, arms) => {
             visit_expr_with(s, st, fe, fb);
-            for (_, x) in arms {
+            for (p, x) in arms {
+                if let Some(g) = p.guard_mut() {
+                    visit_expr_with(g, st, fe, fb);
+                }
                 visit_expr_with(x, st, fe, fb);
             }
         }

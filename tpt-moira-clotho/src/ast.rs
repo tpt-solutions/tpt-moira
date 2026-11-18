@@ -309,6 +309,36 @@ pub enum Pat {
     /// A binding pattern `name @ subpat`: binds `name` to the matched value while
     /// also matching `subpat` (e.g. `x @ 1..=9`, `p @ Point { .. }`).
     Bind(String, Box<Pat>),
+    /// A match arm's pattern with its guard: `pat if cond`. Only a match arm's top-level pattern
+    /// carries a guard. The guard sees the names the pattern binds, and the arm is taken only
+    /// when the pattern matches and the guard is true; otherwise matching falls through.
+    Guard(Box<Pat>, Box<Expr>),
+}
+
+impl Pat {
+    /// The arm pattern without its guard, and the guard when there is one.
+    pub fn split_guard(&self) -> (&Pat, Option<&Expr>) {
+        match self {
+            Pat::Guard(p, g) => (p, Some(g)),
+            _ => (self, None),
+        }
+    }
+
+    /// The guard of an arm pattern, for a visitor that rewrites expressions.
+    pub fn guard_mut(&mut self) -> Option<&mut Expr> {
+        match self {
+            Pat::Guard(_, g) => Some(g),
+            _ => None,
+        }
+    }
+
+    /// This pattern with its guard (if any) replaced by `f` applied to it.
+    pub fn map_guard(&self, f: impl FnOnce(&Expr) -> Expr) -> Pat {
+        match self {
+            Pat::Guard(p, g) => Pat::Guard(Box::new((**p).clone()), Box::new(f(g))),
+            _ => self.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

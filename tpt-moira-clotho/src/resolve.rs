@@ -109,7 +109,11 @@ impl Resolver {
                     last
                 };
                 let local = alias.unwrap_or_else(|| last.clone());
-                if local.starts_with(|c: char| c.is_ascii_lowercase()) {
+                let lower_start = match local.chars().next() {
+                    Some(c) => c.is_ascii_lowercase(),
+                    None => false,
+                };
+                if lower_start {
                     scopes[u].modules.insert(local, d);
                 } else if colliding.contains(&last) && scopes[d].defines.contains(&last) {
                     if local != last {
@@ -203,7 +207,12 @@ impl Resolver {
         for i in candidates {
             let name = &names[i];
             // A segment after an uppercase type is a variant or associated item, not a crate item.
-            if i >= 1 && names[i - 1].starts_with(|c: char| c.is_ascii_uppercase()) {
+            let upper_prev = i >= 1
+                && match names[i - 1].chars().next() {
+                    Some(c) => c.is_ascii_uppercase(),
+                    None => false,
+                };
+            if upper_prev {
                 continue;
             }
             // An alias of a colliding type (`use a::Function as F;`) names its definition.
@@ -404,6 +413,10 @@ impl Resolver {
                 if let Some(b) = b {
                     self.pat(u, b);
                 }
+            }
+            Pat::Guard(q, g) => {
+                self.pat(u, q);
+                self.expr(u, g);
             }
         }
     }

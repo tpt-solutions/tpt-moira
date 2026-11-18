@@ -9,6 +9,61 @@ use crate::ast::*;
 use crate::error::{Diag, ParseResult};
 use crate::token::{Span, Token, TokenKind};
 
+/// Rust 2021 inline format arguments: each `{name}` placeholder of a leading string literal
+/// is the variable `name`. They are added as explicit `name = name` arguments, so every pass
+/// that walks the arguments (type inference, closure captures) sees the variable, and the
+/// lowering binds the placeholder to that argument by name.
+fn add_implicit_format_args(args: &mut Vec<Expr>) {
+    let Some(first) = args.first() else { return };
+    let ExprKind::Lit(Lit::Str(fmt)) = &first.kind else { return };
+    let fspan = first.span;
+    let chars: Vec<char> = fmt.chars().collect();
+    let mut names: Vec<String> = Vec::new();
+    let mut k = 0;
+    while k < chars.len() {
+        if chars[k] == '{' && k + 1 < chars.len() && chars[k + 1] == '{' {
+            k += 2;
+            continue;
+        }
+        if chars[k] == '{' {
+            if let Some(p) = chars[k..].iter().position(|&c| c == '}') {
+                let inner: String = chars[k + 1..k + p].iter().collect();
+                let ident = !inner.is_empty()
+                    && inner.chars().all(|c| c.is_alphanumeric() || c == '_')
+                    && !match inner.chars().next() {
+                        Some(c) => c.is_ascii_digit(),
+                        None => false,
+                    };
+                if ident && !names.contains(&inner) {
+                    names.push(inner);
+                }
+                k += p + 1;
+                continue;
+            }
+        }
+        k += 1;
+    }
+    for name in names {
+        let named_already = args.iter().any(|a| {
+            matches!(&a.kind, ExprKind::Binary(l, BinOp::Assign, _)
+                if matches!(&l.kind, ExprKind::Path(p) if p.segments.len() == 1 && p.segments[0].node == name))
+        });
+        if named_already {
+            continue;
+        }
+        let idx = args.len();
+        let span = Span::new((1usize << 42) + fspan.start * 64 + idx, (1usize << 42) + fspan.start * 64 + idx + 1);
+        let path = |span: Span| Expr {
+            kind: ExprKind::Path(Path { segments: vec![Spanned { node: name.clone(), span }] }),
+            span,
+        };
+        args.push(Expr {
+            kind: ExprKind::Binary(Box::new(path(span)), BinOp::Assign, Box::new(path(span))),
+            span,
+        });
+    }
+}
+
 /// The name an item introduces, for the nested-item clash check.
 fn item_name(item: &Item) -> Option<(&str, Span)> {
     match &item.kind {
@@ -100,6 +155,7 @@ impl Parser {
                 args.push(e);
             }
         }
+        add_implicit_format_args(&mut args);
         args
     }
 
@@ -1522,21 +1578,27 @@ impl Parser {
             }
             TokenKind::LParen => {
                 // Tuple pattern `(a, b, c)` (and the single-element `(a,)` form,
-                // which keeps a trailing comma).
+                // which keeps a trailing comma). A parenthesised pattern without a comma
+                // is the pattern itself: `(A(x) | B(x))` is an or-pattern, not a tuple.
                 self.bump();
                 let mut pats = Vec::new();
+                let mut saw_comma = false;
                 if !self.check(&TokenKind::RParen) {
                     loop {
                         pats.push(self.parse_pat()?);
                         if !self.eat(&TokenKind::Comma) {
                             break;
                         }
+                        saw_comma = true;
                         if self.check(&TokenKind::RParen) {
                             break;
                         }
                     }
                 }
                 self.expect(TokenKind::RParen)?;
+                if pats.len() == 1 && !saw_comma {
+                    return Ok(pats.remove(0));
+                }
                 Ok(Pat::Tuple(pats))
             }
             TokenKind::Int { value, suffix } => {
@@ -1715,7 +1777,11 @@ impl Parser {
             pat_tokens.pop();
         }
         let mut pp = Parser::segment(pat_tokens);
-        let pat = pp.parse_pat().ok()?;
+        let mut pat = pp.parse_pat().ok()?;
+        if pp.eat(&TokenKind::If) {
+            let guard = pp.parse_expr().ok()?;
+            pat = Pat::Guard(Box::new(pat), Box::new(guard));
+        }
         if !pp.at_eof() {
             return None;
         }
@@ -2622,12 +2688,11 @@ impl Parser {
             let attrs = self.parse_attributes()?;
             let enabled = crate::cfg::attrs_enabled(&attrs);
             // `parse_pat` already folds `|` into `Pat::Or`, so no extra loop here.
-            let pat = self.parse_pat()?;
-            // Match guard `Pattern if <cond> => body`. The Phase-1 subset does not
-            // model guards, so the condition is parsed and discarded; this keeps
-            // real-world code (and the compiler's own source) parseable.
+            let mut pat = self.parse_pat()?;
+            // Match guard `Pattern if <cond> => body`: the condition is kept on the pattern.
             if self.eat(&TokenKind::If) {
-                self.parse_expr()?;
+                let guard = self.parse_expr()?;
+                pat = Pat::Guard(Box::new(pat), Box::new(guard));
             }
             self.expect(TokenKind::FatArrow)?;
             let body = self.parse_expr()?;
