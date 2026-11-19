@@ -253,15 +253,22 @@ fn derive_enum(trait_name: &str, e: &EnumDef) -> Option<String> {
                         // `(**a).clone()` is the `T`, so `Box::new` gives a new box. The
                         // lowering reads a box and a reference to a value alike, so a plain
                         // `a.clone()` on a box would copy the value out of its box.
-                        let fields = v.fields.as_deref().unwrap_or(&[]);
-                        let clones: Vec<String> = binds
-                            .iter()
-                            .enumerate()
-                            .map(|(i, b)| match fields.get(i).map(|f| is_box_type(&f.ty)) {
-                                Some(true) => format!("Box::new((**{b}).clone())"),
-                                _ => format!("{b}.clone()"),
-                            })
-                            .collect();
+                        let fields: Vec<Field> = match &v.fields {
+                            Some(f) => f.clone(),
+                            None => Vec::new(),
+                        };
+                        let mut clones: Vec<String> = Vec::new();
+                        for (i, b) in binds.iter().enumerate() {
+                            let boxed = match fields.get(i) {
+                                Some(f) => is_box_type(&f.ty),
+                                None => false,
+                            };
+                            if boxed {
+                                clones.push(format!("Box::new((**{b}).clone())"));
+                            } else {
+                                clones.push(format!("{b}.clone()"));
+                            }
+                        }
                         format!(
                             "Self::{v}({bs}) => Self::{v}({cs}),",
                             v = v.name.node,
@@ -284,11 +291,10 @@ fn derive_enum(trait_name: &str, e: &EnumDef) -> Option<String> {
         "PartialEq" => {
             // Compare by discriminant index: map each variant to its ordinal
             // and test the two ordinals for equality.
-            let arms: Vec<String> = variants
-                .iter()
-                .enumerate()
-                .map(|(i, v)| format!("{pat} => {i},", pat = variant_wildcard_pattern(v), i = i))
-                .collect();
+            let mut arms: Vec<String> = Vec::new();
+            for (i, v) in variants.iter().enumerate() {
+                arms.push(format!("{pat} => {i},", pat = variant_wildcard_pattern(v), i = i));
+            }
             let arms = arms.join(" ");
             format!(
                 "impl PartialEq for {name} {{ fn eq(&self, other: &Self) -> bool {{ let a: i32 = match self {{ {arms} }}; let b: i32 = match other {{ {arms} }}; a == b }} }}"

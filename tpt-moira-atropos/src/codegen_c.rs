@@ -737,6 +737,20 @@ fn emit_function(
                     ));
                     out.push_str(&format!("    *{} = {};\n", s.place, emit_operand(&args[0])));
                 }
+                // A unit value stored into an aggregate (the result of a block that never yields) is
+                // a zeroed aggregate: C has no unit to assign.
+                mir::Rvalue::Use(mir::Operand::Unit | mir::Operand::Const(_))
+                    if dest_type(f, &s.place).is_some_and(|d| {
+                        crate::lower::is_aggregate_c_type(&d)
+                    }) =>
+                {
+                    let d = dest_type(f, &s.place).unwrap_or_default();
+                    out.push_str(&format!(
+                        "    {} = ({}){{0}};\n",
+                        s.place,
+                        c_type(&d, struct_names)
+                    ));
+                }
                 _ => {
                     let rv = fix_struct_lit(f, &s.place, &s.rvalue);
                     out.push_str(&format!("    {} = {};\n", s.place, emit_rvalue(&rv)));
@@ -746,6 +760,18 @@ fn emit_function(
         // `main` is declared `int`, so a valueless return must still yield a status.
         if f.name == "main" && matches!(block.term, mir::Terminator::Return(None)) {
             out.push_str("    return 0;\n");
+        } else if let (
+            mir::Terminator::Return(Some(mir::Operand::Const(_) | mir::Operand::Unit)),
+            Some(rt),
+        ) = (&block.term, &f.ret)
+        {
+            // A placeholder value returned from a function that returns an aggregate (the tail
+            // of a block that never yields) is a zeroed aggregate.
+            if crate::lower::is_aggregate_c_type(rt) {
+                out.push_str(&format!("    return ({}){{0}};\n", c_type(rt, struct_names)));
+            } else {
+                out.push_str(&emit_terminator(&block.term));
+            }
         } else {
             out.push_str(&emit_terminator(&block.term));
         }

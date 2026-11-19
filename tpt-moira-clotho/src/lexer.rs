@@ -345,7 +345,7 @@ impl<'src> Lexer<'src> {
 
     fn lex_number(&mut self) -> TokenKind {
         let start = self.pos;
-        let base = if self.peek_byte() == Some(b'0') {
+        let base: Option<u32> = if self.peek_byte() == Some(b'0') {
             match self.peek_byte_at(1) {
                 Some(b'x' | b'X') => {
                     self.bump();

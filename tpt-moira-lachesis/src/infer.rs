@@ -115,6 +115,8 @@ pub struct TypeChecker {
     /// Locals bound (without an annotation) to `Vec::new()`, by name, with the span of the
     /// initializer: the first `push` onto one gives the vector its element type.
     pending_vec: HashMap<String, Span>,
+    /// A `let` of a tuple of unsuffixed integer literals: the tuple's span and its elements' spans.
+    pending_tuple: HashMap<String, (Span, Vec<Span>)>,
     /// Pending vectors that received only unsuffixed integer literals so far: if nothing else
     /// fixes their element type, Rust's default `i32` does (see `check_function`).
     pending_vec_literal: HashSet<String>,
@@ -684,6 +686,7 @@ impl Default for TypeChecker {
             own_enums: std::collections::HashSet::new(),
             env: Vec::new(),
             pending_vec: HashMap::new(),
+            pending_tuple: HashMap::new(),
             pending_vec_literal: HashSet::new(),
             pending_coll: HashMap::new(),
             pending_coll_literal: HashSet::new(),
@@ -1515,6 +1518,27 @@ impl TypeChecker {
                                 self.pending_vec.insert(n.node.clone(), init.span);
                             } else {
                                 self.pending_vec.remove(&n.node);
+                            }
+                            // A tuple of unsuffixed integer literals (`(1, 2)`): a later call that
+                            // passes it for a tuple parameter fixes the element types.
+                            let literal_tuple = match &init.kind {
+                                ExprKind::Tuple(elems) => elems
+                                    .iter()
+                                    .all(|e| matches!(e.kind, ExprKind::Lit(Lit::Int(_, None)))),
+                                _ => false,
+                            };
+                            match (&init.kind, &it) {
+                                (ExprKind::Tuple(elems), Ty::Tuple(ts))
+                                    if literal_tuple
+                                        && l.ty.is_none()
+                                        && ts.iter().all(|t| matches!(t, Ty::Int | Ty::I32)) =>
+                                {
+                                    let spans: Vec<Span> = elems.iter().map(|e| e.span).collect();
+                                    self.pending_tuple.insert(n.node.clone(), (init.span, spans));
+                                }
+                                _ => {
+                                    self.pending_tuple.remove(&n.node);
+                                }
                             }
                             // A bare `HashSet`/`HashMap` (the constructor's type without its arguments).
                             match &it {
@@ -2952,6 +2976,13 @@ impl TypeChecker {
                     self.implements_op(&lt, tr, span);
                     self.implements_op(&rt, tr, span);
                 }
+                // `opt == Some(&1)`: the other side's concrete `Option<T>` type decides the literal's type.
+                if matches!(&lt, Ty::Apply(n, _) if n == "Option") && !has_unknown(&lt) && !has_generic(&lt) {
+                    self.push_expect(r, &lt);
+                }
+                if matches!(&rt, Ty::Apply(n, _) if n == "Option") && !has_unknown(&rt) && !has_generic(&rt) {
+                    self.push_expect(l, &rt);
+                }
                 // Comparisons are by value: `&str == str` and `&T == T` compare the referents.
                 let lv = self.strip_refs(&lt);
                 let rv = self.strip_refs(&rt);
@@ -3139,6 +3170,53 @@ impl TypeChecker {
         self.expr_types.insert((init_span.start, init_span.end), vt);
         self.pending_vec.remove(&name);
         self.pending_vec_literal.remove(&name);
+    }
+
+    /// `f(t)` / `f(&mut t)` where `f` takes a tuple of concrete element types fixes the element
+    /// types of a `let t = (1, 2)` (unsuffixed literals), as Rust's inference does.
+    fn resolve_pending_tuple_arg(&mut self, arg: &Expr, param: &Ty) {
+        let inner: &Expr = match &arg.kind {
+            ExprKind::Ref(i, _) => i,
+            _ => arg,
+        };
+        let ExprKind::Path(p) = &inner.kind else {
+            return;
+        };
+        if p.segments.len() != 1 {
+            return;
+        }
+        let name = p.segments[0].node.clone();
+        let pt = match param {
+            Ty::Ref(t) | Ty::RefMut(t) => &**t,
+            other => other,
+        };
+        let Ty::Tuple(ts) = pt else {
+            return;
+        };
+        if ts
+            .iter()
+            .any(|t| has_unknown(t) || has_generic(t) || matches!(t, Ty::Int))
+        {
+            return;
+        }
+        let Some((init_span, elem_spans)) = self.pending_tuple.get(&name).cloned() else {
+            return;
+        };
+        if elem_spans.len() != ts.len() {
+            return;
+        }
+        let tt = Ty::Tuple(ts.clone());
+        for scope in self.env.iter_mut().rev() {
+            if let Some(slot) = scope.get_mut(&name) {
+                *slot = tt.clone();
+                break;
+            }
+        }
+        self.expr_types.insert((init_span.start, init_span.end), tt.clone());
+        for (sp, t) in elem_spans.iter().zip(ts.iter()) {
+            self.expr_types.insert((sp.start, sp.end), t.clone());
+        }
+        self.pending_tuple.remove(&name);
     }
 
     fn resolve_pending_vec_arg(&mut self, arg: &Expr, param: &Ty) {
@@ -3438,6 +3516,7 @@ impl TypeChecker {
                 }
                 self.resolve_pending_vec_arg(a, pt);
                 self.resolve_pending_coll_arg(a, pt);
+                self.resolve_pending_tuple_arg(a, pt);
                 let at = self.infer_expr(a);
                 let at = Self::coerce_box_ref(pt, &at).unwrap_or(at);
                 // A parameter's declared type decides the literal parts of its argument
@@ -3608,6 +3687,7 @@ impl TypeChecker {
             for (a, pt) in args.iter().zip(sig.params.iter()) {
                 self.resolve_pending_vec_arg(a, pt);
                 self.resolve_pending_coll_arg(a, pt);
+                self.resolve_pending_tuple_arg(a, pt);
                 if let Some(target) = Self::ref_call_expectation(a, pt) {
                     self.expected_call_ty = Some(target);
                 }

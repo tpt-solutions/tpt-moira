@@ -5242,3 +5242,462 @@ fn deref_assign_through_mut_string_and_tuple_field_address_run() {
     };
     assert_eq!(out, "bc 7");
 }
+
+/// `let r = &mut s.f; *r += 5;` on a struct or tuple local writes the local's field (the reference
+/// used to address a copy of the field, so the write was lost).
+#[test]
+fn mut_reference_to_local_field_writes_the_field() {
+    let out = match run_src(
+        r#"struct P { a: i64, b: i64 }
+        fn main() {
+            let mut p = P { a: 1, b: 2 };
+            let r = &mut p.b;
+            *r += 5;
+            let mut t: (i64, i64) = (1, 2);
+            let q = &mut t.1;
+            *q += 5;
+            println!("{} {} {}", p.a, p.b, t.1);
+        }"#,
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "1 7 7");
+}
+
+/// A `for` over a `&mut Vec` bound by a match on a `&mut` enum writes each element through the
+/// loop variable (the binding and the items used to be copies, so the writes were lost); a
+/// reference to a field of a boxed value read through `&Box<S>` works too.
+#[test]
+fn loop_over_match_bound_mut_vec_writes_the_elements() {
+    let out = match run_src(
+        r#"struct P { x: i64 }
+        enum K { Clo { params: Vec<P> }, Other }
+        struct Node { kind: K }
+        fn bump(k: &mut K) {
+            match k {
+                K::Clo { params } => {
+                    for p in params {
+                        p.x += 10;
+                    }
+                }
+                K::Other => {}
+            }
+        }
+        fn first(n: &Box<Node>) -> i64 {
+            let r = &n.kind;
+            match r { K::Clo { params } => params[0].x, K::Other => 0 }
+        }
+        fn main() {
+            let mut k = K::Clo { params: vec![P { x: 1 }, P { x: 2 }] };
+            bump(&mut k);
+            let t = match &k { K::Clo { params } => params[0].x + params[1].x, K::Other => 0 };
+            let b = Box::new(Node { kind: K::Clo { params: vec![P { x: 5 }] } });
+            println!("{} {}", t, first(&b));
+        }"#,
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "23 5");
+}
+
+/// `let t = (1, 2);` passed to a `(i64, i64)` parameter takes `i64` elements (as Rust infers), so
+/// the tuple, the parameter and the call agree; a `&mut` tuple parameter writes the local.
+#[test]
+fn untyped_tuple_literal_takes_the_parameter_element_types() {
+    let out = match run_src(
+        r#"fn take(p: (i64, i64)) -> i64 { p.0 + p.1 }
+        fn bump(p: &mut (i64, i64)) {
+            let r = &mut p.1;
+            *r += 5;
+        }
+        fn main() {
+            let mut t = (1, 2);
+            bump(&mut t);
+            println!("{} {}", t.1, take(t));
+        }"#,
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "7 8");
+}
+
+/// A function returning a struct whose body is a `loop` that returns (`loop { return S { .. }; }`,
+/// or a `let ... else` / `match` arm returning `S` inside a `loop`) compiles and returns the struct
+/// (the block after the loop was given a scalar `return 0`).
+#[test]
+fn struct_return_from_inside_a_loop_runs() {
+    let out = match run_src(
+        r#"struct Tok { kind: i64, span: i64 }
+        fn peek(p: usize) -> Option<i64> {
+            if p < 1 { Some(7) } else { None }
+        }
+        fn a(p: i64) -> Tok {
+            loop {
+                return Tok { kind: p, span: 1 };
+            }
+        }
+        fn next(p: usize) -> Tok {
+            loop {
+                let b = match peek(p) {
+                    Some(b) => b,
+                    None => return Tok { kind: -1, span: 0 },
+                };
+                return Tok { kind: b, span: 1 };
+            }
+        }
+        fn main() {
+            let t = next(0);
+            let u = next(3);
+            println!("{} {} {} {} {}", t.kind, t.span, u.kind, u.span, a(4).kind);
+        }"#,
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "7 1 -1 0 4");
+}
+
+/// A `match` whose arm is a `loop` that returns a struct, assigned to a struct-typed `let`: the arm
+/// that never yields a value is a zeroed struct, not a `0` stored into the struct.
+#[test]
+fn match_arm_loop_that_returns_a_struct_runs() {
+    let out = match run_src(
+        r#"struct Tok { kind: i64, span: i64 }
+        fn pick(x: i64) -> Tok {
+            let r = match x {
+                0 => loop {
+                    return Tok { kind: 1, span: 1 };
+                },
+                _ => Tok { kind: 2, span: 2 },
+            };
+            r
+        }
+        fn main() {
+            let a = pick(0);
+            let b = pick(5);
+            println!("{} {} {} {}", a.kind, a.span, b.kind, b.span);
+        }"#,
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "1 1 2 2");
+}
+
+/// A `let` bound to `x?` on `Option<Box<S>>::as_ref()`, to a `match`, or to an `if` whose value is a
+/// struct or a pointer to one takes that type (it was declared `long long`).
+#[test]
+fn aggregate_let_values_from_try_match_and_if_run() {
+    let out = match run_src(
+        r#"struct Expr { n: i64 }
+        struct Block { tail: Option<Box<Expr>> }
+        struct Func { body: Block }
+        fn first(f: &Func) -> Option<i64> {
+            let tail = f.body.tail.as_ref()?;
+            let k = tail.n;
+            Some(k + 1)
+        }
+        fn pick(x: i64) -> Expr {
+            let e = match x {
+                0 => Expr { n: 10 },
+                _ => Expr { n: 20 },
+            };
+            let f = if x > 5 { Expr { n: 30 } } else { Expr { n: 40 } };
+            Expr { n: e.n + f.n }
+        }
+        fn show(o: Option<i64>) -> i64 { match o { Some(v) => v, None => -1 } }
+        fn main() {
+            let f = Func { body: Block { tail: Some(Box::new(Expr { n: 4 })) } };
+            let g = Func { body: Block { tail: None } };
+            println!("{} {} {} {}", show(first(&f)), show(first(&g)), pick(0).n, pick(9).n);
+        }"#,
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "5 -1 50 50");
+}
+
+/// `Some(&k)` over an `Option<&usize>` (a map lookup) binds `k` to the value the reference refers
+/// to, and only when the pattern matches: the read is not made when the lookup is `None`.
+#[test]
+fn ampersand_pattern_over_a_map_lookup_reads_the_value_when_present() {
+    let out = match run_src(
+        r#"use std::collections::HashMap;
+        fn main() {
+            let mut m: HashMap<String, usize> = HashMap::new();
+            m.insert(String::from("ab"), 7);
+            let v = if let Some(&k) = m.get("ab") { k + 1 } else { 0 };
+            let w = match m.get("zz") { Some(&k) => k, None => 99 };
+            println!("{} {}", v, w);
+        }"#,
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "8 99");
+}
+
+/// `==` / `!=` on `Option` values compares the variant and, for two `Some`s, the payloads (a bare
+/// `None` by its variant); `position` returns its `usize` in an `Option<usize>`.
+#[test]
+fn option_equality_and_position_run() {
+    let out = match run_src(
+        r#"fn f(b: Option<u32>) -> i64 {
+            if b == Some(16) { 1 } else if b != None { 2 } else { 3 }
+        }
+        fn idx(v: &Vec<i64>, x: i64) -> Option<usize> {
+            v.iter().position(|y| *y == x)
+        }
+        fn main() {
+            let x: Option<i64> = Some(5);
+            let y: Option<i64> = Some(5);
+            let z: Option<i64> = None;
+            let v = vec![4, 9, 7];
+            let p = match idx(&v, 7) { Some(i) => i, None => 99 };
+            println!("{} {} {} {} {} {}", f(Some(16)), f(Some(2)), f(None),
+                if x == y { 1 } else { 0 }, if x == z { 1 } else { 0 }, p);
+        }"#,
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "1 2 3 1 0 2");
+}
+
+/// A closure bound to a local, with a reference parameter, passed to `map`: each item is passed by
+/// address (the element is a value in the iterator).
+#[test]
+fn bound_closure_with_reference_parameter_maps_elements() {
+    let out = match run_src(
+        r#"#[derive(Clone)]
+        struct T { n: i64 }
+        fn bump(t: &T) -> T { T { n: t.n + 1 } }
+        fn main() {
+            let v = vec![T { n: 1 }, T { n: 5 }];
+            let f = |t: &T| -> T { T { n: t.n * 10 } };
+            let a: Vec<T> = v.iter().map(f).collect();
+            let b: Vec<T> = v.iter().map(bump).collect();
+            println!("{} {} {} {}", a[0].n, a[1].n, b[0].n, b[1].n);
+        }"#,
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "10 50 2 6");
+}
+
+/// `==` / `!=` on `Option<&T>` compares the referents of two `Some`s (`map.get(k) != Some(&1)`), and
+/// a `None` is never read through.
+#[test]
+fn option_of_reference_equality_compares_referents() {
+    let out = match run_src(
+        r#"use std::collections::HashMap;
+        fn main() {
+            let mut m: HashMap<String, usize> = HashMap::new();
+            m.insert(String::from("a"), 1);
+            let ne = m.get("a") != Some(&1usize);
+            let ne2 = m.get("a") != Some(&2usize);
+            let none_ne = m.get("zz") != Some(&1usize);
+            println!("{} {} {}", if ne { 1 } else { 0 }, if ne2 { 1 } else { 0 }, if none_ne { 1 } else { 0 });
+        }"#,
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "0 1 1");
+}
+
+/// An empty slice literal passed for a slice parameter (`count(&[])`) has no data and length zero.
+#[test]
+fn empty_slice_literal_argument_has_length_zero() {
+    let out = match run_src(
+        r#"fn count(prefix: &[String]) -> usize { prefix.len() }
+        fn main() {
+            let a = count(&[]);
+            let v = vec![String::from("x")];
+            let b = count(&v);
+            println!("{} {}", a, b);
+        }"#,
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "0 1");
+}
+
+/// An associated function taking a slice, called with `&vec` (a `Vec` local), adapts the vector to
+/// the slice, as a plain function does.
+#[test]
+fn associated_function_takes_a_vector_as_a_slice() {
+    let out = match run_src(
+        r#"struct P { n: i64 }
+        impl P {
+            fn count(t: &[i64], k: i64) -> usize { t.len() + k as usize }
+        }
+        fn go(flag: bool) -> usize {
+            let mut tokens = Vec::new();
+            if flag {
+                tokens.push(4);
+            }
+            P::count(&tokens, 1)
+        }
+        fn main() {
+            println!("{} {}", go(true), go(false));
+        }"#,
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "2 1");
+}
+
+/// `let mut body = (**body).clone();` shadows a name a `let ... else` pattern bound (a `Box` field
+/// read through a reference): the new `body` is a value, not the pattern's pointer.
+#[test]
+fn shadowing_a_pattern_binding_with_a_boxed_clone_runs() {
+    let out = match run_src(
+        r#"#[derive(Clone)]
+        struct Expr { n: i64 }
+        enum K { Clo { body: Box<Expr> }, Other }
+        fn dup_expr(k: &K) -> Option<Expr> {
+            let tail = k;
+            let K::Clo { body } = tail else { return None; };
+            let mut body = (**body).clone();
+            body.n += 1;
+            Some(body)
+        }
+        fn main() {
+            let k = K::Clo { body: Box::new(Expr { n: 4 }) };
+            let r = match dup_expr(&k) { Some(e) => e.n, None => -1 };
+            println!("{}", r);
+        }"#,
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "5");
+}
+
+/// A slice held in a struct field is indexed through its data (`c.params[1]`), and a `&Vec` stored
+/// into a slice field of a struct literal is the vector's slice.
+#[test]
+fn slice_field_indexing_and_struct_literal_slice_run() {
+    let out = match run_src(
+        r#"struct Call<'a> { params: &'a [i64], k: i64 }
+        fn get(c: &Call) -> i64 {
+            let v = c.params[1];
+            v + c.k
+        }
+        fn main() {
+            let arr = vec![3i64, 4, 5];
+            let c = Call { params: &arr, k: 10 };
+            println!("{}", get(&c));
+        }"#,
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "14");
+}
+
+/// A loop variable over `enumerate()` shadows a `let`-bound name of the same name for the loop body
+/// only: the item is the loop's element, not the earlier binding.
+#[test]
+fn enumerate_loop_variable_shadows_an_outer_binding() {
+    let out = match run_src(
+        r#"struct Path { segs: Vec<i64> }
+        struct Param { pat: i64, ty: i64 }
+        enum Ex { Call(Path), Other }
+        fn f(callee: &Ex, params: &Vec<Param>) -> i64 {
+            let Ex::Call(p) = callee else { return -1; };
+            let mut total = p.segs.len() as i64;
+            for (_i, p) in params.iter().enumerate() {
+                total += p.pat + p.ty;
+            }
+            total
+        }
+        fn main() {
+            let v = vec![Param { pat: 2, ty: 1 }, Param { pat: 5, ty: 0 }];
+            println!("{}", f(&Ex::Call(Path { segs: vec![1, 2] }), &v));
+        }"#,
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "10");
+}
+
+/// A tuple holding a reference (`(String, &Cand, i64)`) is named and laid out as its declared type
+/// says: the reference is a pointer, in the returned value, in the local it is bound to, and in
+/// the destructuring of it.
+#[test]
+fn tuple_with_a_reference_component_keeps_the_pointer() {
+    let out = match run_src(
+        r#"struct Cand { n: i64 }
+        struct Expr { v: i64 }
+        fn pick(c: &Cand, e: &Expr) -> (String, &Cand, i64) {
+            (String::from("x"), c, e.v)
+        }
+        fn main() {
+            let c = Cand { n: 7 };
+            let e = Expr { v: 3 };
+            let t = pick(&c, &e);
+            let (name, cand, k) = t;
+            println!("{} {} {}", name, cand.n, k);
+        }"#,
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "x 7 3");
+}
+
+/// A `Box` payload bound by a shared match on a reference is a reference to the box, so cloning it
+/// makes a new box (the value it holds is copied); a `String` cloned after a shadowing `let` in a
+/// second loop is the string itself.
+#[test]
+fn shared_match_box_binding_clones_and_shadowed_string_clones_run() {
+    let out = match run_src(
+        r#"#[derive(Clone)]
+        struct Expr { n: i64 }
+        enum K { Mc(Box<Expr>, i64), Other }
+        enum W { Refd(Box<Expr>, bool), Plain }
+        fn mk(k: &K) -> W {
+            match k {
+                K::Mc(recv, _) => W::Refd(recv.clone(), false),
+                K::Other => W::Plain,
+            }
+        }
+        struct Spanned<T> { node: T, span: i64 }
+        struct Local { name: String }
+        fn build(lets: &Vec<Local>, name: &str, out: &mut Vec<Spanned<String>>) {
+            let mut i = 0;
+            while i < 2 {
+                let new_name = format!("__a_{}_{}", name, i);
+                out.push(Spanned { node: new_name, span: 0 });
+                i += 1;
+            }
+            for l in lets {
+                let lname = &l.name;
+                let new_name = format!("__ret_{}_{}", name, lname);
+                out.push(Spanned { node: new_name.clone(), span: 1 });
+            }
+        }
+        fn main() {
+            let k = K::Mc(Box::new(Expr { n: 6 }), 1);
+            match mk(&k) { W::Refd(e, _) => println!("{}", e.n), W::Plain => println!("p") }
+            let lets = vec![Local { name: String::from("a") }];
+            let mut out = Vec::new();
+            build(&lets, "f", &mut out);
+            println!("{} {}", out[1].node, out[2].node);
+        }"#,
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "6\n__a_f_1 __ret_f_a");
+}

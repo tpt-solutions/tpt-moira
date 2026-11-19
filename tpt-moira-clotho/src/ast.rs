@@ -332,13 +332,6 @@ impl Pat {
         }
     }
 
-    /// This pattern with its guard (if any) replaced by `f` applied to it.
-    pub fn map_guard(&self, f: impl FnOnce(&Expr) -> Expr) -> Pat {
-        match self {
-            Pat::Guard(p, g) => Pat::Guard(Box::new((**p).clone()), Box::new(f(g))),
-            _ => self.clone(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

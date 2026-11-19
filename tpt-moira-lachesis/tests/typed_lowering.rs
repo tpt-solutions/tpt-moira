@@ -66,10 +66,8 @@ fn main() {
     let prog = tpt_moira_clotho::parse_source(src).expect("program should parse");
     let (res, hints) = tpt_moira_lachesis::type_check_typed(&prog, &[]);
     assert!(res.is_ok(), "program should type-check: {:?}", res.err());
-    assert!(
-        tpt_moira_atropos::lower_program(&prog).is_err(),
-        "without hints the pattern-bound vector cannot be iterated"
-    );
+    // Without hints the call's declared `Result<i32, Vec<i32>>` now types the pattern-bound vector too,
+    // so the untyped lowering may succeed; the typed lowering must in any case.
     assert!(
         tpt_moira_atropos::lower_program_typed(&prog, &hints).is_ok(),
         "with the checker's hints it lowers"

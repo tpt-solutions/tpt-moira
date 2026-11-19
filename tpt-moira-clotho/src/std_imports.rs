@@ -91,41 +91,41 @@ fn resolve_scope(mut items: Vec<Item>) -> Vec<Item> {
 
 /// Whether a scope imports `std::path::Path` by name (no alias).
 fn imports_std_path(items: &[Item]) -> bool {
-    items.iter().any(|it| match &it.kind {
-        ItemKind::Use(tree) => {
-            let mut found = false;
-            for_each_use_path(tree, &mut Vec::new(), &mut |segs, alias| {
+    for it in items {
+        if let ItemKind::Use(tree) = &it.kind {
+            let mut leaves: Vec<(Vec<String>, Option<String>)> = Vec::new();
+            use_leaves(tree, &mut Vec::new(), &mut leaves);
+            for (segs, alias) in &leaves {
                 if alias.is_none()
                     && segs.len() == 3
                     && segs[0] == "std"
                     && segs[1] == "path"
                     && segs[2] == "Path"
                 {
-                    found = true;
+                    return true;
                 }
-            });
-            found
+            }
         }
-        _ => false,
-    })
+    }
+    false
 }
 
-/// Call `f` on every full path `prefix::..::leaf` of a `use` tree.
-fn for_each_use_path(
+/// The full path `prefix::..::leaf` of every leaf of a `use` tree, with the leaf's alias.
+fn use_leaves(
     tree: &UseTree,
     prefix: &mut Vec<String>,
-    f: &mut impl FnMut(&[String], Option<&str>),
+    out: &mut Vec<(Vec<String>, Option<String>)>,
 ) {
     let depth = prefix.len();
     for seg in &tree.prefix {
         prefix.push(seg.node.clone());
     }
     match &tree.kind {
-        UseKind::Leaf => f(prefix, tree.alias.as_ref().map(|a| a.node.as_str())),
+        UseKind::Leaf => out.push((prefix.clone(), tree.alias.as_ref().map(|a| a.node.clone()))),
         UseKind::Glob => {}
         UseKind::Nested(subs) => {
             for sub in subs {
-                for_each_use_path(sub, prefix, f);
+                use_leaves(sub, prefix, out);
             }
         }
     }

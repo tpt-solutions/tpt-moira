@@ -163,11 +163,11 @@ impl MacroRulesDef {
             let mut rep_acc: Option<HashMap<String, Vec<Vec<Token>>>> = None;
             let matched = match_m(&arm.matcher, body, &mut pos, &mut binds, &mut rep_acc);
             if matched && pos == body.len() {
-                let template = match (&arm.unwrapped, stmt_like) {
-                    (Some(inner), true) => inner,
-                    _ => &arm.template,
+                let template: Vec<TmplEl> = match (&arm.unwrapped, stmt_like) {
+                    (Some(inner), true) => inner.clone(),
+                    _ => arm.template.clone(),
                 };
-                return Some(render(template, &binds));
+                return Some(render(&template, &binds));
             }
         }
         None
@@ -1040,7 +1040,7 @@ fn render_el(els: &[TmplEl], binds: &Bindings, index: &mut Option<usize>, out: &
             TmplEl::Rep(body, sep, _kind) => {
                 let n = rep_count(body, binds);
                 for k in 0..n {
-                    let mut idx = Some(k);
+                    let mut idx: Option<usize> = Some(k);
                     render_el(body, binds, &mut idx, out);
                     if k + 1 < n {
                         if let Some(s) = sep {

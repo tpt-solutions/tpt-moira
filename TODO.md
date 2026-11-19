@@ -988,6 +988,138 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
             **Open, found here, not fixed:** a user function named like a libc symbol (`fn dup`)
             clashes with MinGW's `dup` in `<io.h>` in the emitted C, because user functions keep
             their plain names. Renaming the repro function avoided it.
+          - Status (2026-11-19, C-error pass 6, and two silent miscompiles fixed): **`let r =
+            &mut s.f; *r += 5;` on a struct or tuple local wrote a copy**, so the write was lost (it
+            printed `2` for `7`). A reference to a field of a value local now addresses the field in
+            place (`FieldAddr`, no dereference); a `String` field keeps the value form, as strings
+            are `char*` here. **`*s = v` through a `&mut String` parameter** was lowered as a byte
+            store (`s[0] = v`); it assigns the body's `char*` local, which the return writes back. Also:
+            a numeric tuple index in a field reference is `f<n>`; a match arm's struct-pattern field
+            takes its declared type; `starts_with` with a char predicate and `as_bytes()[i]` are
+            replaced in clotho's own source (the subset lowers neither). Tests:
+            `deref_assign_through_mut_string_and_tuple_field_address_run`,
+            `mut_reference_to_local_field_writes_the_field`. `build/clotho.c` `gcc -fsyntax-only`:
+            79 (was 81). The in-place reference adds 3 errors where a loop variable over a
+            `&mut Vec<Param>` in clotho is typed as a copy (`'struct Path' has no member named
+            'pat'`, in `expand_call`/`closure_param`); the write it now makes is the correct one.
+            Workspace: 544 passed, 0 failed (the last test added afterwards passes on its own).
+            **Resolved (2026-11-19, pass 8):** a tuple parameter `&mut (i64, i64)` was not emitted in
+            the case recorded above; with the reference fix it now works. The real gap was that
+            `let t = (1, 2);` fixed its elements to `i32` and so mismatched a `(i64, i64)`
+            parameter. A call now fixes an unsuffixed-literal tuple local's element types from the
+            parameter (`resolve_pending_tuple_arg`, as `Vec::new()` locals already were), and the
+            tuple's struct takes the checker's `Tuple<..>` name. Test:
+            `untyped_tuple_literal_takes_the_parameter_element_types`. `build/clotho.c` `gcc
+            -fsyntax-only`: 77 (was 80).
+          - Status (2026-11-19, C-error pass 9): **a function returning a struct whose body is a
+            `loop` that returns** (`loop { return S { .. }; }`, or a `match` arm returning `S` inside
+            a `loop`) emitted `return 0;` for the unreachable block after the loop, which C rejects
+            for a struct. That tail is a zeroed struct now. The base binary had the same error.
+            Test: `struct_return_from_inside_a_loop_runs`. `build/clotho.c` `gcc -fsyntax-only`: 76.
+            Workspace: 547 passed, 0 failed (with the test above added, 548).
+          - Status (2026-11-19, C-error pass 10): the same unreachable-tail problem for `Option`/
+            `Result` and tuple results (`Result_Item_Diag`, which is not a user struct): the zero
+            tail now covers any aggregate C type (`is_aggregate_c_type`). And a unit value stored
+            into an aggregate place (a `match` arm that is a `loop` returning a struct) is emitted
+            as a zeroed aggregate, `t = (T){0};`, where it was `t = 0;` (`codegen_c`). Test:
+            `match_arm_loop_that_returns_a_struct_runs`. `build/clotho.c` `gcc -fsyntax-only`: 71
+            (was 76). Workspace: 548 passed, 0 failed.
+          - Status (2026-11-19, C-error passes 11-13, several silent miscompiles fixed): **`Some(&k)`
+            over an `Option<&T>` read the referent eagerly, before the variant test**, so a `None`
+            lookup dereferenced `NULL` (a segfault). The read now happens in the arm, where the
+            pattern has matched (`materialize_binds`). **`==` / `!=` on `Option` values** had no
+            lowering (`base == Some(16)` did not compile); it compares the variant, and the payloads
+            of two `Some`s, and a bare `None` by its variant. **`position` returned `Option<long
+            long>`** where the checker says `Option<usize>`. Also: an `if`/`match` value with no
+            checker hint takes its branch's struct or pointer-to-struct type (`if_value_type`,
+            `match_value_type`); a `let` of `x?` on an `Option<Box<S>>::as_ref()` takes the operand's
+            payload type; a function whose tail is a constant returns a zeroed aggregate when its
+            return type is one (`Result<..>` included, by its instance C name). Tests:
+            `ampersand_pattern_over_a_map_lookup_reads_the_value_when_present`,
+            `option_equality_and_position_run`, `aggregate_let_values_from_try_match_and_if_run`.
+            `build/clotho.c` `gcc -fsyntax-only`: 51 (was 76). Workspace: 551 passed, 0 failed.
+          - Status (2026-11-19, C-error passes 14-18): **`Option<&T>` equality compared the
+            references' addresses** (`map.get(k) != Some(&1)` was always unequal); it compares the
+            referents of two `Some`s now, and a `None` is never read through. **A closure bound to a
+            local with a reference parameter passed to `map`/`enumerate` got the element by value**;
+            it is passed by address (`closure_item_ptr`, recorded when the closure is lifted). **An
+            associated function's arguments were not adapted** (a `Vec` to a `&[T]`), as a plain
+            function's are. **`&[]` (an empty slice literal) was a zero-length C array**; it is a slice
+            with no data. **`&x` of a string field is the string** (strings are `char*`). An untyped
+            `Option` comparison operand takes the other side's `Option<T>` type (`x == Some(&1)` with
+            `x: Option<&usize>` now types the literal as `usize`). **Pattern `&k` over a reference binds
+            the referent, read only once the pattern matched** (it was read in the test, a null deref on
+            `None`). Clotho's own source: `collect::<Option<Vec<_>>>()`, `find_map` with a closure, and
+            a few `Option`/`usize` literal inferences were written out or annotated (the subset does
+            not lower them). Tests: `option_of_reference_equality_compares_referents`,
+            `bound_closure_with_reference_parameter_maps_elements`,
+            `empty_slice_literal_argument_has_length_zero`,
+            `associated_function_takes_a_vector_as_a_slice`. `build/clotho.c` `gcc -fsyntax-only`: 31
+            (was 51). Workspace: 555 passed, 0 failed.
+          - Status (2026-11-19, C-error passes 19-22): clotho's `gcc -fsyntax-only` count is **7**
+            (was 31 at the start of this note). Fixed on the way, each with a test: a let-else or
+            match binding shadowed by a `let` of the same name (`body`) was assigned the wrong slot
+            (`shadows` now counts names in scope); an `enumerate()` loop variable shadowing an outer
+            name took that name's type (the item is now bound in its own scope); a match arm's binding
+            read an outer rename of the same name (`lower_match` sets its renames for the arm); a
+            slice-typed value is indexed through its `data` field; a struct literal's field value is
+            adapted to the field's type (a `&Vec` to a slice); `x.clone()` of a `&Box<T>` allocates a
+            new box (in both clone paths). Clotho's own source: `find_map`, `unwrap_or(&[])`, a
+            `Vec<Field>` clone list, and a few inferred literal types were written out (the subset
+            does not lower them). Tests: `shadowing_a_pattern_binding_with_a_boxed_clone_runs`,
+            `slice_field_indexing_and_struct_literal_slice_run`,
+            `enumerate_loop_variable_shadows_an_outer_binding`.
+            **The last 7 errors are two open compiler gaps, both pre-existing:** (a) a `Some(..)`
+            value whose checker hint drops a `Box` is typed `Option<T>` (value payload) while the
+            struct field is `Option<T*>` (`Block { tail: Some(body.clone()) }` in `expand_call`): the
+            variant construction ignores the declared struct type; (b) a tuple holding a reference
+            (`(String, &Candidate, Vec<Expr>)`, `emit_let`) stores the referent by value. Workspace:
+            559 passed, 0 failed.
+          - Status (2026-11-19, C-error passes 23-25): a **tuple with a reference component** now
+            keeps the pointer: the literal is named by its operands where a component is a pointer
+            the expected type says so (no dereference), a let of a plain call takes the declared
+            return type (`declared_call_ret`), and a `let (a, b, c): T = match ..` passes `T` to the
+            match, whose arms get it too (the expectation no longer leaks into a block's statements).
+            A `for`-destructure annotation is an expectation as well. Test:
+            `tuple_with_a_reference_component_keeps_the_pointer`. The no-hints assertion in
+            `pattern_bound_vec_lowers_only_with_hints` was relaxed: the declared return type now
+            types that vector too. `build/clotho.c` `gcc -fsyntax-only`: 6-7 (the last ones are the
+            `Some(..)`-over-`Box` instance naming in `expand_call`, and a `Box` clone in `emit_let`
+            where a shared match binds a `Box` payload by value: a `Box<T>` and a `&T` are both `T*`
+            in C, so the clone cannot tell them apart; binding references under a reference scrutinee
+            by address would fix it).
+          - Status (2026-11-19, C-error passes 26-29): **clotho's `gcc -fsyntax-only` count is 0**
+            (`build/clotho.c` compiles as C). A shared match binds a `Box` payload by address (`T**`),
+            as a `&Box<T>` is, so a clone of it makes a new box. That needed the declared payload
+            type from the enum definitions (`box_payloads`), and the places a `T**` now reaches: a
+            tuple or variant payload, a method receiver (dereferenced), an assignment to a pointer
+            variable, a match arm result, and a struct field (a pointer field). A `String` cloned
+            after a shadowing `let` is the string (a `str*` hint does not make a `char*` value a
+            pointer). Variant payloads are lowered against their declared type, and a constructor
+            takes the declared instance name (`Option_X_`) when the context gives one. Test:
+            `shared_match_box_binding_clones_and_shadowed_string_clones_run`. Workspace: 561 passed,
+            0 failed. **Still open:** a closure over a tuple pattern whose `v` is a reference (`oo`),
+            and `Option<(String, &T)>` returned from a match arm (`qq`, the match result takes the
+            hint's spelling: widening the match's expectation to `Option<..>` broke a `return Some(match ..)`
+            in clotho, so it was reverted).
+            **Open, found here:** (1) a tuple holding a reference, `Option<(String, &Cand)>`, is named
+            two ways (`Option_Tuple_str_Cand_` for the value, `..Cand__` for the declared return type),
+            because the checker's hint drops the reference inside a generic instance (pre-existing in
+            the committed tree). (2) A closure over a tuple pattern `|(i, v)|` whose `v` is used as a
+            reference is lifted with `v` typed by value, so it cannot be passed a pointer; the checker
+            records no hint for pattern names. (3) `collect::<Option<Vec<T>>>()` builds a `Vec` of
+            options, not an `Option` of a `Vec`.
+          - Status (2026-11-19, C-error pass 7, one more silent miscompile fixed): **a `for` over a
+            `&mut Vec` bound by a match on a `&mut` enum wrote to copies**, so `for p in params { p.x
+            += 10 }` lost every write (it printed `3` for `23`). Three gaps: a struct-like variant's
+            payload (`K::Clo { params }`) was never bound by address (`pattern_binding_names` skipped
+            struct patterns, and `struct_variant_guard` had no address case); `writes_through` only saw
+            `*name = ..`, not `name.field += ..`; and a `for` over a pointer local whose body writes
+            through the loop variable now iterates the element addresses. A reference to a field of a
+            `&Box<S>` (`S**`) dereferences before `->`. Test:
+            `loop_over_match_bound_mut_vec_writes_the_elements`. `build/clotho.c` `gcc -fsyntax-only`:
+            80 (79 before the loop change; the loop change makes the compiler write where it used to
+            silently drop writes, which exposes one more ill-typed site). Workspace: 545 passed, 0 failed.
           - Status (2026-11-18, `chain` and field `extend`): `a.iter().chain(b.iter())` over two
             sequences is a source on the C path (a new vector: `a`'s items, then `b`'s; only when
             the receiver is a bare `iter()` on a sequence). `s.field.extend(x.iter().cloned())`

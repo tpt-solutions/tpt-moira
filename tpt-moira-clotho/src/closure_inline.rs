@@ -68,22 +68,18 @@ pub fn inline_closure_calls(mut prog: Program) -> Program {
 
 /// The index and `impl Fn` type of the closure parameter of `f`, if it has one.
 fn closure_param(f: &Function) -> Option<(usize, Vec<Type>)> {
-    f.params.iter().enumerate().find_map(|(i, p)| {
+    for (i, p) in f.params.iter().enumerate() {
         let mut ty = &p.ty;
         while let TypeKind::Ref(inner) | TypeKind::RefMut(inner) = &ty.kind {
             ty = inner;
         }
-        match &ty.kind {
-            TypeKind::Path(path, args)
-                if path.segments.len() == 1
-                    && path.segments[0].node == "fn"
-                    && !args.is_empty() =>
-            {
-                Some((i, args.clone()))
+        if let TypeKind::Path(path, args) = &ty.kind {
+            if path.segments.len() == 1 && path.segments[0].node == "fn" && !args.is_empty() {
+                return Some((i, args.clone()));
             }
-            _ => None,
         }
-    })
+    }
+    None
 }
 
 /// Whether a body meets the expansion rules: no `return`, `?`, macro, `match`, closure, call of

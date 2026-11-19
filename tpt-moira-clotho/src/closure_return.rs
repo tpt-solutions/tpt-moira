@@ -183,14 +183,14 @@ fn candidate_of(f: &Function) -> Option<(Candidate, bool)> {
     let ExprKind::Closure { params, body, .. } = &tail.kind else {
         return None;
     };
-    let names: Vec<String> = f
-        .params
-        .iter()
-        .map(|p| match &p.pat {
-            Pat::Ident(s) => Some(s.node.clone()),
-            _ => None,
-        })
-        .collect::<Option<Vec<String>>>()?;
+    // Every parameter must be a plain name (a pattern parameter makes the function ineligible).
+    let mut names: Vec<String> = Vec::new();
+    for p in &f.params {
+        match &p.pat {
+            Pat::Ident(s) => names.push(s.node.clone()),
+            _ => return None,
+        }
+    }
     let let_names: Vec<String> = lets
         .iter()
         .filter_map(|l| match &l.pat {
