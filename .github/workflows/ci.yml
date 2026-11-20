@@ -53,6 +53,22 @@ jobs:
       - name: Test
         run: cargo test --workspace --verbose
 
+      # Diagnostic (macOS only, on failure): show how the generated native assembly defines `main`
+      # and what symbols its object exports, to find why the Mach-O link cannot resolve `_main`.
+      - name: Diagnose native assembly (macOS)
+        if: failure() && runner.os == 'macOS'
+        run: |
+          DIR="${TMPDIR%/}"
+          for f in "$DIR"/moira_native_ifthen.moira_native.s; do
+            echo "== $f"
+            grep -n -E '^(main|__moira_main|f):|\.globl' "$f" || true
+            clang -arch x86_64 -c "$f" -o /tmp/diag.o
+            echo "-- global symbols:"
+            nm -g /tmp/diag.o || true
+            echo "-- undefined symbols:"
+            nm -u /tmp/diag.o | head -20 || true
+          done
+
   # Phase-1 speedup tracking: compile the benchmark battery with both Moira and
   # rustc and print the measured compile-time ratio.
   benchmark:
