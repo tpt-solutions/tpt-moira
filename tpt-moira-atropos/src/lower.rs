@@ -12,8 +12,7 @@ use std::collections::HashMap;
 use std::fmt;
 use tpt_moira_clotho::alias::AliasTable;
 use tpt_moira_clotho::ast::{
-    self, BinOp, Expr, ExprKind, ItemKind, Pat, Program, Stmt, StmtKind, TypeKind,
-    UnOp as AUnOp,
+    self, BinOp, Expr, ExprKind, ItemKind, Pat, Program, Stmt, StmtKind, TypeKind, UnOp as AUnOp,
 };
 
 /// An error encountered while lowering to MIR.
@@ -282,7 +281,8 @@ fn lower_program_impl(
     // generic parameter of the enum has no C type here, so such a field stays `long long`.
     let mut payload_tys: HashMap<(String, i128), Vec<String>> = HashMap::new();
     // The enum payload fields declared as `Box<..>`: a box is a pointer, as a reference to a value is.
-    let mut box_payloads: std::collections::HashSet<(String, i128, usize)> = std::collections::HashSet::new();
+    let mut box_payloads: std::collections::HashSet<(String, i128, usize)> =
+        std::collections::HashSet::new();
     for item in &enum_items {
         if let ItemKind::Enum(e) = &item.kind {
             let params: Vec<String> = e
@@ -313,7 +313,8 @@ fn lower_program_impl(
                     None => Vec::new(),
                 };
                 for (i, f) in field_list.iter().enumerate() {
-                    if matches!(&f.ty.kind, ast::TypeKind::Path(p, _) if p.segments.last().is_some_and(|s| s.node == "Box")) {
+                    if matches!(&f.ty.kind, ast::TypeKind::Path(p, _) if p.segments.last().is_some_and(|s| s.node == "Box"))
+                    {
                         box_payloads.insert((e.name.node.clone(), tag as i128, i));
                     }
                 }
@@ -327,11 +328,9 @@ fn lower_program_impl(
         if let ItemKind::Enum(e) = &item.kind {
             for (tag, v) in e.variants.iter().enumerate() {
                 // A tuple variant's fields are unnamed; only struct-like variants have names.
-                if let Some(fs) = v
-                    .fields
-                    .as_ref()
-                    .filter(|fs| !(**fs).is_empty() && (**fs).iter().all(|f| !f.name.node.is_empty()))
-                {
+                if let Some(fs) = v.fields.as_ref().filter(|fs| {
+                    !(**fs).is_empty() && (**fs).iter().all(|f| !f.name.node.is_empty())
+                }) {
                     variant_fields.insert(
                         (e.name.node.clone(), tag as i128),
                         fs.iter().map(|f| f.name.node.clone()).collect(),
@@ -430,7 +429,8 @@ fn lower_program_impl(
     let shared_variants: std::sync::Arc<_> = std::sync::Arc::new(variants.clone());
     let shared_qualified_variants: std::sync::Arc<_> = std::sync::Arc::new(qualified.clone());
     let shared_payload_tys: std::sync::Arc<_> = std::sync::Arc::new(payload_tys.clone());
-    let shared_box_payloads: std::sync::Arc<std::collections::HashSet<(String, i128, usize)>> = std::sync::Arc::new(box_payloads);
+    let shared_box_payloads: std::sync::Arc<std::collections::HashSet<(String, i128, usize)>> =
+        std::sync::Arc::new(box_payloads);
     let shared_variant_fields: std::sync::Arc<_> = std::sync::Arc::new(variant_fields.clone());
     let shared_struct_names: std::sync::Arc<_> = std::sync::Arc::new(struct_names.clone());
     let shared_methods: std::sync::Arc<_> = std::sync::Arc::new(methods.clone());
@@ -2154,8 +2154,14 @@ impl Lower {
                 // A `Unit` tail in a function that returns a user struct (a block after a `loop`
                 // with no `break`, which is unreachable) returns a zeroed struct, not `0`.
                 let value = match (&value, self.func.ret.clone()) {
-                    (mir::Operand::Unit | mir::Operand::Const(_), Some(rt)) if is_aggregate_c_type(&rt) => {
-                        let cname = if rt.contains('<') { mir::inst_c_name(&rt) } else { rt.clone() };
+                    (mir::Operand::Unit | mir::Operand::Const(_), Some(rt))
+                        if is_aggregate_c_type(&rt) =>
+                    {
+                        let cname = if rt.contains('<') {
+                            mir::inst_c_name(&rt)
+                        } else {
+                            rt.clone()
+                        };
                         let z = self.fresh_temp(cname.clone());
                         self.emit(z.clone(), mir::Rvalue::StructLit(cname, Vec::new()));
                         mir::Operand::var(z)
@@ -2443,9 +2449,12 @@ impl Lower {
     /// or by its hint spelling (`Tuple<str,str>`); tuple structs are found in their own table.
     fn struct_field_c_type(&self, struct_ty: &str, fname: &str) -> Option<String> {
         // A tuple named by its hint (`Tuple<str,str>`) has the components as its fields.
-        if let (Some(("Tuple", parts)), Some(idx)) =
-            (mir::split_generic(struct_ty), fname.strip_prefix('f').and_then(|i| i.parse::<usize>().ok()))
-        {
+        if let (Some(("Tuple", parts)), Some(idx)) = (
+            mir::split_generic(struct_ty),
+            fname
+                .strip_prefix('f')
+                .and_then(|i| i.parse::<usize>().ok()),
+        ) {
             return parts.get(idx).map(|p| hint_c_type(p));
         }
         let key = if struct_ty.contains('<') {
@@ -2454,9 +2463,12 @@ impl Lower {
             struct_ty.to_string()
         };
         lookup_field_type(&self.structs, &key, fname).or_else(|| {
-            self.tuple_structs
-                .get(&key)
-                .and_then(|s| s.fields.iter().find(|(f, _)| f == fname).map(|(_, t)| t.clone()))
+            self.tuple_structs.get(&key).and_then(|s| {
+                s.fields
+                    .iter()
+                    .find(|(f, _)| f == fname)
+                    .map(|(_, t)| t.clone())
+            })
         })
     }
 
@@ -2774,7 +2786,8 @@ impl Lower {
             })
             .collect();
         let last_ptr = lifted_tys.last().is_some_and(|t| t.ends_with('*'));
-        self.closure_item_ptr.insert((body.span.start, body.span.end), last_ptr);
+        self.closure_item_ptr
+            .insert((body.span.start, body.span.end), last_ptr);
         let mut table: HashMap<String, Vec<String>> = (*self.fn_param_tys).clone();
         table.insert(name.clone(), lifted_tys);
         self.fn_param_tys = std::sync::Arc::new(table);
@@ -3178,7 +3191,8 @@ impl Lower {
                 // name, so its own type does not clash with the earlier variable.
                 if let (Pat::Ident(n), Some(init)) = (&local.pat, &local.init) {
                     // A name already in scope (a local, or a name a `match` arm bound) is shadowed.
-                    let shadows = self.func.locals.iter().any(|(l, _)| *l == n.node) || self.types.contains_key(&n.node);
+                    let shadows = self.func.locals.iter().any(|(l, _)| *l == n.node)
+                        || self.types.contains_key(&n.node);
                     let plain_init =
                         !matches!(init.kind, ExprKind::Closure { .. } | ExprKind::Array(_));
                     if shadows && plain_init && self.async_ctx.is_none() {
@@ -3456,7 +3470,8 @@ impl Lower {
                                 || mir::vec_elem(&t).is_some()
                                 || t == "str"
                                 || is_aggregate_c_type(&t)
-                                || (t.ends_with('*') && self.struct_names.contains(t.trim_end_matches('*')))
+                                || (t.ends_with('*')
+                                    && self.struct_names.contains(t.trim_end_matches('*')))
                             {
                                 self.types.insert(name.clone(), t.clone());
                                 for (ln, lt) in self.func.locals.iter_mut() {
@@ -3538,7 +3553,11 @@ impl Lower {
             Some(e) => {
                 // The annotation is the value's type (a reference inside it is a pointer, which the
                 // checker's hint for the initializer may not show).
-                self.expect_ty = local.ty.as_ref().filter(|t| !type_has_infer(t)).map(|t| type_to_c(t, &self.aliases));
+                self.expect_ty = local
+                    .ty
+                    .as_ref()
+                    .filter(|t| !type_has_infer(t))
+                    .map(|t| type_to_c(t, &self.aliases));
                 let v = self.lower_expr(e);
                 self.expect_ty = None;
                 v?
@@ -4738,250 +4757,254 @@ impl Lower {
         let sorted = chain.sorted;
         // The source: a sequence's name, element type and pointer-ness, or a range's
         // bounds (lowered now, before the loop).
-        let source: std::result::Result<(String, String, bool), (mir::Operand, mir::Operand)> = match (chain.seq, chain.range) {
-            // `seq.iter().flat_map(|x| body)`: the items of each body, collected in order.
-            (Some(seq), _) if chain.flat.is_some() => {
-                let f = chain.flat.expect("checked above");
-                let ExprKind::Closure { params, body, .. } = &f.kind else {
-                    return Err(LowerError("`flat_map` needs a closure".into()));
-                };
-                let Some(param) = params.first() else {
-                    return Err(LowerError("`flat_map` closure needs a parameter".into()));
-                };
-                // The body is an iterator chain, or a value that is a sequence (`|x| f(x)` for a
-                // function returning a vector), whose items are the body's.
-                let body_chain = self.iter_chain_of(body);
-                let body_array = match self
-                    .hint_of_expr(body)
-                    .as_deref()
-                    .and_then(|h| mir::split_generic(h))
-                {
-                    Some(("Array", a)) if a.len() == 2 => {
-                        a[1].parse::<i128>().ok().map(|n| (a[0].to_string(), n))
-                    }
-                    _ => None,
-                };
-                if body_chain.is_none() && body_array.is_none() && !self.is_sequence(body) {
-                    return Err(LowerError("`flat_map` needs an iterator body".into()));
-                }
-                let inner_elem = self
-                    .hint_of_expr(body)
-                    .and_then(|h| {
-                        h.strip_prefix("Iter<")
-                            .and_then(|t| t.strip_suffix('>'))
-                            .map(|t| t.to_string())
-                            .or_else(|| mir::vec_elem(&h).map(|e| e.to_string()))
-                            .or_else(|| body_array.as_ref().map(|(e, _)| e.clone()))
-                    })
-                    .ok_or_else(|| {
-                        LowerError("`flat_map`: the inner item type is unknown".into())
-                    })?;
-                let (sn, selem, sptr) = if self.is_sequence(seq) {
-                    self.chain_sequence(seq)?
-                } else {
-                    self.materialize_chain(seq)?
-                };
-                let out = self.fresh_temp(mir::vec_type(&inner_elem));
-                self.emit(
-                    out.clone(),
-                    mir::Rvalue::Call(
-                        mir::Operand::Func(mir::vec_fn_name(&inner_elem, "new")),
-                        vec![],
-                    ),
-                );
-                let len = self.fresh_temp("long long");
-                self.emit(
-                    len.clone(),
-                    mir::Rvalue::Field(mir::Operand::var(sn.clone()), "len".into(), sptr),
-                );
-                let data = self.fresh_temp(format!("{selem}*"));
-                self.emit(
-                    data.clone(),
-                    mir::Rvalue::Field(mir::Operand::var(sn), "data".into(), sptr),
-                );
-                let idx = self.fresh_temp("long long");
-                self.emit(idx.clone(), mir::Rvalue::Use(mir::Operand::Const(0)));
-                let head = self.new_block();
-                let body_blk = self.new_block();
-                let step = self.new_block();
-                let exit = self.new_block();
-                self.set_term(mir::Terminator::Goto(head));
-                self.current = head;
-                let more = self.fresh_temp("long long");
-                self.emit(
-                    more.clone(),
-                    mir::Rvalue::Binary(
-                        mir::MirBinOp::Lt,
-                        mir::Operand::var(idx.clone()),
-                        mir::Operand::var(len),
-                    ),
-                );
-                self.set_term(mir::Terminator::If(mir::Operand::var(more), body_blk, exit));
-                self.current = body_blk;
-                let item = self.fresh_temp(selem.clone());
-                self.emit(
-                    item.clone(),
-                    mir::Rvalue::Index(mir::Operand::var(data), mir::Operand::var(idx.clone())),
-                );
-                self.lower_bind_pattern(&param.pat, mir::Operand::var(item), &selem)?;
-                let inner = match (body_chain, &body_array) {
-                    (Some(bc), _) => self.lower_iter_chain(body, bc, "collect", &[])?,
-                    // An array body is copied into a vector first (the walk reads vectors).
-                    (None, Some((e, n))) => {
-                        let (v, _, _) = self.array_as_vector(body, e, *n)?;
-                        mir::Operand::var(v)
-                    }
-                    (None, None) => self.lower_expr(body)?,
-                };
-                let mir::Operand::Var(inn) = inner else {
-                    return Err(LowerError("`flat_map` needs a named inner result".into()));
-                };
-                self.map_walk(
-                    &inn,
-                    &inner_elem,
-                    "",
-                    false,
-                    &out,
-                    None,
-                    "data",
-                    &inner_elem,
-                )?;
-                self.set_term(mir::Terminator::Goto(step));
-                self.current = step;
-                self.emit(
-                    idx.clone(),
-                    mir::Rvalue::Binary(
-                        mir::MirBinOp::Add,
-                        mir::Operand::var(idx),
-                        mir::Operand::Const(1),
-                    ),
-                );
-                self.set_term(mir::Terminator::Goto(head));
-                self.current = exit;
-                Ok((out, inner_elem, false))
-            }
-            // `a.iter().chain(b.iter())`: a new vector holding the items of `a`, then of `b`.
-            (Some(seq), _) if chain.concat.is_some() => {
-                let other = chain.concat.expect("checked above");
-                let (an, aelem, aptr) = if self.is_sequence(seq) {
-                    self.chain_sequence(seq)?
-                } else {
-                    self.materialize_chain(seq)?
-                };
-                let (bn, bptr) = if self.is_sequence(other) {
-                    let (n, _, p) = self.chain_sequence(other)?;
-                    (n, p)
-                } else {
-                    let inner = self
-                        .iter_chain_of(other)
-                        .ok_or_else(|| LowerError("`chain` of an unsupported iterator".into()))?;
-                    let op = self.lower_iter_chain(other, inner, "collect", &[])?;
-                    let mir::Operand::Var(vn) = op else {
-                        return Err(LowerError("`chain` of an unsupported iterator".into()));
+        let source: std::result::Result<(String, String, bool), (mir::Operand, mir::Operand)> =
+            match (chain.seq, chain.range) {
+                // `seq.iter().flat_map(|x| body)`: the items of each body, collected in order.
+                (Some(seq), _) if chain.flat.is_some() => {
+                    let f = chain.flat.expect("checked above");
+                    let ExprKind::Closure { params, body, .. } = &f.kind else {
+                        return Err(LowerError("`flat_map` needs a closure".into()));
                     };
-                    (vn, false)
-                };
-                let out = self.fresh_temp(mir::vec_type(&aelem));
-                self.emit(
-                    out.clone(),
-                    mir::Rvalue::Call(mir::Operand::Func(mir::vec_fn_name(&aelem, "new")), vec![]),
-                );
-                self.map_walk(&an, &aelem, "", aptr, &out, None, "data", &aelem)?;
-                self.map_walk(&bn, &aelem, "", bptr, &out, None, "data", &aelem)?;
-                Ok((out, aelem, false))
-            }
-            // `.rev()`: the loop walks a reversed copy of the sequence, so the copy is what the
-            // adapters and the terminal see (the source itself is left as it was).
-            (Some(seq), _) if chain.rev => {
-                let (sn, selem, sptr) = self.chain_sequence(seq)?;
-                let data = self.fresh_temp(format!("{selem}*"));
-                self.emit(
-                    data.clone(),
-                    mir::Rvalue::Field(mir::Operand::var(sn.clone()), "data".into(), sptr),
-                );
-                let len = self.fresh_temp("long long");
-                self.emit(
-                    len.clone(),
-                    mir::Rvalue::Field(mir::Operand::var(sn), "len".into(), sptr),
-                );
-                let copy = self.fresh_temp(mir::vec_type(&selem));
-                self.emit(
-                    copy.clone(),
-                    mir::Rvalue::Call(
-                        mir::Operand::Func(mir::vec_fn_name(&selem, "copy_n")),
-                        vec![mir::Operand::var(data), mir::Operand::var(len)],
-                    ),
-                );
-                let ptr = self.fresh_temp(format!("{}*", mir::vec_type(&selem)));
-                self.emit(
-                    ptr.clone(),
-                    mir::Rvalue::Ref(mir::Operand::var(copy.clone()), true),
-                );
-                let reversed = self.fresh_temp("long long");
-                self.emit(
-                    reversed,
-                    mir::Rvalue::Call(
-                        mir::Operand::Func(mir::vec_fn_name(&selem, "reverse")),
-                        vec![mir::Operand::var(ptr)],
-                    ),
-                );
-                Ok((copy, selem, false))
-            }
-            (Some(seq), _) => Ok(self.chain_sequence(seq)?),
-            (None, Some((lo, hi, inclusive))) => {
-                let lo_op = self.lower_expr(lo)?;
-                let mut hi_op = self.lower_expr(hi)?;
-                if inclusive {
-                    let t = self.fresh_temp("long long");
+                    let Some(param) = params.first() else {
+                        return Err(LowerError("`flat_map` closure needs a parameter".into()));
+                    };
+                    // The body is an iterator chain, or a value that is a sequence (`|x| f(x)` for a
+                    // function returning a vector), whose items are the body's.
+                    let body_chain = self.iter_chain_of(body);
+                    let body_array = match self
+                        .hint_of_expr(body)
+                        .as_deref()
+                        .and_then(|h| mir::split_generic(h))
+                    {
+                        Some(("Array", a)) if a.len() == 2 => {
+                            a[1].parse::<i128>().ok().map(|n| (a[0].to_string(), n))
+                        }
+                        _ => None,
+                    };
+                    if body_chain.is_none() && body_array.is_none() && !self.is_sequence(body) {
+                        return Err(LowerError("`flat_map` needs an iterator body".into()));
+                    }
+                    let inner_elem = self
+                        .hint_of_expr(body)
+                        .and_then(|h| {
+                            h.strip_prefix("Iter<")
+                                .and_then(|t| t.strip_suffix('>'))
+                                .map(|t| t.to_string())
+                                .or_else(|| mir::vec_elem(&h).map(|e| e.to_string()))
+                                .or_else(|| body_array.as_ref().map(|(e, _)| e.clone()))
+                        })
+                        .ok_or_else(|| {
+                            LowerError("`flat_map`: the inner item type is unknown".into())
+                        })?;
+                    let (sn, selem, sptr) = if self.is_sequence(seq) {
+                        self.chain_sequence(seq)?
+                    } else {
+                        self.materialize_chain(seq)?
+                    };
+                    let out = self.fresh_temp(mir::vec_type(&inner_elem));
                     self.emit(
-                        t.clone(),
+                        out.clone(),
+                        mir::Rvalue::Call(
+                            mir::Operand::Func(mir::vec_fn_name(&inner_elem, "new")),
+                            vec![],
+                        ),
+                    );
+                    let len = self.fresh_temp("long long");
+                    self.emit(
+                        len.clone(),
+                        mir::Rvalue::Field(mir::Operand::var(sn.clone()), "len".into(), sptr),
+                    );
+                    let data = self.fresh_temp(format!("{selem}*"));
+                    self.emit(
+                        data.clone(),
+                        mir::Rvalue::Field(mir::Operand::var(sn), "data".into(), sptr),
+                    );
+                    let idx = self.fresh_temp("long long");
+                    self.emit(idx.clone(), mir::Rvalue::Use(mir::Operand::Const(0)));
+                    let head = self.new_block();
+                    let body_blk = self.new_block();
+                    let step = self.new_block();
+                    let exit = self.new_block();
+                    self.set_term(mir::Terminator::Goto(head));
+                    self.current = head;
+                    let more = self.fresh_temp("long long");
+                    self.emit(
+                        more.clone(),
+                        mir::Rvalue::Binary(
+                            mir::MirBinOp::Lt,
+                            mir::Operand::var(idx.clone()),
+                            mir::Operand::var(len),
+                        ),
+                    );
+                    self.set_term(mir::Terminator::If(mir::Operand::var(more), body_blk, exit));
+                    self.current = body_blk;
+                    let item = self.fresh_temp(selem.clone());
+                    self.emit(
+                        item.clone(),
+                        mir::Rvalue::Index(mir::Operand::var(data), mir::Operand::var(idx.clone())),
+                    );
+                    self.lower_bind_pattern(&param.pat, mir::Operand::var(item), &selem)?;
+                    let inner = match (body_chain, &body_array) {
+                        (Some(bc), _) => self.lower_iter_chain(body, bc, "collect", &[])?,
+                        // An array body is copied into a vector first (the walk reads vectors).
+                        (None, Some((e, n))) => {
+                            let (v, _, _) = self.array_as_vector(body, e, *n)?;
+                            mir::Operand::var(v)
+                        }
+                        (None, None) => self.lower_expr(body)?,
+                    };
+                    let mir::Operand::Var(inn) = inner else {
+                        return Err(LowerError("`flat_map` needs a named inner result".into()));
+                    };
+                    self.map_walk(
+                        &inn,
+                        &inner_elem,
+                        "",
+                        false,
+                        &out,
+                        None,
+                        "data",
+                        &inner_elem,
+                    )?;
+                    self.set_term(mir::Terminator::Goto(step));
+                    self.current = step;
+                    self.emit(
+                        idx.clone(),
                         mir::Rvalue::Binary(
                             mir::MirBinOp::Add,
-                            hi_op.clone(),
+                            mir::Operand::var(idx),
                             mir::Operand::Const(1),
                         ),
                     );
-                    hi_op = mir::Operand::var(t);
+                    self.set_term(mir::Terminator::Goto(head));
+                    self.current = exit;
+                    Ok((out, inner_elem, false))
                 }
-                Err((lo_op, hi_op))
-            }
-            (None, None) => match (chain.chars, chain.split, chain.setop, chain.mapview) {
-                (Some(recv), _, _, _) => Ok(self.chars_to_vec(recv)?),
-                (None, Some((recv, sep)), _, _) => {
-                    let (pieces, elem, ptr) = self.split_to_vec(recv, sep)?;
-                    if chain.rev {
-                        // `rsplit`: the pieces of `split`, last first.
-                        let p = self.fresh_temp(format!("{}*", mir::vec_type(&elem)));
+                // `a.iter().chain(b.iter())`: a new vector holding the items of `a`, then of `b`.
+                (Some(seq), _) if chain.concat.is_some() => {
+                    let other = chain.concat.expect("checked above");
+                    let (an, aelem, aptr) = if self.is_sequence(seq) {
+                        self.chain_sequence(seq)?
+                    } else {
+                        self.materialize_chain(seq)?
+                    };
+                    let (bn, bptr) = if self.is_sequence(other) {
+                        let (n, _, p) = self.chain_sequence(other)?;
+                        (n, p)
+                    } else {
+                        let inner = self.iter_chain_of(other).ok_or_else(|| {
+                            LowerError("`chain` of an unsupported iterator".into())
+                        })?;
+                        let op = self.lower_iter_chain(other, inner, "collect", &[])?;
+                        let mir::Operand::Var(vn) = op else {
+                            return Err(LowerError("`chain` of an unsupported iterator".into()));
+                        };
+                        (vn, false)
+                    };
+                    let out = self.fresh_temp(mir::vec_type(&aelem));
+                    self.emit(
+                        out.clone(),
+                        mir::Rvalue::Call(
+                            mir::Operand::Func(mir::vec_fn_name(&aelem, "new")),
+                            vec![],
+                        ),
+                    );
+                    self.map_walk(&an, &aelem, "", aptr, &out, None, "data", &aelem)?;
+                    self.map_walk(&bn, &aelem, "", bptr, &out, None, "data", &aelem)?;
+                    Ok((out, aelem, false))
+                }
+                // `.rev()`: the loop walks a reversed copy of the sequence, so the copy is what the
+                // adapters and the terminal see (the source itself is left as it was).
+                (Some(seq), _) if chain.rev => {
+                    let (sn, selem, sptr) = self.chain_sequence(seq)?;
+                    let data = self.fresh_temp(format!("{selem}*"));
+                    self.emit(
+                        data.clone(),
+                        mir::Rvalue::Field(mir::Operand::var(sn.clone()), "data".into(), sptr),
+                    );
+                    let len = self.fresh_temp("long long");
+                    self.emit(
+                        len.clone(),
+                        mir::Rvalue::Field(mir::Operand::var(sn), "len".into(), sptr),
+                    );
+                    let copy = self.fresh_temp(mir::vec_type(&selem));
+                    self.emit(
+                        copy.clone(),
+                        mir::Rvalue::Call(
+                            mir::Operand::Func(mir::vec_fn_name(&selem, "copy_n")),
+                            vec![mir::Operand::var(data), mir::Operand::var(len)],
+                        ),
+                    );
+                    let ptr = self.fresh_temp(format!("{}*", mir::vec_type(&selem)));
+                    self.emit(
+                        ptr.clone(),
+                        mir::Rvalue::Ref(mir::Operand::var(copy.clone()), true),
+                    );
+                    let reversed = self.fresh_temp("long long");
+                    self.emit(
+                        reversed,
+                        mir::Rvalue::Call(
+                            mir::Operand::Func(mir::vec_fn_name(&selem, "reverse")),
+                            vec![mir::Operand::var(ptr)],
+                        ),
+                    );
+                    Ok((copy, selem, false))
+                }
+                (Some(seq), _) => Ok(self.chain_sequence(seq)?),
+                (None, Some((lo, hi, inclusive))) => {
+                    let lo_op = self.lower_expr(lo)?;
+                    let mut hi_op = self.lower_expr(hi)?;
+                    if inclusive {
+                        let t = self.fresh_temp("long long");
                         self.emit(
-                            p.clone(),
-                            mir::Rvalue::Ref(mir::Operand::var(pieces.clone()), true),
-                        );
-                        let reversed = self.fresh_temp("long long");
-                        self.emit(
-                            reversed,
-                            mir::Rvalue::Call(
-                                mir::Operand::Func(mir::vec_fn_name(&elem, "reverse")),
-                                vec![mir::Operand::var(p)],
+                            t.clone(),
+                            mir::Rvalue::Binary(
+                                mir::MirBinOp::Add,
+                                hi_op.clone(),
+                                mir::Operand::Const(1),
                             ),
                         );
+                        hi_op = mir::Operand::var(t);
                     }
-                    Ok((pieces, elem, ptr))
+                    Err((lo_op, hi_op))
                 }
-                (None, None, Some((a, b, union)), _) => Ok(self.set_op_to_vec(a, b, union)?),
-                (None, None, None, Some((m, values, drain))) => {
-                    let view = self.map_view_to_vec(m, values)?;
-                    // `s.drain()` empties the set once its items have been taken.
-                    if drain {
-                        self.lower_map_method(m, "clear", &[])?;
+                (None, None) => match (chain.chars, chain.split, chain.setop, chain.mapview) {
+                    (Some(recv), _, _, _) => Ok(self.chars_to_vec(recv)?),
+                    (None, Some((recv, sep)), _, _) => {
+                        let (pieces, elem, ptr) = self.split_to_vec(recv, sep)?;
+                        if chain.rev {
+                            // `rsplit`: the pieces of `split`, last first.
+                            let p = self.fresh_temp(format!("{}*", mir::vec_type(&elem)));
+                            self.emit(
+                                p.clone(),
+                                mir::Rvalue::Ref(mir::Operand::var(pieces.clone()), true),
+                            );
+                            let reversed = self.fresh_temp("long long");
+                            self.emit(
+                                reversed,
+                                mir::Rvalue::Call(
+                                    mir::Operand::Func(mir::vec_fn_name(&elem, "reverse")),
+                                    vec![mir::Operand::var(p)],
+                                ),
+                            );
+                        }
+                        Ok((pieces, elem, ptr))
                     }
-                    Ok(view)
-                }
-                (None, None, None, None) => match chain.mapiter {
-                    Some(m) => Ok(self.map_iter_to_vec(m)?),
-                    None => return Err(LowerError("empty iterator chain".into())),
+                    (None, None, Some((a, b, union)), _) => Ok(self.set_op_to_vec(a, b, union)?),
+                    (None, None, None, Some((m, values, drain))) => {
+                        let view = self.map_view_to_vec(m, values)?;
+                        // `s.drain()` empties the set once its items have been taken.
+                        if drain {
+                            self.lower_map_method(m, "clear", &[])?;
+                        }
+                        Ok(view)
+                    }
+                    (None, None, None, None) => match chain.mapiter {
+                        Some(m) => Ok(self.map_iter_to_vec(m)?),
+                        None => return Err(LowerError("empty iterator chain".into())),
+                    },
                 },
-            },
-        };
+            };
         let elem = match &source {
             Ok((_, elem, _)) => elem.clone(),
             Err(_) => "long long".to_string(),
@@ -6082,7 +6105,10 @@ impl Lower {
                             let v = self.fresh_temp(elem.clone());
                             self.emit(
                                 v.clone(),
-                                mir::Rvalue::Unary(mir::MirUnOp::Deref, mir::Operand::var(item.clone())),
+                                mir::Rvalue::Unary(
+                                    mir::MirUnOp::Deref,
+                                    mir::Operand::var(item.clone()),
+                                ),
                             );
                             v
                         } else {
@@ -7467,7 +7493,9 @@ impl Lower {
                     _ => false,
                 };
                 for (i, pty) in parts.into_iter().enumerate() {
-                    let by_ref = (ref_names.get(i).copied().unwrap_or(false) || (i + 1 == n_parts && second_ref)) && !pty.ends_with('*');
+                    let by_ref = (ref_names.get(i).copied().unwrap_or(false)
+                        || (i + 1 == n_parts && second_ref))
+                        && !pty.ends_with('*');
                     if by_ref {
                         let t = self.fresh_temp(format!("{pty}*"));
                         self.emit(
@@ -7663,27 +7691,27 @@ impl Lower {
                     self.emit(d.clone(), mir::Rvalue::Use(mir::Operand::Const(0)));
                     (d, 0usize)
                 } else {
-                // The elements have the slice's element type (the checker has typed the literal), so an
-                // element the literal cannot type on its own (a variable) takes that type.
-                let elem_ct = match self.array_elem_ct(elems) {
-                    t if t == "long long" => hint_c_type(&elem),
-                    t => t,
-                };
-                if !same_c_elem(&elem_ct, &elem) {
-                    return Ok(None);
-                }
-                let mut operands = Vec::with_capacity(elems.len());
-                for e in elems {
-                    operands.push(self.lower_expr(e)?);
-                }
-                // An array literal is declared inline under this name (see the C backend), so
-                // the name is not registered as a temporary (which would declare it again).
-                let arr = format!("__arr{}", self.temp_counter);
-                self.temp_counter += 1;
-                self.emit(arr.clone(), mir::Rvalue::Array(elem_ct.clone(), operands));
-                let d = self.fresh_temp(format!("{elem_ct}*"));
-                self.emit(d.clone(), mir::Rvalue::Use(mir::Operand::var(arr)));
-                (d, elems.len())
+                    // The elements have the slice's element type (the checker has typed the literal), so an
+                    // element the literal cannot type on its own (a variable) takes that type.
+                    let elem_ct = match self.array_elem_ct(elems) {
+                        t if t == "long long" => hint_c_type(&elem),
+                        t => t,
+                    };
+                    if !same_c_elem(&elem_ct, &elem) {
+                        return Ok(None);
+                    }
+                    let mut operands = Vec::with_capacity(elems.len());
+                    for e in elems {
+                        operands.push(self.lower_expr(e)?);
+                    }
+                    // An array literal is declared inline under this name (see the C backend), so
+                    // the name is not registered as a temporary (which would declare it again).
+                    let arr = format!("__arr{}", self.temp_counter);
+                    self.temp_counter += 1;
+                    self.emit(arr.clone(), mir::Rvalue::Array(elem_ct.clone(), operands));
+                    let d = self.fresh_temp(format!("{elem_ct}*"));
+                    self.emit(d.clone(), mir::Rvalue::Use(mir::Operand::var(arr)));
+                    (d, elems.len())
                 }
             }
             _ => return Ok(None),
@@ -7755,10 +7783,7 @@ impl Lower {
             self.emit(p.clone(), mir::Rvalue::Ref(v, true));
             return mir::Operand::var(p);
         }
-        if pt.ends_with('*')
-            && !at.ends_with('*')
-            && pt.trim_end_matches('*') == at
-        {
+        if pt.ends_with('*') && !at.ends_with('*') && pt.trim_end_matches('*') == at {
             let p = self.fresh_temp(format!("{at}*"));
             self.emit(p.clone(), mir::Rvalue::Ref(v, true));
             return mir::Operand::var(p);
@@ -7950,9 +7975,15 @@ impl Lower {
         let inner = if payload_c.ends_with('*') {
             // Two references are equal when their referents are: both are `Some`, so both read.
             let a = self.fresh_temp(payload_c.trim_end_matches('*').to_string());
-            self.emit(a.clone(), mir::Rvalue::Unary(mir::MirUnOp::Deref, mir::Operand::var(pt.clone())));
+            self.emit(
+                a.clone(),
+                mir::Rvalue::Unary(mir::MirUnOp::Deref, mir::Operand::var(pt.clone())),
+            );
             let b = self.fresh_temp(payload_c.trim_end_matches('*').to_string());
-            self.emit(b.clone(), mir::Rvalue::Unary(mir::MirUnOp::Deref, mir::Operand::var(pu.clone())));
+            self.emit(
+                b.clone(),
+                mir::Rvalue::Unary(mir::MirUnOp::Deref, mir::Operand::var(pu.clone())),
+            );
             let referent = payload_c.trim_end_matches('*').to_string();
             if let Some(v) = self.lower_user_eq(
                 &mir::Operand::var(a.clone()),
@@ -7963,11 +7994,25 @@ impl Lower {
             } else if is_aggregate_c_type(&referent) {
                 // An aggregate referent without an `eq` is compared by address (its only comparison).
                 let direct = self.fresh_temp("long long");
-                self.emit(direct.clone(), mir::Rvalue::Binary(mir::MirBinOp::Eq, mir::Operand::var(pt), mir::Operand::var(pu)));
+                self.emit(
+                    direct.clone(),
+                    mir::Rvalue::Binary(
+                        mir::MirBinOp::Eq,
+                        mir::Operand::var(pt),
+                        mir::Operand::var(pu),
+                    ),
+                );
                 mir::Operand::var(direct)
             } else {
                 let direct = self.fresh_temp("long long");
-                self.emit(direct.clone(), mir::Rvalue::Binary(mir::MirBinOp::Eq, mir::Operand::var(a), mir::Operand::var(b)));
+                self.emit(
+                    direct.clone(),
+                    mir::Rvalue::Binary(
+                        mir::MirBinOp::Eq,
+                        mir::Operand::var(a),
+                        mir::Operand::var(b),
+                    ),
+                );
                 mir::Operand::var(direct)
             }
         } else {
@@ -8262,12 +8307,21 @@ impl Lower {
             // A call of a function declared `-> Box<S>` is the box of `S`.
             if let ExprKind::Path(p) = &callee.kind {
                 if p.segments.len() == 1 {
-                    if let Some(ret) = self.fn_asts.get(&p.segments[0].node).and_then(|f| f.ret.as_ref()) {
+                    if let Some(ret) = self
+                        .fn_asts
+                        .get(&p.segments[0].node)
+                        .and_then(|f| f.ret.as_ref())
+                    {
                         if let TypeKind::Path(rp, targs) = &ret.kind {
-                            if rp.segments.last().is_some_and(|s| s.node == "Box") && targs.len() == 1 {
+                            if rp.segments.last().is_some_and(|s| s.node == "Box")
+                                && targs.len() == 1
+                            {
                                 if let TypeKind::Path(ip, _) = &targs[0].kind {
                                     let name = ip.segments.last()?.node.clone();
-                                    return self.struct_names.contains(name.as_str()).then(|| format!("{name}*"));
+                                    return self
+                                        .struct_names
+                                        .contains(name.as_str())
+                                        .then(|| format!("{name}*"));
                                 }
                             }
                         }
@@ -10609,7 +10663,11 @@ impl Lower {
             let t = self.fresh_temp(pt.clone());
             self.emit(
                 t.clone(),
-                mir::Rvalue::Field(mir::Operand::var(v.to_string()), format!("f{i}"), through_ptr),
+                mir::Rvalue::Field(
+                    mir::Operand::var(v.to_string()),
+                    format!("f{i}"),
+                    through_ptr,
+                ),
             );
             out.push(mir::Operand::var(t));
         }
@@ -10838,7 +10896,9 @@ impl Lower {
         let mut call_args = caps;
         // A pair pattern (`|(_, t)|`) takes the payload's two components as its two arguments.
         let pair = match &arg {
-            mir::Operand::Var(v) if method == "and_then" => self.pair_arguments(&payload, v, closure),
+            mir::Operand::Var(v) if method == "and_then" => {
+                self.pair_arguments(&payload, v, closure)
+            }
             _ => None,
         };
         match pair {
@@ -11423,11 +11483,23 @@ impl Lower {
             let boxed_ty = ty[..ty.len() - 1].to_string();
             let pointee = boxed_ty.trim_end_matches('*').to_string();
             let boxed = self.fresh_temp(boxed_ty);
-            self.emit(boxed.clone(), mir::Rvalue::Unary(mir::MirUnOp::Deref, op.clone()));
+            self.emit(
+                boxed.clone(),
+                mir::Rvalue::Unary(mir::MirUnOp::Deref, op.clone()),
+            );
             let value = self.fresh_temp(pointee.clone());
-            self.emit(value.clone(), mir::Rvalue::Unary(mir::MirUnOp::Deref, mir::Operand::var(boxed)));
+            self.emit(
+                value.clone(),
+                mir::Rvalue::Unary(mir::MirUnOp::Deref, mir::Operand::var(boxed)),
+            );
             let out = self.fresh_temp(format!("{pointee}*"));
-            self.emit(out.clone(), mir::Rvalue::Call(mir::Operand::Func("moira_box_new".into()), vec![mir::Operand::var(value)]));
+            self.emit(
+                out.clone(),
+                mir::Rvalue::Call(
+                    mir::Operand::Func("moira_box_new".into()),
+                    vec![mir::Operand::var(value)],
+                ),
+            );
             return Ok(Some(mir::Operand::var(out)));
         }
         if is_ptr {
@@ -11951,10 +12023,7 @@ impl Lower {
             };
             if is_str_ref {
                 let t = self.fresh_temp("str");
-                self.emit(
-                    t.clone(),
-                    mir::Rvalue::Unary(mir::MirUnOp::Deref, v),
-                );
+                self.emit(t.clone(), mir::Rvalue::Unary(mir::MirUnOp::Deref, v));
                 return Ok(Some(mir::Operand::var(t)));
             }
             return Ok(Some(v));
@@ -12572,12 +12641,24 @@ impl Lower {
             // value.
             if ty.ends_with("**") {
                 let boxed = self.fresh_temp(ty.trim_end_matches('*').to_string() + "*");
-                self.emit(boxed.clone(), mir::Rvalue::Unary(mir::MirUnOp::Deref, op.clone()));
+                self.emit(
+                    boxed.clone(),
+                    mir::Rvalue::Unary(mir::MirUnOp::Deref, op.clone()),
+                );
                 let pointee = ty.trim_end_matches('*').to_string();
                 let value = self.fresh_temp(pointee.clone());
-                self.emit(value.clone(), mir::Rvalue::Unary(mir::MirUnOp::Deref, mir::Operand::var(boxed)));
+                self.emit(
+                    value.clone(),
+                    mir::Rvalue::Unary(mir::MirUnOp::Deref, mir::Operand::var(boxed)),
+                );
                 let out = self.fresh_temp(format!("{pointee}*"));
-                self.emit(out.clone(), mir::Rvalue::Call(mir::Operand::Func("moira_box_new".into()), vec![mir::Operand::var(value)]));
+                self.emit(
+                    out.clone(),
+                    mir::Rvalue::Call(
+                        mir::Operand::Func("moira_box_new".into()),
+                        vec![mir::Operand::var(value)],
+                    ),
+                );
                 return Ok(Some(mir::Operand::var(out)));
             }
             if let Some(pointee) = ty.strip_suffix('*') {
@@ -12613,11 +12694,23 @@ impl Lower {
                 // the value.
                 if self.temp_type_of(n).ends_with("**") {
                     let boxed = self.fresh_temp(format!("{ty}*"));
-                    self.emit(boxed.clone(), mir::Rvalue::Unary(mir::MirUnOp::Deref, op.clone()));
+                    self.emit(
+                        boxed.clone(),
+                        mir::Rvalue::Unary(mir::MirUnOp::Deref, op.clone()),
+                    );
                     let value = self.fresh_temp(ty.clone());
-                    self.emit(value.clone(), mir::Rvalue::Unary(mir::MirUnOp::Deref, mir::Operand::var(boxed)));
+                    self.emit(
+                        value.clone(),
+                        mir::Rvalue::Unary(mir::MirUnOp::Deref, mir::Operand::var(boxed)),
+                    );
                     let out = self.fresh_temp(format!("{ty}*"));
-                    self.emit(out.clone(), mir::Rvalue::Call(mir::Operand::Func("moira_box_new".into()), vec![mir::Operand::var(value)]));
+                    self.emit(
+                        out.clone(),
+                        mir::Rvalue::Call(
+                            mir::Operand::Func("moira_box_new".into()),
+                            vec![mir::Operand::var(value)],
+                        ),
+                    );
                     return Ok(Some(mir::Operand::var(out)));
                 }
                 if self.temp_type_of(n).ends_with('*') {
@@ -12641,7 +12734,10 @@ impl Lower {
             mir::Operand::Var(n) if self.temp_type_of(n).ends_with("**") => {
                 let single = self.temp_type_of(n);
                 let d = self.fresh_temp(single[..single.len() - 1].to_string());
-                self.emit(d.clone(), mir::Rvalue::Unary(mir::MirUnOp::Deref, op.clone()));
+                self.emit(
+                    d.clone(),
+                    mir::Rvalue::Unary(mir::MirUnOp::Deref, op.clone()),
+                );
                 mir::Operand::var(d)
             }
             _ => op,
@@ -13407,11 +13503,9 @@ impl Lower {
             }
             _ => None,
         };
-        let out = match pointee(&src_ty).or_else(|| {
-            self.hint_of_expr(recv)
-                .as_deref()
-                .and_then(|t| pointee(t))
-        }) {
+        let out = match pointee(&src_ty)
+            .or_else(|| self.hint_of_expr(recv).as_deref().and_then(|t| pointee(t)))
+        {
             Some(o) => o,
             None => return Ok(Some(src)),
         };
@@ -14042,9 +14136,7 @@ impl Lower {
                             _ => n.node.clone(),
                         };
                         if !self.func.locals.iter().any(|(l, _)| l == &bind) {
-                            self.func
-                                .locals
-                                .push((bind.clone(), Some(addr_ty.clone())));
+                            self.func.locals.push((bind.clone(), Some(addr_ty.clone())));
                         }
                         self.types.insert(bind.clone(), addr_ty.clone());
                         self.emit(
@@ -17037,7 +17129,11 @@ impl Lower {
         let awt = self.fresh_temp(callee_fut.clone());
         self.emit(
             awt.clone(),
-            mir::Rvalue::Field(mir::Operand::var(self_local.clone()), awt_field.clone(), true),
+            mir::Rvalue::Field(
+                mir::Operand::var(self_local.clone()),
+                awt_field.clone(),
+                true,
+            ),
         );
         let awt_addr = self.fresh_temp(format!("{}*", callee_fut));
         self.emit(
@@ -17281,9 +17377,10 @@ impl Lower {
             local.pat,
             ast::Pat::Variant(..) | ast::Pat::Path(_) | ast::Pat::Tuple(_)
         ) {
-            self.mut_scrutinee = local.init.as_ref().is_some_and(|init| {
-                arm_binds_by_mut_ref_block(init, &local.pat, then_b)
-            });
+            self.mut_scrutinee = local
+                .init
+                .as_ref()
+                .is_some_and(|init| arm_binds_by_mut_ref_block(init, &local.pat, then_b));
             let guard = self.pattern_guard(&init_op, &local.pat);
             self.mut_scrutinee = false;
             let (cond, binds) = guard?;
@@ -17391,7 +17488,13 @@ impl Lower {
     /// bindings (identifier in `Ident`/`Tuple`) are assigned the scrutinee (or
     /// the matching tuple element) before the body runs. The match value is the
     /// aggregated arm-body value, like `if`/`else`.
-    fn lower_match(&mut self, scrutinee: &Expr, arms: &[(ast::Pat, Expr)], result_ty: String, arm_expect: Option<String>) -> Result<mir::Operand> {
+    fn lower_match(
+        &mut self,
+        scrutinee: &Expr,
+        arms: &[(ast::Pat, Expr)],
+        result_ty: String,
+        arm_expect: Option<String>,
+    ) -> Result<mir::Operand> {
         let scrut_op = self.lower_expr(scrutinee)?;
         let result = self.fresh_temp(result_ty);
         let merge = self.new_block();
@@ -17405,8 +17508,7 @@ impl Lower {
             let test_blk = next_test;
             self.current = test_blk;
             let (pat, arm_guard) = pat.split_guard();
-            self.mut_scrutinee =
-                arm_binds_by_mut_ref_expr(scrutinee, pat, body);
+            self.mut_scrutinee = arm_binds_by_mut_ref_expr(scrutinee, pat, body);
             let guard = self.pattern_guard(&scrut_op, pat);
             self.mut_scrutinee = false;
             let (cond, binds): (Option<mir::Operand>, Vec<(String, mir::Operand)>) = guard?;
@@ -17487,7 +17589,9 @@ impl Lower {
                 // The arm's value takes the result's pointer type (a box binding is `T**`, a result `T*`).
                 let rt = self.temp_type_of(&result);
                 let v = match &v {
-                    mir::Operand::Var(_) if rt.ends_with('*') && !rt.ends_with("**") => self.adapt_arg(v.clone(), &rt),
+                    mir::Operand::Var(_) if rt.ends_with('*') && !rt.ends_with("**") => {
+                        self.adapt_arg(v.clone(), &rt)
+                    }
                     _ => v,
                 };
                 self.emit(result.clone(), mir::Rvalue::Use(v));
@@ -17656,10 +17760,12 @@ impl Lower {
                 // Typed results: the parser is another crate, whose signatures this crate does not read.
                 let value_r: std::result::Result<ast::Expr, tpt_moira_clotho::error::Diag> =
                     tpt_moira_clotho::parser::Parser::segment(value_toks).parse_expr();
-                let value = value_r.map_err(|_| LowerError("`vec![value; count]`: bad value".into()))?;
+                let value =
+                    value_r.map_err(|_| LowerError("`vec![value; count]`: bad value".into()))?;
                 let count_r: std::result::Result<ast::Expr, tpt_moira_clotho::error::Diag> =
                     tpt_moira_clotho::parser::Parser::segment(count_toks).parse_expr();
-                let count = count_r.map_err(|_| LowerError("`vec![value; count]`: bad count".into()))?;
+                let count =
+                    count_r.map_err(|_| LowerError("`vec![value; count]`: bad count".into()))?;
                 let v = self.lower_expr(&value)?;
                 let n = self.lower_expr(&count)?;
                 // Loop `count` times, pushing the value each time.
@@ -17827,7 +17933,7 @@ impl Lower {
             if let ExprKind::Binary(l, BinOp::Assign, r) = &a.kind {
                 if let ExprKind::Path(p) = &l.kind {
                     if p.segments.len() == 1 {
-                                    let seg = &p.segments[0];
+                        let seg = &p.segments[0];
                         named.push((seg.node.clone(), (**r).clone()));
                         continue;
                     }
@@ -17879,7 +17985,10 @@ impl Lower {
                         } else {
                             ordered.push(ast::Expr {
                                 kind: ExprKind::Path(ast::Path {
-                                    segments: vec![ast::Spanned { node: inner, span: own }],
+                                    segments: vec![ast::Spanned {
+                                        node: inner,
+                                        span: own,
+                                    }],
                                 }),
                                 span: own,
                             });
@@ -18216,9 +18325,7 @@ impl Lower {
         // reference the checker's hint may drop): the same enum's instance, when it is one.
         let c_named = want
             .clone()
-            .filter(|w| {
-                !w.contains('<') && w.starts_with(&format!("{ename}_"))
-            });
+            .filter(|w| !w.contains('<') && w.starts_with(&format!("{ename}_")));
         let hinted = want.filter(|w| mir::split_generic(w).is_some_and(|(base, _)| base == ename));
         let payload_ty = match (hinted, fields.get(1)) {
             (Some(w), _) => Some(w),
@@ -18314,14 +18421,26 @@ impl Lower {
     fn ctor_want(&self, e: &Expr) -> Option<String> {
         match &self.expect_ty {
             Some(t) if t.starts_with("Option<") => Some(t.clone()),
-            Some(t) if !t.contains('<') && lookup_field_type(&self.structs, t, "f0").is_some() => Some(t.clone()),
+            Some(t) if !t.contains('<') && lookup_field_type(&self.structs, t, "f0").is_some() => {
+                Some(t.clone())
+            }
             _ => self.hint_of_expr(e),
         }
     }
     /// The declared C type of payload `i` of a variant: a user enum's from its definition, an
     /// `Option<T>`'s from the expected type.
-    fn declared_payload_ty(&self, ename: &str, tag: i128, i: usize, want: Option<&str>) -> Option<String> {
-        if let Some(t) = self.payload_tys.get(&(ename.to_string(), tag)).and_then(|v| v.get(i)) {
+    fn declared_payload_ty(
+        &self,
+        ename: &str,
+        tag: i128,
+        i: usize,
+        want: Option<&str>,
+    ) -> Option<String> {
+        if let Some(t) = self
+            .payload_tys
+            .get(&(ename.to_string(), tag))
+            .and_then(|v| v.get(i))
+        {
             return Some(t.clone());
         }
         let w = want?;
@@ -18332,7 +18451,9 @@ impl Lower {
             }
         }
         match mir::split_generic(w) {
-            Some(("Option", a)) if ename == "Some" || ename == "Option" => a.first().map(|s| s.to_string()),
+            Some(("Option", a)) if ename == "Some" || ename == "Option" => {
+                a.first().map(|s| s.to_string())
+            }
             _ => None,
         }
     }
@@ -18819,7 +18940,12 @@ impl Lower {
                                 .structs
                                 .iter()
                                 .find(|d| d.name == *name)
-                                .and_then(|d| d.fields.iter().find(|(f, _)| f == fname).map(|(_, t)| t.clone()))
+                                .and_then(|d| {
+                                    d.fields
+                                        .iter()
+                                        .find(|(f, _)| f == fname)
+                                        .map(|(_, t)| t.clone())
+                                })
                                 .unwrap_or_else(|| "long long".to_string());
                             let addr = self.fresh_temp(format!("{fty}*"));
                             self.emit(
@@ -18836,7 +18962,12 @@ impl Lower {
                         .structs
                         .iter()
                         .find(|d| d.name == *name)
-                        .and_then(|d| d.fields.iter().find(|(f, _)| f == fname).map(|(_, t)| t.clone()))
+                        .and_then(|d| {
+                            d.fields
+                                .iter()
+                                .find(|(f, _)| f == fname)
+                                .map(|(_, t)| t.clone())
+                        })
                         .unwrap_or_else(|| "long long".to_string());
                     let fv = self.fresh_temp(fty);
                     self.emit(
@@ -19279,10 +19410,12 @@ fn map_binop(op: BinOp) -> Result<mir::MirBinOp> {
 }
 
 fn lookup_field_type(structs: &[mir::MirStructDef], base_ty: &str, field: &str) -> Option<String> {
-    structs
-        .iter()
-        .find(|s| s.name == base_ty)
-        .and_then(|s| s.fields.iter().find(|(f, _)| f == field).map(|(_, t)| t.clone()))
+    structs.iter().find(|s| s.name == base_ty).and_then(|s| {
+        s.fields
+            .iter()
+            .find(|(f, _)| f == field)
+            .map(|(_, t)| t.clone())
+    })
 }
 
 /// Whether every closure of an adapter chain's stages is pure (see `pure_expr`).
@@ -19334,13 +19467,14 @@ fn writes_through(e: &Expr, name: &str) -> bool {
                 loop {
                     match &cur.kind {
                         ExprKind::Field(b, _) | ExprKind::Index(b, _) => cur = b,
-                        ExprKind::Deref(inner) | ExprKind::Unary(AUnOp::Deref, inner) => cur = inner,
+                        ExprKind::Deref(inner) | ExprKind::Unary(AUnOp::Deref, inner) => {
+                            cur = inner
+                        }
                         _ => return is_name(cur),
                     }
                 }
             };
-            let writes = (matches!(op, BinOp::Assign) || compound_op(*op).is_some())
-                && rooted(l);
+            let writes = (matches!(op, BinOp::Assign) || compound_op(*op).is_some()) && rooted(l);
             writes || writes_through(l, name) || writes_through(r, name)
         }
         ExprKind::Block(b) | ExprKind::Unsafe(b) | ExprKind::Loop(b) => {
@@ -19424,14 +19558,35 @@ pub(crate) fn is_aggregate_c_type(ty: &str) -> bool {
     }
     let scalar = matches!(
         ty,
-        "long long" | "int" | "double" | "float" | "char" | "void" | "unit" | "bool" | "usize" | "isize" | "i8" | "i16" | "i32" | "i64" | "i128" | "u8" | "u16" | "u32" | "u64" | "u128" | "f32" | "f64" | "str"
+        "long long"
+            | "int"
+            | "double"
+            | "float"
+            | "char"
+            | "void"
+            | "unit"
+            | "bool"
+            | "usize"
+            | "isize"
+            | "i8"
+            | "i16"
+            | "i32"
+            | "i64"
+            | "i128"
+            | "u8"
+            | "u16"
+            | "u32"
+            | "u64"
+            | "u128"
+            | "f32"
+            | "f64"
+            | "str"
     ) || ty.contains("int")
         || ty.contains("unsigned")
         || ty.starts_with("char")
         || ty == "str";
     !scalar
 }
-
 
 impl Lower {
     /// The C type of an `if` expression's value: the checker's type for the `if` when it names a
@@ -19440,7 +19595,11 @@ impl Lower {
     /// The C type of a `match`'s value: the checker's type for the `match` when it names a struct or a
     /// generic instance, else the type of an arm's value that does; `long long` otherwise.
     fn match_value_type(&self, e: &Expr, arms: &[(ast::Pat, Expr)]) -> String {
-        let aggregate = |h: &str| self.struct_names.contains(h) || h.contains('<') || (h.ends_with('*') && self.struct_names.contains(h.trim_end_matches('*')));
+        let aggregate = |h: &str| {
+            self.struct_names.contains(h)
+                || h.contains('<')
+                || (h.ends_with('*') && self.struct_names.contains(h.trim_end_matches('*')))
+        };
         if let Some(h) = self.hint_of_expr(e) {
             if aggregate(&h) {
                 return h;
@@ -19460,7 +19619,11 @@ impl Lower {
         "long long".to_string()
     }
     fn if_value_type(&self, e: &Expr, then_b: &ast::Block, else_b: Option<&Expr>) -> String {
-        let aggregate = |h: &str| self.struct_names.contains(h) || h.contains('<') || (h.ends_with('*') && self.struct_names.contains(h.trim_end_matches('*')));
+        let aggregate = |h: &str| {
+            self.struct_names.contains(h)
+                || h.contains('<')
+                || (h.ends_with('*') && self.struct_names.contains(h.trim_end_matches('*')))
+        };
         if let Some(h) = self.hint_of_expr(e) {
             if aggregate(&h) {
                 return h;
@@ -19489,7 +19652,10 @@ impl Lower {
     /// The pattern bindings with their dereferences made: a name marked `*x` (a `&x` pattern over a
     /// reference) binds the value its reference refers to. The read happens here, where the arm's
     /// pattern has matched, not in the test, which must not read through a null reference.
-    fn materialize_binds(&mut self, binds: Vec<(String, mir::Operand)>) -> Vec<(String, mir::Operand)> {
+    fn materialize_binds(
+        &mut self,
+        binds: Vec<(String, mir::Operand)>,
+    ) -> Vec<(String, mir::Operand)> {
         binds
             .into_iter()
             .map(|(name, val)| match name.strip_prefix('*') {
@@ -19503,7 +19669,10 @@ impl Lower {
                                 .unwrap_or("long long")
                                 .to_string();
                             let t = self.fresh_temp(pointee);
-                            self.emit(t.clone(), mir::Rvalue::Unary(mir::MirUnOp::Deref, val.clone()));
+                            self.emit(
+                                t.clone(),
+                                mir::Rvalue::Unary(mir::MirUnOp::Deref, val.clone()),
+                            );
                             (real, mir::Operand::var(t))
                         }
                         _ => (real, val),

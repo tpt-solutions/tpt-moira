@@ -740,9 +740,8 @@ fn emit_function(
                 // A unit value stored into an aggregate (the result of a block that never yields) is
                 // a zeroed aggregate: C has no unit to assign.
                 mir::Rvalue::Use(mir::Operand::Unit | mir::Operand::Const(_))
-                    if dest_type(f, &s.place).is_some_and(|d| {
-                        crate::lower::is_aggregate_c_type(&d)
-                    }) =>
+                    if dest_type(f, &s.place)
+                        .is_some_and(|d| crate::lower::is_aggregate_c_type(&d)) =>
                 {
                     let d = dest_type(f, &s.place).unwrap_or_default();
                     out.push_str(&format!(
@@ -768,7 +767,10 @@ fn emit_function(
             // A placeholder value returned from a function that returns an aggregate (the tail
             // of a block that never yields) is a zeroed aggregate.
             if crate::lower::is_aggregate_c_type(rt) {
-                out.push_str(&format!("    return ({}){{0}};\n", c_type(rt, struct_names)));
+                out.push_str(&format!(
+                    "    return ({}){{0}};\n",
+                    c_type(rt, struct_names)
+                ));
             } else {
                 out.push_str(&emit_terminator(&block.term));
             }
