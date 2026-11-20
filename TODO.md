@@ -1088,6 +1088,89 @@ Target: self-hosting, production-grade, ≥5x faster than `rustc` at scale.
             where a shared match binds a `Box` payload by value: a `Box<T>` and a `&T` are both `T*`
             in C, so the clone cannot tell them apart; binding references under a reference scrutinee
             by address would fix it).
+          - Status (2026-11-19, self-host atropos pass): atropos's bundled C
+            (`build/atropos.c`) went 1065 → 147 `gcc -fsyntax-only` errors across this round (741 at the start of the round before).
+            Fixed: (1) the bundler no longer defines generic instance structs (names with `__`) once
+            per crate, so `Spanned__str` is one definition; (2) `TypeAlias` items are resolved in
+            clotho, so aliased names rename like other items; (3) slice patterns (`if let [seg] = ..`)
+            are rewritten to `len() == 1` checks, since the parser does not accept them; (4) a struct
+            field assignment types its right-hand side from the field (`None` takes the field's
+            `Option` type); (5) a call to a closure parameter of a specialised copy (`f__with_..`)
+            reaches the lifted closure, not a top-level fn of the same name (`visit`). Test:
+            `specialised_closure_param_shadows_top_level_fn_name_run`. (6) An `is_some_and` /
+            `is_none_or` predicate takes the payload the option's own temp type gives (`Option<str*>`
+            from a map's `get`, a reference the checker's hint drops), not the hint's spelling. (7)
+            After `enumerate`, a pair closure `|(i, t)|` is hinted `Tuple<long long,elem>` (the
+            `Tuple<..>` spelling `zip` uses), so `t` has the element's type. Test:
+            `enumerate_pair_closure_types_string_item_run`. (8) An array literal with no hint takes its
+            element type from its first element's temp (`for x in [a, b]` of struct values). (9) A
+            `None` in a position with a declared same-enum type (a struct field `Option<(&T, &T, bool)>`)
+            takes the declared type, which keeps the reference the checker's hint drops; a variant
+            literal also accepts the C instance name of its enum (`Option_X_`). (10) `.cloned()` /
+            `.copied()` on an option reads a reference payload from the receiver's temp type
+            (`get` gives `Option<str*>`), and a value payload is copied as it is. Tests:
+            `array_of_struct_values_iterates_run`, `none_in_declared_option_ref_tuple_field_run`,
+            `map_get_cloned_string_value_run`. Known, not fixed: `{:?}` on an `Option<String>` does not
+            compile (the `__moira_w_i64` argument). (11) `find` stores a by-reference item as the value it
+            declares (`Option<elem>`): a pointer item is copied out. (12) `and_then` and `map` on an
+            option take a value payload's type from the option's temp, and a closure with a tuple
+            pattern (`|(_, t)|`, `|(_, _, r)|`) takes the payload's components as its arguments, the
+            hint splitting a `Tuple<..>` of that arity. Tests: `find_then_and_then_pair_pattern_run`,
+            `find_then_map_pair_pattern_run`. (13) A `filter` closure's `as_str()` reads a `String` reference through its pointer. (14) A
+            `sort_by` comparator's tuple fields take the component types from a `Tuple<..>` hint
+            (`struct_field_c_type`, `hint_c_type`), and `cmp` on a `char*` operand is `strcmp`. (15)
+            Two pattern bindings of one name at different types in a function get separate C names:
+            loop field-address bindings (`for (_, ty) in &mut v`) and tuple `let` patterns
+            (`declare_local_as`). (16) A closure's captures exclude tuple-struct constructors
+            (`LowerError(..)` was captured). (17) The `BinOp as ABinOp` alias is gone from `lower.rs`
+            (the alias name reached C unrenamed). (18) `segs == ["A", "B"]` (a `Vec` against an array)
+            is `path_is`. (19) An array literal for a `&[T]` argument (a function or a method) is a
+            slice of its elements, typed from the parameter when the literal cannot type them.
+            Tests: `same_name_loop_bindings_of_different_types_run`, `as_str_of_filtered_string_run`,
+            `sort_by_tuple_component_run`, `array_literal_as_slice_argument_run`,
+            `tuple_pattern_rebinds_name_at_other_type_run`. (20) A non-mutating string method on a `&String` variable (a `char**`) reads it through the pointer
+            (the method-call arm binds the name to a dereferenced copy for the call). (21) An or-pattern's
+            names count as bindings of the arm, so a write through one (`*ty = ..`) binds by reference.
+            (22) A `for` over an array literal of string literals types each item `char*`. Tests:
+            `string_reference_receiver_methods_run`, `for_over_string_literal_array_and_or_pattern_write_run`.
+            Once, a full `cargo test --workspace` run stopped partway through `typed_scalar_refs` (exit 1,
+            no failure printed); it passed on rerun and on its own, so it may be a flake. Open, found in this pass: (a) the checker's hint for `Ok((a, b, false))` arms of a `let source = match`
+            inside `lower_iter_chain` names the function's return type (`Result<Operand, LowerError>`), so
+            the tuple is built as the wrong struct (`Tuple_str_str_bool` into `Result_Operand_LowerError`,
+            8 errors). Reconciling the wanted payload with the payload's actual type fixed it but also moved
+            4 other errors (a C-spelled temp type is not a hint), so it was reverted. (b) fixed: `lower_await`'s `self_local` is annotated
+            `String` (its type through `&mut ctx` was unknown and became `long long`). (c) Typed bindings where the lowering had no type: `vec_constructor`'s `callee` (`&Box<Expr>`), `iter_chain_of`'s
+            `(r, m, args)` and its `&unparen(r).kind` scrutinees (bound through `&ExprKind` locals), and `lower_vec_macro`'s
+            parser results (`std::result::Result<Expr, Diag>`, since the parser crate's signatures are not read).
+            (d) `str::replace` takes `&str` patterns here (a `char` pattern lowered as an integer), and the native
+            backend's `slots.named[n]` (a `HashMap`) is a `get`. (e) A tuple-returning helper for the `Ok((..))` arms was
+            tried and reverted: the arms' error types differ (`(Operand, Operand)` in the range arm). (g) An `Option<&Vec<T>>`'s `filter` closure parameter is `&&Vec` (`Vec**`), so `is_empty`/`iter` are written
+            `(**fs)`. (h) Open, bundled from clotho: a struct-variant pattern `TokenKind::Float { text, suffix }` whose
+            scrutinee's type is unknown reads `text` as a struct field; the `find`-returned tuple of a field lookup
+            (`pattern_guard`) is built by value where a pointer is expected (6 errors). (i) Field-type lookups that `find` a `(name, type)` pair and map it are written `and_then(|s| ..find(..).map(|(_, t)| t.clone()))`:
+            the by-value tuple `find` returns was built where a pointer was expected (about 8 errors). (j) Open, the largest
+            remaining group: `lower_iter_chain`'s `let source = match ..` is typed by the checker's hint (the function's
+            return type), so `&source` and the `Ok((..))` arms get the wrong C types (about 20 errors). Fixing it needs the
+            match split into a function with a declared result type, or a checker fix. (k) `let source: std::result::Result<(String, String, bool), (Operand, Operand)>` types the range-or-sequence source
+            (the checker's hint named the function's return type): `lower_iter_chain` dropped from 59 errors to about 10.
+            `enumerate` indices bind through a scoped `declare_local_as` (restored after the body). `push` takes a
+            pointer argument's element. Clotho's own C has 0 errors (`render`'s `&mut None` is typed). Probe after this:
+            clotho 0, atropos 181 (+ extern), lachesis and the driver still blocked. (l) Atropos merges the other crates' exported aliases into the root table (`ParseResult<T>` was emitted as an
+            unknown C type). The await scanner's `err` local and the `for`-loop arms over `&Box<Expr>` are typed.
+            Open: `TokenKind::Float { text, suffix }` in clotho's bundled parser still reads `text` as a struct field
+            (a repro of the same shape is fine, so the cause is in clotho's unit); `Tuple<..>` values named both
+            `__tuple_..` and `Tuple_..__` (3 errors). (m) Struct-like variant patterns keep their enum (`TokenKind::Float { .. }`: the parser kept only the last
+            segment, so the variant resolved to another enum's `Float`). Enums of the extra crates are gathered through
+            their modules. Plain assignments give the right-hand side the target local's type. `Set<K>` as a map value
+            is spelled as its `Map<K,bool>`. Annotated `let mut e2: Option<LowerError>` for the await scanner.
+            Open: `rename_ident(ident.as_str())` in `bundle.rs` still passes a `char**` where a `str` is wanted when the
+            receiver is a method call (`as_str` deref only applies to a plain variable). (f) Open: a tuple
+            `let (sk, _) = map_args(t).expect(..)` binds `sk` as `long long` (the tuple's C name is not
+            resolved); typing it through `struct_field_c_type` made moira unable to lower its own source
+            (a `Vec` component then needs a pointer for `push`), so it was reverted.
+            Still open in atropos: closures whose tuple
+            item the checker does not type (about 21 `moira_str_dup` errors), `long long` vs `char *` (14), member `tag` on a non-struct (13),
+            and `moira_str_eq` given a pointer (12). Lachesis and the driver are not yet self-hostable.
           - Status (2026-11-19, C-error passes 26-29): **clotho's `gcc -fsyntax-only` count is 0**
             (`build/clotho.c` compiles as C). A shared match binds a `Box` payload by address (`T**`),
             as a `&Box<T>` is, so a clone of it makes a new box. That needed the declared payload
