@@ -5839,8 +5839,11 @@ fn map_get_cloned_string_value_run() {
         Some(o) => o,
         None => return,
     };
-    assert_eq!(out, "alpha
-none");
+    assert_eq!(
+        out,
+        "alpha
+none"
+    );
 }
 
 /// `find` over tuple items followed by `and_then` with a pair pattern: the found item's components

@@ -1534,7 +1534,8 @@ impl TypeChecker {
                                         && ts.iter().all(|t| matches!(t, Ty::Int | Ty::I32)) =>
                                 {
                                     let spans: Vec<Span> = elems.iter().map(|e| e.span).collect();
-                                    self.pending_tuple.insert(n.node.clone(), (init.span, spans));
+                                    self.pending_tuple
+                                        .insert(n.node.clone(), (init.span, spans));
                                 }
                                 _ => {
                                     self.pending_tuple.remove(&n.node);
@@ -2977,10 +2978,16 @@ impl TypeChecker {
                     self.implements_op(&rt, tr, span);
                 }
                 // `opt == Some(&1)`: the other side's concrete `Option<T>` type decides the literal's type.
-                if matches!(&lt, Ty::Apply(n, _) if n == "Option") && !has_unknown(&lt) && !has_generic(&lt) {
+                if matches!(&lt, Ty::Apply(n, _) if n == "Option")
+                    && !has_unknown(&lt)
+                    && !has_generic(&lt)
+                {
                     self.push_expect(r, &lt);
                 }
-                if matches!(&rt, Ty::Apply(n, _) if n == "Option") && !has_unknown(&rt) && !has_generic(&rt) {
+                if matches!(&rt, Ty::Apply(n, _) if n == "Option")
+                    && !has_unknown(&rt)
+                    && !has_generic(&rt)
+                {
                     self.push_expect(l, &rt);
                 }
                 // Comparisons are by value: `&str == str` and `&T == T` compare the referents.
@@ -3212,7 +3219,8 @@ impl TypeChecker {
                 break;
             }
         }
-        self.expr_types.insert((init_span.start, init_span.end), tt.clone());
+        self.expr_types
+            .insert((init_span.start, init_span.end), tt.clone());
         for (sp, t) in elem_spans.iter().zip(ts.iter()) {
             self.expr_types.insert((sp.start, sp.end), t.clone());
         }

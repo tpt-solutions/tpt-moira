@@ -12636,10 +12636,6 @@ impl Lower {
             return Ok(None);
         }
         let op = self.lower_expr(recv)?;
-        let is_ptr = match &op {
-            mir::Operand::Var(n) => self.temp_type_of(n).ends_with('*'),
-            _ => false,
-        };
         // A reference to a box (`T**`) as the receiver of a method of `T` is the box's pointer (`T*`).
         let op = match &op {
             mir::Operand::Var(n) if self.temp_type_of(n).ends_with("**") => {
