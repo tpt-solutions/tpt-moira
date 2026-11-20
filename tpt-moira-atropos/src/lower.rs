@@ -1406,7 +1406,7 @@ fn self_kind(f: &ast::Function) -> u8 {
 }
 
 fn vec_constructor(e: &Expr) -> Option<&'static str> {
-    let callee: &Box<Expr> = match &e.kind {
+    let callee: &Expr = match &e.kind {
         ExprKind::Call(callee, _) => callee,
         _ => return None,
     };
@@ -3916,7 +3916,7 @@ impl Lower {
             }
             // The kind is bound first, with its type, so the match reads a reference to the struct.
             let kind: &ExprKind = &cur.kind;
-            let (r, m, args): (&Box<Expr>, &ast::Spanned<String>, &Vec<Expr>) = match kind {
+            let (r, m, args): (&Expr, &ast::Spanned<String>, &Vec<Expr>) = match kind {
                 ExprKind::MethodCall(r, m, args) => (r, m, args),
                 _ => return None,
             };
@@ -4134,7 +4134,7 @@ impl Lower {
                         sorted: false,
                         split: None,
                         setop: None,
-                        mapview: Some((&**r, name == "values", false)),
+                        mapview: Some((r, name == "values", false)),
                         mapiter: None,
                         concat: None,
                         flat: None,
@@ -4156,7 +4156,7 @@ impl Lower {
                         sorted: false,
                         split: None,
                         setop: None,
-                        mapview: Some((&**r, false, true)),
+                        mapview: Some((r, false, true)),
                         mapiter: None,
                         concat: None,
                         flat: None,
@@ -4185,7 +4185,7 @@ impl Lower {
                         mapiter: None,
                         concat: None,
                         flat: None,
-                        setop: Some((&**r, other, name == "union")),
+                        setop: Some((r, other, name == "union")),
                         rev: false,
                         stages,
                     });
@@ -4201,7 +4201,7 @@ impl Lower {
                         range: None,
                         keyed: false,
                         sorted: false,
-                        split: Some((&**r, &args[0])),
+                        split: Some((r, &args[0])),
                         mapview: None,
                         mapiter: None,
                         concat: None,
@@ -4219,7 +4219,7 @@ impl Lower {
                     stages.reverse();
                     return Some(IterChain {
                         seq: None,
-                        chars: Some(&**r),
+                        chars: Some(r),
                         range: None,
                         keyed: false,
                         sorted: false,
@@ -13504,7 +13504,7 @@ impl Lower {
             _ => None,
         };
         let out = match pointee(&src_ty)
-            .or_else(|| self.hint_of_expr(recv).as_deref().and_then(|t| pointee(t)))
+            .or_else(|| self.hint_of_expr(recv).as_deref().and_then(pointee))
         {
             Some(o) => o,
             None => return Ok(Some(src)),
@@ -15869,7 +15869,7 @@ impl Lower {
                 // element is destructured into its components.
                 // `for x in &arr` iterates the same array as `for x in arr`.
                 let arr_expr: &Expr = match &iter.kind {
-                    ExprKind::Ref(i, _) => &**i,
+                    ExprKind::Ref(i, _) => i,
                     // `for x in arr.iter()` over an array iterates the array (the items are
                     // read the same way).
                     ExprKind::MethodCall(r, m, a)
@@ -15907,11 +15907,11 @@ impl Lower {
                 if let ExprKind::MethodCall(cr, cm, cargs) = &iter.kind {
                     if cm.node == "chain" && cargs.len() == 1 {
                         let left_e: &Expr = match &cr.kind {
-                            ExprKind::MethodCall(r, m, a) if m.node == "iter" && a.is_empty() => &**r,
-                            _ => &**cr,
+                            ExprKind::MethodCall(r, m, a) if m.node == "iter" && a.is_empty() => r,
+                            _ => cr,
                         };
                         let right_e: &Expr = match &cargs[0].kind {
-                            ExprKind::MethodCall(r, m, a) if m.node == "iter" && a.is_empty() => &**r,
+                            ExprKind::MethodCall(r, m, a) if m.node == "iter" && a.is_empty() => r,
                             _ => &cargs[0],
                         };
                         if self.is_sequence(left_e) && self.is_sequence(right_e) {
@@ -19537,9 +19537,6 @@ fn pattern_binding_names(p: &ast::Pat, out: &mut Vec<String>) {
         _ => {}
     }
 }
-
-/// Whether an arm of a match over `scrutinee` binds by reference: the scrutinee is a `&mut`, or
-/// the arm writes through a name its pattern binds.
 
 /// The C name of a field the source names: a tuple's numeric index `1` is the field `f1`.
 fn c_field_name(name: &str) -> String {
