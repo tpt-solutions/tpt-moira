@@ -5701,3 +5701,357 @@ fn shared_match_box_binding_clones_and_shadowed_string_clones_run() {
     };
     assert_eq!(out, "6\n__a_f_1 __ret_f_a");
 }
+
+/// A closure parameter of a specialised copy (`f__with_...`) is bound to its lifted closure, and a
+/// call to it must reach that closure even when a top-level function has the same name.
+#[test]
+fn specialised_closure_param_shadows_top_level_fn_name_run() {
+    let out = match run_src(
+        r#"fn visit(i: usize) -> usize { i + 1 }
+        fn collect(op: &Option<usize>, visit: &mut impl FnMut(&str)) {
+            match op {
+                Some(v) => {
+                    let s = if *v > 0 { "x" } else { "y" };
+                    visit(s);
+                }
+                None => {}
+            }
+        }
+        fn main() {
+            let mut next = 0usize;
+            let mut names: Vec<String> = Vec::new();
+            collect(&Some(3), &mut |n: &str| {
+                if n.len() > 0 {
+                    next += 1;
+                    names.push(n.to_string());
+                }
+            });
+            println!("{} {}", next, visit(next));
+        }"#,
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "1 2");
+}
+
+/// A closure over `enumerate()` with an `(index, item)` pattern types its item: a `String` item
+/// cloned in the closure is the string, and an `Option<&String>` payload reaches `is_none_or`.
+#[test]
+fn enumerate_pair_closure_types_string_item_run() {
+    let out = match run_src(
+        r#"use std::collections::HashMap;
+        fn fields(elem: &Vec<String>) -> Vec<(String, String)> {
+            elem.iter().enumerate().map(|(i, t)| (format!("f{}", i), t.clone())).collect()
+        }
+        fn untyped(temps: &HashMap<String, String>, place: &String) -> bool {
+            temps.get(place).is_none_or(|t| t == "long long")
+        }
+        fn main() {
+            let v = vec![String::from("a"), String::from("bb")];
+            let f = fields(&v);
+            println!("{} {} {}", f[0].0, f[1].1, f.len());
+            let mut m: HashMap<String, String> = HashMap::new();
+            m.insert(String::from("a"), String::from("long long"));
+            let k = String::from("a");
+            println!("{} {}", untyped(&m, &k), untyped(&m, &String::from("z")));
+        }"#,
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "f0 bb 2\nfalse true");
+}
+
+/// An array literal of struct values bound by a pattern (`for x in [a, b]`) has the struct as its
+/// element type, not the `long long` default.
+#[test]
+fn array_of_struct_values_iterates_run() {
+    let out = match run_src(
+        r#"#[derive(Clone)]
+        struct Val { n: i64 }
+        enum Op { Bin(Val, Val), Other }
+        fn total(op: &Op) -> i64 {
+            let mut s = 0;
+            match op {
+                Op::Bin(a, b) => {
+                    for x in [a, b] {
+                        s += x.n;
+                    }
+                }
+                Op::Other => {}
+            }
+            s
+        }
+        fn main() {
+            let op = Op::Bin(Val { n: 2 }, Val { n: 5 });
+            println!("{}", total(&op));
+        }"#,
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "7");
+}
+
+/// `None` given to an `Option<(&T, &T, bool)>` field is the instance the field declares (with the
+/// references), so the struct literal's component types agree with the field.
+#[test]
+fn none_in_declared_option_ref_tuple_field_run() {
+    let out = match run_src(
+        r#"#[derive(Clone)]
+        struct Expr { n: i64 }
+        struct Chain<'a> { seq: Option<&'a Expr>, setop: Option<(&'a Expr, &'a Expr, bool)> }
+        fn make(e: &Expr) -> Chain<'_> {
+            Chain { seq: Some(e), setop: None }
+        }
+        fn main() {
+            let e = Expr { n: 4 };
+            let c = make(&e);
+            let k = match c.setop { Some((a, b, _)) => a.n + b.n, None => -1 };
+            println!("{} {}", c.seq.map(|x| x.n).unwrap_or(0), k);
+        }"#,
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "4 -1");
+}
+
+/// `map.get(k).cloned()` of a `String` value is the `String` (the reference payload is read
+/// through), and a missing key gives `None`.
+#[test]
+fn map_get_cloned_string_value_run() {
+    let out = match run_src(
+        r#"use std::collections::HashMap;
+        fn look(m: &HashMap<String, String>, k: &String) -> Option<String> {
+            m.get(k).cloned()
+        }
+        fn main() {
+            let mut m: HashMap<String, String> = HashMap::new();
+            m.insert(String::from("a"), String::from("alpha"));
+            let a = String::from("a");
+            let z = String::from("z");
+            match look(&m, &a) { Some(s) => println!("{}", s), None => println!("none") }
+            match look(&m, &z) { Some(s) => println!("{}", s), None => println!("none") }
+        }"#,
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "alpha
+none");
+}
+
+/// `find` over tuple items followed by `and_then` with a pair pattern: the found item's components
+/// are the closure's two arguments, and a missing item is `None`.
+#[test]
+fn find_then_and_then_pair_pattern_run() {
+    let out = match run_src(
+        r#"fn dest(locals: &Vec<(String, Option<String>)>, place: &String) -> Option<String> {
+            locals
+                .iter()
+                .find(|(n, _)| n == place)
+                .and_then(|(_, t)| t.clone())
+        }
+        fn main() {
+            let v = vec![(String::from("a"), Some(String::from("alpha"))), (String::from("b"), None)];
+            let a = String::from("a");
+            let b = String::from("b");
+            let z = String::from("z");
+            match dest(&v, &a) { Some(s) => println!("{}", s), None => println!("none") }
+            match dest(&v, &b) { Some(s) => println!("{}", s), None => println!("none") }
+            match dest(&v, &z) { Some(s) => println!("{}", s), None => println!("none") }
+        }"#,
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "alpha\nnone\nnone");
+}
+
+/// `find` over tuple items followed by `map` with a pair pattern: the components are the closure's
+/// two arguments (the `lookup_field_type` shape).
+#[test]
+fn find_then_map_pair_pattern_run() {
+    let out = match run_src(
+        r#"fn field(fields: &Vec<(String, String)>, name: &str) -> Option<String> {
+            fields.iter().find(|(f, _)| f == name).map(|(_, t)| t.clone())
+        }
+        fn main() {
+            let v = vec![(String::from("a"), String::from("alpha")), (String::from("b"), String::from("beta"))];
+            match field(&v, "b") { Some(s) => println!("{}", s), None => println!("none") }
+            match field(&v, "q") { Some(s) => println!("{}", s), None => println!("none") }
+        }"#,
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "beta\nnone");
+}
+
+/// Two loops that bind the same name at different types (`&mut` over a tuple of strings, then over
+/// a tuple of options) each give the name its own type in the function.
+#[test]
+fn same_name_loop_bindings_of_different_types_run() {
+    let out = match run_src(
+        r#"fn main() {
+            let mut fields: Vec<(String, String)> = vec![(String::from("k"), String::from("v"))];
+            for (_, ty) in &mut fields {
+                *ty = format!("{}!", ty);
+            }
+            let mut locals: Vec<(String, Option<String>)> = vec![(String::from("a"), Some(String::from("x")))];
+            for (_, ty) in &mut locals {
+                if let Some(t) = ty {
+                    *t = format!("{}?", t);
+                }
+            }
+            for (_, ty) in &locals {
+                match ty {
+                    Some(t) => println!("{}", t),
+                    None => println!("none"),
+                }
+            }
+            println!("{}", fields[0].1);
+        }"#,
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "x?\nv!");
+}
+
+/// `as_str()` on a `String` that a `filter` closure borrows reads the text through the reference.
+#[test]
+fn as_str_of_filtered_string_run() {
+    let out = match run_src(
+        r#"fn pick(hint: Option<String>) -> bool {
+            hint.filter(|h| matches!(h.as_str(), "i8" | "i16")).is_some()
+        }
+        fn main() {
+            println!("{} {} {}", pick(Some(String::from("i8"))), pick(Some(String::from("u8"))), pick(None));
+        }"#,
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "true false false");
+}
+
+/// `sort_by` over `(String, String)` pairs compares the first components: a tuple parameter's
+/// fields are read at their component types.
+#[test]
+fn sort_by_tuple_component_run() {
+    let out = match run_src(
+        r#"fn main() {
+            let mut temps: Vec<(String, String)> = vec![
+                (String::from("b"), String::from("x")),
+                (String::from("a"), String::from("y")),
+                (String::from("c"), String::from("z")),
+            ];
+            temps.sort_by(|a, b| a.0.cmp(&b.0));
+            for t in &temps {
+                println!("{} {}", t.0, t.1);
+            }
+        }"#,
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "a y\nb x\nc z");
+}
+
+/// An array literal passed for a `&[T]` parameter is a slice of its elements, including a literal
+/// of variables (`&[e]`) and the empty literal (`&[]`).
+#[test]
+fn array_literal_as_slice_argument_run() {
+    let out = match run_src(
+        r#"struct Expr { n: i64 }
+        fn count(args: &[Expr], tag: &str) -> usize {
+            args.len() + tag.len()
+        }
+        fn main() {
+            let a = count(&[], "xy");
+            let e = Expr { n: 1 };
+            let b = count(&[e], "z");
+            println!("{} {}", a, b);
+        }"#,
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "2 2");
+}
+
+/// A `let` tuple pattern that binds a name another binding of the function gave a different type
+/// (`f` a struct reference, then a `String`) takes a name of its own.
+#[test]
+fn tuple_pattern_rebinds_name_at_other_type_run() {
+    let out = match run_src(
+        r#"struct Expr { n: i64 }
+        fn main() {
+            let e = Expr { n: 7 };
+            let f = &e;
+            println!("{}", f.n);
+            let pairs: Vec<(String, i64)> = vec![(String::from("zz"), 3)];
+            let (f, k) = pairs[0].clone();
+            println!("{} {}", f, k);
+        }"#,
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "7\nzz 3");
+}
+
+/// A `String` held by reference (a closure's parameter) is read through its pointer by the
+/// non-mutating string methods, and a mutating method on an owned string still works.
+#[test]
+fn string_reference_receiver_methods_run() {
+    let out = match run_src(
+        r#"fn main() {
+            let names: Vec<String> = vec![String::from("Option<i64>"), String::from("u8*"), String::from("Vec<x>")];
+            let opts = names.iter().filter(|h| h.starts_with("Option<")).count();
+            let ptrs = names.iter().any(|ty| ty.ends_with('*'));
+            let mut owned = String::from("ab");
+            owned.push_str("cd");
+            println!("{} {} {}", opts, ptrs, owned);
+        }"#,
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "1 true abcd");
+}
+
+/// A `for` over an array literal of string literals binds each item as a string, and an or-pattern
+/// binding written through (`*ty = ..`) is the referent of the matched enum's field.
+#[test]
+fn for_over_string_literal_array_and_or_pattern_write_run() {
+    let out = match run_src(
+        r#"enum R { A(String, i64), B(String, i64), C }
+        fn rename(t: &str) -> String { format!("{}!", t) }
+        fn go(r: &mut R) {
+            match r {
+                R::A(ty, n) | R::B(ty, n) => {
+                    *ty = rename(ty);
+                    *n += 1;
+                }
+                R::C => {}
+            }
+        }
+        fn main() {
+            let mut names: Vec<String> = Vec::new();
+            for b in ["x", "yz"] {
+                names.push(b.to_string());
+            }
+            let mut r = R::B(String::from("x"), 1);
+            go(&mut r);
+            if let R::B(s, n) = r { println!("{} {} {}", names.join(","), s, n); }
+        }"#,
+    ) {
+        Some(o) => o,
+        None => return,
+    };
+    assert_eq!(out, "x,yz x! 2");
+}
