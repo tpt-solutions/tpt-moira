@@ -879,25 +879,28 @@ fn vec_more_helpers_asm(elem: &str) -> String {
 
 /// A failed `panic!`/`unwrap`: exit with status 101, as the C runtime does.
 fn panic_asm() -> String {
+    let exit = c_sym("exit");
     if host_is_windows() {
-        "
+        format!(
+            "
 __moira_panic:
     push rbp
     mov rbp, rsp
     sub rsp, 32
     mov ecx, 101
-    call exit
+    call {exit}
 "
-        .to_string()
+        )
     } else {
-        "
+        format!(
+            "
 __moira_panic:
     push rbp
     mov rbp, rsp
     mov edi, 101
-    call exit
+    call {exit}
 "
-        .to_string()
+        )
     }
 }
 
@@ -911,6 +914,16 @@ fn host_is_windows() -> bool {
 #[cfg(not(windows))]
 fn host_is_windows() -> bool {
     false
+}
+
+/// The assembler name of a C-library or entry-point symbol. Mach-O (macOS) prefixes every C
+/// symbol with an underscore (`_printf`, `_main`), where ELF and COFF use the bare name.
+fn c_sym(name: &str) -> String {
+    if cfg!(target_os = "macos") {
+        format!("_{name}")
+    } else {
+        name.to_string()
+    }
 }
 
 /// The assembly of the `Map<k, v>` helpers the MIR calls. A map is a struct of `keys`, `vals`,
@@ -1163,11 +1176,13 @@ fn libc_wrapper_asm(sym: &str, nargs: usize) -> String {
             s.push_str("    mov rcx, rdi\n");
         }
         s.push_str(&format!(
-            "    xor eax, eax\n    call {sym}\n    mov rsp, rbp\n    pop rbp\n    ret\n"
+            "    xor eax, eax\n    call {}\n    mov rsp, rbp\n    pop rbp\n    ret\n",
+            c_sym(sym)
         ));
     } else {
         s.push_str(&format!(
-            "    xor eax, eax\n    call {sym}\n    pop rbp\n    ret\n"
+            "    xor eax, eax\n    call {}\n    pop rbp\n    ret\n",
+            c_sym(sym)
         ));
     }
     s
@@ -1337,10 +1352,11 @@ moira_str_push_str:
 /// The allocation wrapper the vector helpers call: `realloc(rdi, rsi)` with the platform's C
 /// calling convention (Windows x64 passes the arguments in rcx and rdx, with shadow space).
 fn realloc_wrapper_asm() -> String {
+    let realloc = c_sym("realloc");
     if host_is_windows() {
-        "\nmoira_rt_realloc:\n    push rbp\n    mov rbp, rsp\n    sub rsp, 32\n    mov rcx, rdi\n    mov rdx, rsi\n    call realloc\n    mov rsp, rbp\n    pop rbp\n    ret\n".to_string()
+        format!("\nmoira_rt_realloc:\n    push rbp\n    mov rbp, rsp\n    sub rsp, 32\n    mov rcx, rdi\n    mov rdx, rsi\n    call {realloc}\n    mov rsp, rbp\n    pop rbp\n    ret\n")
     } else {
-        "\nmoira_rt_realloc:\n    push rbp\n    mov rbp, rsp\n    call realloc\n    pop rbp\n    ret\n".to_string()
+        format!("\nmoira_rt_realloc:\n    push rbp\n    mov rbp, rsp\n    call {realloc}\n    pop rbp\n    ret\n")
     }
 }
 
@@ -1544,10 +1560,7 @@ pub fn emit_asm(prog: &SsaProgram) -> Result<String, String> {
         ".text
 ",
     );
-    out.push_str(
-        ".globl main
-",
-    );
+    out.push_str(&format!(".globl {}\n", c_sym("main")));
     for body in bodies {
         out.push_str(&body?);
     }
@@ -1583,12 +1596,13 @@ pub fn emit_asm(prog: &SsaProgram) -> Result<String, String> {
     // The C runtime calls `main`, so the entry wrapper is emitted on every host (the program's own
     // `main` is `__moira_main`, see `fn_label`). Without it, a host whose linker resolves `_main`
     // from this object finds no definition, and the link fails.
+    let main = c_sym("main");
     if host_is_windows() {
         // The C runtime calls `main` and expects rsi and rdi preserved (callee-saved on Windows);
         // the generated code uses them for arguments, so the wrapper saves them around `__moira_main`.
-        out.push_str("\nmain:\n    push rbp\n    mov rbp, rsp\n    push rsi\n    push rdi\n    call __moira_main\n    pop rdi\n    pop rsi\n    pop rbp\n    ret\n");
+        out.push_str(&format!("\n{main}:\n    push rbp\n    mov rbp, rsp\n    push rsi\n    push rdi\n    call __moira_main\n    pop rdi\n    pop rsi\n    pop rbp\n    ret\n"));
     } else {
-        out.push_str("\nmain:\n    push rbp\n    mov rbp, rsp\n    call __moira_main\n    pop rbp\n    ret\n");
+        out.push_str(&format!("\n{main}:\n    push rbp\n    mov rbp, rsp\n    call __moira_main\n    pop rbp\n    ret\n"));
     }
     out.push_str(&print_helper("print_i32", "%lld\\n", ".Lfmt"));
     out.push_str(&print_helper("print_i64", "%lld\\n", ".Lfmt_i64"));
@@ -1610,18 +1624,19 @@ fn fn_label(name: &str) -> String {
 
 /// A runtime helper that passes its one argument to libc `printf` with format `fmt`.
 fn print_helper(name: &str, fmt: &str, label: &str) -> String {
+    let printf = c_sym("printf");
     if host_is_windows() {
         // Windows x64: printf takes its format in rcx and the value in rdx, and the caller
         // reserves 32 bytes of shadow space. The frame keeps rsp 16-byte aligned for the call.
         return format!(
             "\n{name}:\n    push rbp\n    mov rbp, rsp\n    sub rsp, 32\n    mov rdx, rdi\n    \
-             lea rcx, [rip + {label}]\n    xor eax, eax\n    call printf\n    add rsp, 32\n    \
+             lea rcx, [rip + {label}]\n    xor eax, eax\n    call {printf}\n    add rsp, 32\n    \
              pop rbp\n    ret\n{label}:\n    .asciz \"{fmt}\"\n"
         );
     }
     format!(
         "\n{name}:\n    push rbp\n    mov rbp, rsp\n    mov rsi, rdi\n    lea rdi, [rip + {label}]\n    \
-         xor eax, eax\n    call printf\n    pop rbp\n    ret\n{label}:\n    .asciz \"{fmt}\"\n"
+         xor eax, eax\n    call {printf}\n    pop rbp\n    ret\n{label}:\n    .asciz \"{fmt}\"\n"
     )
 }
 
