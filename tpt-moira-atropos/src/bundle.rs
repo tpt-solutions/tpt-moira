@@ -118,8 +118,8 @@ fn rename_type_str(ty: &str, f: &dyn Fn(&str, bool) -> String) -> String {
     let mut out = String::with_capacity(ty.len());
     let mut ident = String::new();
     let flush = |ident: &mut String, out: &mut String| {
-        if !ident.is_empty() {
-            out.push_str(&rename_ident(ident, f));
+        if !ident.as_str().is_empty() {
+            out.push_str(&rename_ident(ident.as_str(), f));
             ident.clear();
         }
     };
@@ -300,7 +300,11 @@ pub fn lower_bundle(
             names.push(f.name.clone());
         }
         for s in &unit.structs {
-            names.push(s.name.clone());
+            // A generic instance (`Spanned__str`) is the same struct in every unit that uses it: it keeps
+            // its name (defined once), where a user struct belongs to its unit.
+            if !s.name.contains("__") {
+                names.push(s.name.clone());
+            }
         }
         for n in names {
             if !is_shared(&n) {

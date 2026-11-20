@@ -468,7 +468,12 @@ pub fn inst_c_name(ty: &str) -> String {
 
 /// The C typedef name of the hash map `Map<k, v>`.
 pub fn map_c_name(k: &str, v: &str) -> String {
-    format!("moira_map_{}_{}", mangle(k), mangle(v))
+    // A set is a map to `bool`: as a map's value it is that map (`Map<K,bool>`), however spelled.
+    let v = match v.strip_prefix("Set<").and_then(|r| r.strip_suffix('>')) {
+        Some(inner) => format!("Map<{inner},bool>"),
+        None => v.to_string(),
+    };
+    format!("moira_map_{}_{}", mangle(k), mangle(&v))
 }
 
 /// The name of a generated hash-map helper (`new`, `insert`, `get`, `find`,

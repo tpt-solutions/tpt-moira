@@ -156,10 +156,12 @@ fn compute_slots(
             .find(|(n, _)| n == p)
             .and_then(|(_, t)| t.clone());
         if let Some(ty) = ty {
-            if !ty.ends_with('*') && structs.contains_key(&ty) {
-                let k = structs[&ty].len();
-                param_blocks.push((p.clone(), extra, k));
-                extra += k;
+            if !ty.ends_with('*') {
+                if let Some(fields) = structs.get(&ty) {
+                    let k = fields.len();
+                    param_blocks.push((p.clone(), extra, k));
+                    extra += k;
+                }
             }
         }
     }
@@ -257,7 +259,7 @@ impl<'a> Emitter<'a> {
             Val::Float(_) => "    ud2\n".to_string(),
             Val::Unit => "    xor rax, rax\n    push rax\n".to_string(),
             Val::Name(n) => {
-                let slot = self.slots.named[n];
+                let slot = self.slots.named.get(n).copied().expect("a named slot");
                 format!("    push QWORD PTR {}\n", self.off(slot))
             }
             Val::Value(i) => {
@@ -526,7 +528,7 @@ impl<'a> Emitter<'a> {
             Op::Ref(v) if self.struct_of(v).is_some() => Ok(self.gen_val(v)),
             // A reference to a value that lives in a frame slot is the slot's address.
             Op::Ref(Val::Name(n)) if self.slots.named.contains_key(n) => {
-                let slot = self.slots.named[n];
+                let slot = self.slots.named.get(n).copied().expect("a named slot");
                 Ok(format!(
                     "    lea rax, [rbp - {}]\n    push rax\n",
                     (slot + 1) * 8
