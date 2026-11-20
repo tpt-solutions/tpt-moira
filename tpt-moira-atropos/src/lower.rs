@@ -15602,9 +15602,10 @@ impl Lower {
                 Ok(mir::Operand::var(t))
             }
             ExprKind::Ref(e, mutable) => {
-                // A reference to a string field (`&x.name`) is the string itself: strings are `char*`.
+                // A shared reference to a string field (`&x.name`) is the string itself: strings are
+                // `char*`. A `&mut` one needs the field's address, so a callee's writes reach the field.
                 if let ExprKind::Field(..) = &e.kind {
-                    if self.hint_of_expr(e).as_deref() == Some("str") {
+                    if !*mutable && self.hint_of_expr(e).as_deref() == Some("str") {
                         return self.lower_expr(e);
                     }
                 }
@@ -15651,8 +15652,9 @@ impl Lower {
                                 // is named by its checker spelling, which the field table lacks).
                                 let v = self.lower_expr(e)?;
                                 let fty = self.temp_type_of(&name_of(&v));
-                                // A string is a `char*` value here, so its reference stays the value.
-                                if !fty.is_empty() && fty != "char*" && fty != "str" {
+                                // A string is a `char*` value here, so its shared reference stays the
+                                // value; a `&mut` string borrows the field's slot.
+                                if !fty.is_empty() && (*mutable || (fty != "char*" && fty != "str")) {
                                     let t = self.fresh_temp(format!("{fty}*"));
                                     self.emit(
                                         t.clone(),
