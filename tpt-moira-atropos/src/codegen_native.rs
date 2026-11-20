@@ -1649,8 +1649,14 @@ pub fn compile_to_native(prog: &SsaProgram, out_path: &Path) -> Result<(), Strin
     let asm_path = dir.join(format!("{stem}.moira_native.s"));
     std::fs::write(&asm_path, asm).map_err(|e| format!("write asm: {e}"))?;
 
-    let status = Command::new(&cc)
-        .arg(&asm_path)
+    let mut cmd = Command::new(&cc);
+    cmd.arg(&asm_path);
+    if cfg!(target_os = "macos") {
+        // The emitted assembly is x86-64. Apple Silicon hosts assemble arm64 by default, which
+        // rejects x86 mnemonics, so the x86-64 target is requested explicitly (Rosetta runs it).
+        cmd.args(["-arch", "x86_64"]);
+    }
+    let status = cmd
         .arg("-o")
         .arg(out_path)
         .status()
