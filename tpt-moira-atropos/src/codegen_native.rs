@@ -1580,10 +1580,15 @@ pub fn emit_asm(prog: &SsaProgram) -> Result<String, String> {
 
     // The runtime helpers are called with the stack aligned as the ABI requires, and each sets up
     // its own frame so that its `printf` call is aligned too.
+    // The C runtime calls `main`, so the entry wrapper is emitted on every host (the program's own
+    // `main` is `__moira_main`, see `fn_label`). Without it, a host whose linker resolves `_main`
+    // from this object finds no definition, and the link fails.
     if host_is_windows() {
         // The C runtime calls `main` and expects rsi and rdi preserved (callee-saved on Windows);
         // the generated code uses them for arguments, so the wrapper saves them around `__moira_main`.
         out.push_str("\nmain:\n    push rbp\n    mov rbp, rsp\n    push rsi\n    push rdi\n    call __moira_main\n    pop rdi\n    pop rsi\n    pop rbp\n    ret\n");
+    } else {
+        out.push_str("\nmain:\n    push rbp\n    mov rbp, rsp\n    call __moira_main\n    pop rbp\n    ret\n");
     }
     out.push_str(&print_helper("print_i32", "%lld\\n", ".Lfmt"));
     out.push_str(&print_helper("print_i64", "%lld\\n", ".Lfmt_i64"));
@@ -1593,10 +1598,10 @@ pub fn emit_asm(prog: &SsaProgram) -> Result<String, String> {
     Ok(out)
 }
 
-/// The assembly label of a Moira function. On Windows the program's `main` is reached through a
-/// wrapper (see the runtime), so the function itself gets a distinct label.
+/// The assembly label of a Moira function. The program's `main` is reached through the C entry
+/// wrapper (see `emit_asm`), so the function itself gets a distinct label on every host.
 fn fn_label(name: &str) -> String {
-    if host_is_windows() && name == "main" {
+    if name == "main" {
         "__moira_main".to_string()
     } else {
         name.to_string()
