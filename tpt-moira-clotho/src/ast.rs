@@ -331,7 +331,6 @@ impl Pat {
             _ => None,
         }
     }
-
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

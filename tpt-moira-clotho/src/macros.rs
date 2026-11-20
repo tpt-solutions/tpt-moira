@@ -285,7 +285,12 @@ fn expand_expr(e: &Expr, table: &MacroTable) -> Expr {
         ExprKind::Match(scrut, arms) => ExprKind::Match(
             Box::new(expand_expr(scrut, table)),
             arms.iter()
-                .map(|(p, b)| (guard_mapped(p, &|g: &Expr| expand_expr(g, table)), expand_expr(b, table)))
+                .map(|(p, b)| {
+                    (
+                        guard_mapped(p, &|g: &Expr| expand_expr(g, table)),
+                        expand_expr(b, table),
+                    )
+                })
                 .collect(),
         ),
         ExprKind::Return(opt) => {
@@ -367,7 +372,12 @@ fn subst_expr(expr: &Expr, subst: &HashMap<String, Expr>) -> Expr {
         ExprKind::Match(scrut, arms) => ExprKind::Match(
             Box::new(subst_expr(scrut, subst)),
             arms.iter()
-                .map(|(p, b)| (guard_mapped(p, &|g: &Expr| subst_expr(g, subst)), subst_expr(b, subst)))
+                .map(|(p, b)| {
+                    (
+                        guard_mapped(p, &|g: &Expr| subst_expr(g, subst)),
+                        subst_expr(b, subst),
+                    )
+                })
                 .collect(),
         ),
         ExprKind::Return(opt) => {

@@ -15,7 +15,9 @@ use crate::token::{Span, Token, TokenKind};
 /// lowering binds the placeholder to that argument by name.
 fn add_implicit_format_args(args: &mut Vec<Expr>) {
     let Some(first) = args.first() else { return };
-    let ExprKind::Lit(Lit::Str(fmt)) = &first.kind else { return };
+    let ExprKind::Lit(Lit::Str(fmt)) = &first.kind else {
+        return;
+    };
     let fspan = first.span;
     let chars: Vec<char> = fmt.chars().collect();
     let mut names: Vec<String> = Vec::new();
@@ -52,9 +54,17 @@ fn add_implicit_format_args(args: &mut Vec<Expr>) {
             continue;
         }
         let idx = args.len();
-        let span = Span::new((1usize << 42) + fspan.start * 64 + idx, (1usize << 42) + fspan.start * 64 + idx + 1);
+        let span = Span::new(
+            (1usize << 42) + fspan.start * 64 + idx,
+            (1usize << 42) + fspan.start * 64 + idx + 1,
+        );
         let path = |span: Span| Expr {
-            kind: ExprKind::Path(Path { segments: vec![Spanned { node: name.clone(), span }] }),
+            kind: ExprKind::Path(Path {
+                segments: vec![Spanned {
+                    node: name.clone(),
+                    span,
+                }],
+            }),
             span,
         };
         args.push(Expr {
@@ -1709,9 +1719,16 @@ impl Parser {
                             .next()
                             .is_some_and(|c| c.is_ascii_uppercase());
                     let name = if qualified {
-                        format!("{}::{}", path.segments[n - 2].node, path.segments[n - 1].node)
+                        format!(
+                            "{}::{}",
+                            path.segments[n - 2].node,
+                            path.segments[n - 1].node
+                        )
                     } else {
-                        path.segments.last().map(|s| s.node.clone()).unwrap_or_default()
+                        path.segments
+                            .last()
+                            .map(|s| s.node.clone())
+                            .unwrap_or_default()
                     };
                     Ok(Pat::Struct(name, fields))
                 } else if path.segments.len() > 1 {

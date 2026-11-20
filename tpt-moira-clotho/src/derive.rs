@@ -293,7 +293,11 @@ fn derive_enum(trait_name: &str, e: &EnumDef) -> Option<String> {
             // and test the two ordinals for equality.
             let mut arms: Vec<String> = Vec::new();
             for (i, v) in variants.iter().enumerate() {
-                arms.push(format!("{pat} => {i},", pat = variant_wildcard_pattern(v), i = i));
+                arms.push(format!(
+                    "{pat} => {i},",
+                    pat = variant_wildcard_pattern(v),
+                    i = i
+                ));
             }
             let arms = arms.join(" ");
             format!(
