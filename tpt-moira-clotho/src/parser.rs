@@ -1699,11 +1699,20 @@ impl Parser {
                             break;
                         }
                     }
-                    let name = path
-                        .segments
-                        .last()
-                        .map(|s| s.node.clone())
-                        .unwrap_or_default();
+                    // A struct-like variant keeps its enum (`TokenKind::Float`): the name of a
+                    // type is its last segment, but an enum's name before a variant is kept.
+                    let n = path.segments.len();
+                    let qualified = n >= 2
+                        && path.segments[n - 2]
+                            .node
+                            .chars()
+                            .next()
+                            .is_some_and(|c| c.is_ascii_uppercase());
+                    let name = if qualified {
+                        format!("{}::{}", path.segments[n - 2].node, path.segments[n - 1].node)
+                    } else {
+                        path.segments.last().map(|s| s.node.clone()).unwrap_or_default()
+                    };
                     Ok(Pat::Struct(name, fields))
                 } else if path.segments.len() > 1 {
                     // A qualified unit variant, e.g. `Enum::Variant` (no payload): a path

@@ -1028,7 +1028,8 @@ fn match_rep(
 
 fn render(tmpl: &[TmplEl], binds: &Bindings) -> Vec<Token> {
     let mut out = Vec::new();
-    render_el(tmpl, binds, &mut None, &mut out);
+    let mut index: Option<usize> = None;
+    render_el(tmpl, binds, &mut index, &mut out);
     out
 }
 

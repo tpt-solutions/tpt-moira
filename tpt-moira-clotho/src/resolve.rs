@@ -289,7 +289,9 @@ impl Resolver {
                 self.ty(u, &mut s.ty);
                 self.expr(u, &mut s.value);
             }
-            ItemKind::Use(_) | ItemKind::TypeAlias(_) => {}
+            // An alias names the colliding types it stands for, so its body is renamed too.
+            ItemKind::TypeAlias(t) => self.ty(u, &mut t.ty),
+            ItemKind::Use(_) => {}
             ItemKind::Impl(imp) => {
                 self.ty(u, &mut imp.for_ty);
                 for m in &mut imp.items {
